@@ -229,6 +229,8 @@ function App() {
   const [positions, setPositions] = useState([]);
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
+  const [paper, setPaper] = useState(null);
+  const [paperSize, setPaperSize] = useState(50);
   const [liveW, setLiveW] = useState("");
   const [liveK, setLiveK] = useState("");
   const [activeCoins, setActiveCoins] = useState(ALL_COINS);
@@ -251,14 +253,16 @@ function App() {
   const loadData = useCallback(async () => {
     if (!token) return;
     try {
-      const [cfg, sigs, prc, st, pos] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, pap] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
+        apiCall("/api/paper/portfolio","GET",null,token),
       ]);
       setConfig(cfg);
+      setPaper(pap);
       setSignals(sigs);
       setPrices(prc);
       setStats(st);
@@ -318,6 +322,7 @@ function App() {
     {id:"marches",label:`🎯 Marchés (${activeCoins.length}/${ALL_COINS.length})`},
     {id:"parametres",label:"⚙️ Paramètres"},
     {id:"logs",label:"📋 Logs"},
+    {id:"paper",label:`🎮 Paper Trading`},
     {id:"rapport",label:"📄 Rapport"},
   ];
 
@@ -573,6 +578,140 @@ function App() {
             ))}
             <div ref={logEnd}/>
           </div>
+        </div>
+      )}
+
+      {/* PAPER TRADING */}
+      {tab==="paper" && (
+        <div style={{padding:16,maxWidth:900}}>
+
+          {/* STATS PORTEFEUILLE */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
+            {[
+              {l:"SOLDE VIRTUEL",v:`${paper?.balance?.toFixed(2)||"1000.00"} USDC`,c:"#60a5fa"},
+              {l:"PNL OUVERT",v:`${paper?.total_pnl>=0?"+":""}${paper?.total_pnl?.toFixed(2)||"0.00"} USDC`,c:paper?.total_pnl>=0?"#34d399":"#f87171"},
+              {l:"PERFORMANCE",v:`${paper?.total_pnl_pct>=0?"+":""}${paper?.total_pnl_pct?.toFixed(2)||"0.00"}%`,c:paper?.total_pnl_pct>=0?"#34d399":"#f87171"},
+              {l:"TRADES OUVERTS",v:paper?.open_trades?.length||0,c:"#c084fc"},
+            ].map((s,i)=>(
+              <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"12px",textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:700,color:s.c}}>{s.v}</div>
+                <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* OUVRIR UN TRADE */}
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>🎯 Exécuter un signal en paper trading</div>
+            <div style={{fontSize:11,color:"#475569",marginBottom:12}}>
+              Sélectionnez un signal dans l'onglet Signaux et entrez son ID ci-dessous pour simuler le trade avec des données réelles.
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+              <div style={{flex:1,minWidth:120}}>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4}}>ID DU SIGNAL</div>
+                <input id="paperSigId" placeholder="ex: 42"
+                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+              </div>
+              <div style={{flex:1,minWidth:120}}>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4}}>TAILLE (USDC)</div>
+                <input value={paperSize} onChange={e=>setPaperSize(Number(e.target.value))} type="number" min="10" max="500"
+                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+              </div>
+              <button onClick={async()=>{
+                const sigId = document.getElementById("paperSigId").value;
+                if(!sigId){alert("Entrez un ID de signal");return;}
+                try{
+                  const r = await apiCall("/api/paper/trade","POST",{signal_id:parseInt(sigId),size_usdc:paperSize},token);
+                  alert(r.message); loadData();
+                }catch(e){alert("Erreur: "+e.message);}
+              }} style={{background:"linear-gradient(135deg,#34d399,#059669)",border:"none",borderRadius:6,padding:"8px 16px",color:"#fff",fontWeight:700,fontSize:12,whiteSpace:"nowrap"}}>
+                ▶ Exécuter
+              </button>
+              <button onClick={async()=>{
+                if(!confirm("Réinitialiser à 1000 USDC ?"))return;
+                await apiCall("/api/paper/reset","POST",null,token);
+                loadData();
+              }} style={{background:"transparent",border:"1px solid #334155",borderRadius:6,padding:"8px 12px",color:"#64748b",fontSize:11}}>
+                Reset
+              </button>
+            </div>
+            <div style={{marginTop:10,fontSize:10,color:"#334155"}}>
+              💡 Trouvez l'ID dans l'onglet Signaux — chaque signal a un numéro unique
+            </div>
+          </div>
+
+          {/* TRADES OUVERTS */}
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📈 Trades ouverts</div>
+            {!paper?.open_trades?.length
+              ? <div style={{color:"#334155",fontSize:11,textAlign:"center",padding:"20px 0"}}>Aucun trade ouvert — exécutez un signal !</div>
+              : paper.open_trades.map(trade=>(
+                <div key={trade.id} style={{background:"#0a0e1a",borderRadius:8,padding:12,marginBottom:8,border:`1px solid ${trade.pnl>=0?"#14532d":"#450a0a"}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{background:trade.action==="LONG"?"#052e16":"#2d0a0a",color:trade.action==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700}}>{trade.action}</span>
+                      <span style={{color:"#f1f5f9",fontWeight:700}}>{trade.coin}/USDC</span>
+                      <span style={{color:"#64748b",fontSize:10}}>x{trade.leverage}</span>
+                    </div>
+                    <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
+                        {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                      </span>
+                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontSize:11}}>
+                        ({trade.pnl_pct>=0?"+":""}{trade.pnl_pct?.toFixed(2)}%)
+                      </span>
+                      <button onClick={async()=>{
+                        await apiCall("/api/paper/close","POST",{trade_id:trade.id,reason:"MANUEL"},token);
+                        loadData();
+                      }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:10,fontWeight:700}}>
+                        Fermer
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+                    {[
+                      {l:"ENTRÉE",v:`$${trade.entry_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                      {l:"ACTUEL",v:`$${trade.current_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                      {l:"TAILLE",v:`${trade.size_usdc} USDC`},
+                      {l:"OUVERT",v:new Date(trade.opened_at).toLocaleTimeString("fr-FR")},
+                    ].map((x,i)=>(
+                      <div key={i} style={{background:"#0f1629",borderRadius:5,padding:"5px 8px"}}>
+                        <div style={{fontSize:8,color:"#475569"}}>{x.l}</div>
+                        <div style={{color:"#94a3b8",fontSize:11,fontWeight:500}}>{x.v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",gap:8,marginTop:8,fontSize:10}}>
+                    <span style={{color:"#f87171"}}>SL: ${trade.stop_loss?.toFixed(4)}</span>
+                    <span style={{color:"#34d399"}}>TP1: ${trade.take_profit1?.toFixed(4)}</span>
+                    <span style={{color:"#34d399"}}>TP2: ${trade.take_profit2?.toFixed(4)}</span>
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+
+          {/* HISTORIQUE */}
+          {paper?.closed_trades?.length > 0 && (
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (20 derniers)</div>
+              {paper.closed_trades.map(trade=>(
+                <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
+                    <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
+                    <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                  </div>
+                  <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                    <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
+                      {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                    </span>
+                    <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
