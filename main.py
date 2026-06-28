@@ -74,6 +74,9 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             active_coins TEXT DEFAULT '["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"]',
             is_running INTEGER DEFAULT 0,
+            trading_mode TEXT DEFAULT 'paper',
+            max_position_usdc REAL DEFAULT 50.0,
+            max_open_trades INTEGER DEFAULT 5,
             last_scan TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
@@ -382,6 +385,27 @@ async def scan_markets(user_id: int):
                 json.dumps(ai.get("keySignals", [])),
                 price, tech["rsi"], tech["atr"], tech["vwap"]
             ))
+            sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            # Auto-execute en mode paper
+            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            if cfg and cfg["trading_mode"] == "paper":
+                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
+                portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                max_trades = cfg["max_open_trades"] or 5
+                size = cfg["max_position_usdc"] or 50.0
+                if portfolio and open_count < max_trades and portfolio["balance"] >= size:
+                    entry_price = ai.get("entry") or price
+                    conn.execute("""
+                        INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
+                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """, (user_id, coin, ai["action"], entry_price, price, size,
+                           ai.get("leverage") or 1, ai.get("stopLoss"),
+                           ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id))
+                    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
+                    print(f"PAPER TRADE AUTO: {ai['action']} {coin} @  | Taille: {size} USDC")
+
             conn.commit()
             conn.close()
 
@@ -464,6 +488,9 @@ class UpdateConfigRequest(BaseModel):
     wallet: Optional[str] = None
     api_key: Optional[str] = None
     active_coins: Optional[List[str]] = None
+    trading_mode: Optional[str] = None
+    max_position_usdc: Optional[float] = None
+    max_open_trades: Optional[int] = None
 
 # ── ROUTES AUTH ──────────────────────────────────────────────
 @app.post("/api/register")
@@ -518,6 +545,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "has_api_key": bool(user["api_key"]),
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
+        "trading_mode": config["trading_mode"] or "paper",
+        "max_position_usdc": config["max_position_usdc"] or 50.0,
+        "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
     }
 
@@ -531,6 +561,15 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
     if req.active_coins is not None:
         conn.execute("UPDATE bot_config SET active_coins=? WHERE user_id=?",
                     (json.dumps(req.active_coins), user_id))
+    if req.trading_mode is not None:
+        conn.execute("UPDATE bot_config SET trading_mode=? WHERE user_id=?",
+                    (req.trading_mode, user_id))
+    if req.max_position_usdc is not None:
+        conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
+                    (req.max_position_usdc, user_id))
+    if req.max_open_trades is not None:
+        conn.execute("UPDATE bot_config SET max_open_trades=? WHERE user_id=?",
+                    (req.max_open_trades, user_id))
     conn.commit()
     conn.close()
     return {"message": "Configuration mise à jour"}
