@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>HyperBot AI</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0e1a; color: #e2e8f0; font-family: 'IBM Plex Mono','Courier New',monospace; font-size: 13px; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #1e2d4a; border-radius: 3px; }
+input { outline: none; }
+button { cursor: pointer; font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── API CLIENT ───────────────────────────────────────────────
+const API = window.location.origin;
+
+async function apiCall(path, method="GET", body=null, token=null) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const r = await fetch(`${API}${path}`, {
+    method, headers, body: body ? JSON.stringify(body) : null
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || "Erreur serveur");
+  return data;
+}
+
+// ── CONSTANTES ───────────────────────────────────────────────
+const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"];
+const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
+const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
+
+// ── LOGIN PAGE ───────────────────────────────────────────────
+function LoginPage({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    if (!email || !password) { setError("Remplissez tous les champs"); return; }
+    setLoading(true); setError("");
+    try {
+      const path = mode === "login" ? "/api/login" : "/api/register";
+      const data = await apiCall(path, "POST", { email, password });
+      if (mode === "register") { setMode("login"); setError("Compte créé ! Connectez-vous."); setLoading(false); return; }
+      localStorage.setItem("hb_token", data.token);
+      localStorage.setItem("hb_email", data.email);
+      onLogin(data.token, data.email);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0e1a"}}>
+      <div style={{width:380,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:12,padding:32}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{width:48,height:48,borderRadius:12,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,margin:"0 auto 12px"}}>⚡</div>
+          <div style={{fontSize:20,fontWeight:700,color:"#f1f5f9"}}>HyperBot AI</div>
+          <div style={{fontSize:11,color:"#64748b",marginTop:4}}>Trading autonome · Hyperliquid</div>
+        </div>
+
+        <div style={{display:"flex",gap:4,marginBottom:20,background:"#0a0e1a",borderRadius:8,padding:4}}>
+          {["login","register"].map(m=>(
+            <button key={m} onClick={()=>{setMode(m);setError("");}}
+              style={{flex:1,padding:"8px",borderRadius:6,border:"none",background:mode===m?"#1e2d4a":"transparent",color:mode===m?"#60a5fa":"#64748b",fontSize:11,fontWeight:mode===m?700:400}}>
+              {m==="login"?"Connexion":"Créer un compte"}
+            </button>
+          ))}
+        </div>
+
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>EMAIL</div>
+          <input value={email} onChange={e=>setEmail(e.target.value)} type="email" placeholder="votre@email.com"
+            style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
+        </div>
+
+        <div style={{marginBottom:20}}>
+          <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>MOT DE PASSE</div>
+          <input value={password} onChange={e=>setPassword(e.target.value)} type="password" placeholder="••••••••"
+            onKeyDown={e=>e.key==="Enter"&&submit()}
+            style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
+        </div>
+
+        {error && <div style={{background:error.includes("créé")?"#052e16":"#2d0a0a",border:`1px solid ${error.includes("créé")?"#34d399":"#f87171"}`,borderRadius:6,padding:"8px 12px",marginBottom:12,fontSize:11,color:error.includes("créé")?"#34d399":"#f87171"}}>{error}</div>}
+
+        <button onClick={submit} disabled={loading}
+          style={{width:"100%",background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:8,padding:"12px",color:"#fff",fontWeight:700,fontSize:13}}>
+          {loading?"Chargement...":(mode==="login"?"Se connecter":"Créer le compte")}
+        </button>
+
+        <div style={{textAlign:"center",marginTop:16,fontSize:10,color:"#334155"}}>
+          Vos données sont chiffrées et stockées en sécurité
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ─────────────────────────────────────────────────
+function App() {
+  const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
+  const [email, setEmail] = useState(()=>localStorage.getItem("hb_email")||"");
+  const [config, setConfig] = useState(null);
+  const [signals, setSignals] = useState([]);
+  const [prices, setPrices] = useState({});
+  const [stats, setStats] = useState({});
+  const [positions, setPositions] = useState([]);
+  const [tab, setTab] = useState("dashboard");
+  const [logs, setLogs] = useState([]);
+  const [liveW, setLiveW] = useState("");
+  const [liveK, setLiveK] = useState("");
+  const [activeCoins, setActiveCoins] = useState(ALL_COINS);
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const logEnd = useRef(null);
+  const pollRef = useRef(null);
+
+  const addLog = useCallback((msg, type="info") => {
+    setLogs(p=>[...p.slice(-199),{msg,type,time:new Date().toLocaleTimeString("fr-FR")}]);
+  },[]);
+
+  const logout = () => {
+    apiCall("/api/logout","POST",null,token).catch(()=>{});
+    localStorage.removeItem("hb_token");
+    localStorage.removeItem("hb_email");
+    setToken(""); setEmail("");
+  };
+
+  const loadData = useCallback(async () => {
+    if (!token) return;
+    try {
+      const [cfg, sigs, prc, st, pos] = await Promise.all([
+        apiCall("/api/config","GET",null,token),
+        apiCall("/api/signals?limit=50","GET",null,token),
+        apiCall("/api/prices","GET",null,token),
+        apiCall("/api/stats","GET",null,token),
+        apiCall("/api/positions","GET",null,token),
+      ]);
+      setConfig(cfg);
+      setSignals(sigs);
+      setPrices(prc);
+      setStats(st);
+      setPositions(pos);
+      setLiveW(cfg.wallet||"");
+      setActiveCoins(cfg.active_coins||ALL_COINS);
+    } catch(e) {
+      if (e.message.includes("Session")) { logout(); }
+    }
+  },[token]);
+
+  useEffect(() => {
+    if (token) {
+      loadData();
+      pollRef.current = setInterval(loadData, 15000);
+    }
+    return () => clearInterval(pollRef.current);
+  }, [token, loadData]);
+
+  useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
+
+  const startBot = async () => {
+    setLoading(true);
+    try {
+      await apiCall("/api/bot/start","POST",null,token);
+      addLog("🚀 Bot démarré — Scan toutes les 60s", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+    setLoading(false);
+  };
+
+  const stopBot = async () => {
+    try {
+      await apiCall("/api/bot/stop","POST",null,token);
+      addLog("⏹ Bot arrêté", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+  };
+
+  const saveConfig = async () => {
+    try {
+      await apiCall("/api/config","PUT",{ wallet:liveW, api_key:liveK||undefined, active_coins:activeCoins },token);
+      setSaved(true); setTimeout(()=>setSaved(false),2500);
+      addLog("✅ Paramètres sauvegardés", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+  };
+
+  if (!token) return <LoginPage onLogin={(t,e)=>{setToken(t);setEmail(e);}}/>;
+  if (!config) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:"#60a5fa"}}>Chargement...</div>;
+
+  const isRunning = config.is_running;
+  const TABS = [
+    {id:"dashboard",label:"📊 Tableau de bord"},
+    {id:"signaux",label:`⚡ Signaux (${stats.total||0})`},
+    {id:"positions",label:`📈 Positions (${positions.length})`},
+    {id:"marches",label:`🎯 Marchés (${activeCoins.length}/${ALL_COINS.length})`},
+    {id:"parametres",label:"⚙️ Paramètres"},
+    {id:"logs",label:"📋 Logs"},
+  ];
+
+  return (
+    <div style={{background:"#0a0e1a",minHeight:"100vh"}}>
+      {/* HEADER */}
+      <div style={{background:"linear-gradient(135deg,#0f1629,#1a1f35)",borderBottom:"1px solid #1e2d4a",padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>⚡</div>
+          <div>
+            <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>HyperBot AI</div>
+            <div style={{fontSize:10,color:"#64748b"}}>{email}</div>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:isRunning?"#34d399":"#475569",boxShadow:isRunning?"0 0 8px #34d399":"none"}}/>
+            <span style={{fontSize:11,color:isRunning?"#34d399":"#64748b"}}>{isRunning?"ACTIF":"INACTIF"}</span>
+          </div>
+          {isRunning
+            ? <button onClick={stopBot} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:"#f87171",fontSize:11,fontWeight:700}}>⏹ ARRÊTER</button>
+            : <button onClick={startBot} disabled={loading} style={{background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:6,padding:"5px 14px",color:"#fff",fontSize:11,fontWeight:700}}>{loading?"...":"▶ DÉMARRER"}</button>
+          }
+          <button onClick={logout} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 10px",color:"#64748b",fontSize:10}}>Déconnexion</button>
+        </div>
+      </div>
+
+      {/* STATS */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:"#1e2d4a"}}>
+        {[{l:"SIGNAUX",v:stats.total||0,c:"#60a5fa"},{l:"LONG",v:stats.longs||0,c:"#34d399"},{l:"SHORT",v:stats.shorts||0,c:"#f87171"},{l:"CONFIANCE",v:stats.avg_confidence?`${stats.avg_confidence}%`:"--",c:confColor(stats.avg_confidence||0)}].map((s,i)=>(
+          <div key={i} style={{background:"#0a0e1a",padding:"10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:700,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* TABS */}
+      <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* DASHBOARD */}
+      {tab==="dashboard" && (
+        <div style={{padding:16}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:14}}>
+            <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>PRIX EN TEMPS RÉEL</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
+              {ALL_COINS.filter(c=>prices[c]).map(coin=>(
+                <div key={coin} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:5,padding:"5px 10px",display:"flex",gap:7,alignItems:"center"}}>
+                  <span style={{color:"#64748b",fontSize:10}}>{coin}</span>
+                  <span style={{color:"#e2e8f0",fontWeight:700,fontSize:12}}>${prices[coin]?.toLocaleString("en-US",{maximumFractionDigits:2})}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>DERNIERS SIGNAUX</div>
+              {signals.filter(s=>s.action!=="WAIT").slice(0,5).length===0
+                ? <div style={{color:"#334155",fontSize:11,padding:"16px 0",textAlign:"center"}}>{isRunning?"Analyse en cours...":"Démarrez le bot"}</div>
+                : signals.filter(s=>s.action!=="WAIT").slice(0,5).map(sig=>(
+                  <div key={sig.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                      <span style={{background:sig.action==="LONG"?"#052e16":"#2d0a0a",color:sig.action==="LONG"?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{sig.action}</span>
+                      <span style={{color:"#e2e8f0",fontSize:12}}>{sig.coin}</span>
+                    </div>
+                    <span style={{color:confColor(sig.confidence),fontWeight:700}}>{sig.confidence}%</span>
+                  </div>
+                ))
+              }
+            </div>
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>STATUT SERVEUR</div>
+              {[
+                {l:"Mode",v:"Serveur 24h/24"},
+                {l:"Bot",v:isRunning?"✅ Actif":"⏹ Arrêté"},
+                {l:"Dernier scan",v:config.last_scan?new Date(config.last_scan).toLocaleTimeString("fr-FR"):"Jamais"},
+                {l:"Marchés actifs",v:`${activeCoins.length}/${ALL_COINS.length}`},
+                {l:"Clé API",v:config.has_api_key?"✅ Définie":"❌ Manquante"},
+                {l:"Wallet",v:config.wallet?`${config.wallet.slice(0,8)}...`:"Non défini"},
+              ].map((x,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:i<5?"1px solid #0a0e1a":"none"}}>
+                  <span style={{color:"#475569",fontSize:10}}>{x.l}</span>
+                  <span style={{color:"#94a3b8",fontSize:10}}>{x.v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SIGNAUX */}
+      {tab==="signaux" && (
+        <div style={{padding:16}}>
+          {signals.filter(s=>s.action!=="WAIT").length===0
+            ? <div style={{textAlign:"center",padding:50,color:"#475569"}}>{isRunning?"Analyse IA en cours...":"Aucun signal — démarrez le bot"}</div>
+            : signals.filter(s=>s.action!=="WAIT").map(sig=>(
+              <div key={sig.id} style={{background:"#0f1629",border:`1px solid ${sig.action==="LONG"?"#14532d":"#450a0a"}`,borderRadius:10,padding:14,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{background:sig.action==="LONG"?"#052e16":"#2d0a0a",color:sig.action==="LONG"?"#34d399":"#f87171",padding:"3px 9px",borderRadius:5,fontSize:12,fontWeight:700}}>{sig.action}</span>
+                    <span style={{fontSize:15,fontWeight:700,color:"#f1f5f9"}}>{sig.coin}/USDC</span>
+                    <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 7px",borderRadius:4,fontSize:10}}>x{sig.leverage}</span>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:18,fontWeight:700,color:confColor(sig.confidence)}}>{sig.confidence}%</div>
+                    <div style={{fontSize:9,color:"#475569"}}>CONFIANCE</div>
+                  </div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
+                  {[{l:"ENTRÉE",v:`$${sig.entry?.toFixed(4)}`,c:"#60a5fa"},{l:"STOP LOSS",v:`$${sig.stop_loss?.toFixed(4)}`,c:"#f87171"},{l:"TP1",v:`$${sig.take_profit1?.toFixed(4)}`,c:"#34d399"},{l:"TP2",v:`$${sig.take_profit2?.toFixed(4)}`,c:"#34d399"}].map((x,i)=>(
+                    <div key={i} style={{background:"#0a0e1a",borderRadius:5,padding:"7px 8px"}}>
+                      <div style={{fontSize:9,color:"#475569",marginBottom:2}}>{x.l}</div>
+                      <div style={{fontSize:11,fontWeight:700,color:x.c}}>{x.v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:10}}>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>TAILLE</div><div style={{color:"#e2e8f0",fontWeight:700}}>{sig.position_size}%</div></div>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>RISK/REWARD</div><div style={{color:sig.risk_reward>=2?"#34d399":"#fbbf24",fontWeight:700}}>{sig.risk_reward?.toFixed(2)}</div></div>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>TIMEFRAME</div><div style={{color:"#94a3b8",fontSize:11}}>{sig.timeframe}</div></div>
+                </div>
+                {sig.reasoning&&<div style={{background:"#0a0e1a",borderRadius:5,padding:9,marginBottom:8,borderLeft:"3px solid #8b5cf6"}}><div style={{fontSize:9,color:"#c084fc",marginBottom:3}}>🤖 ANALYSE IA</div><div style={{color:"#94a3b8",fontSize:11,lineHeight:1.6}}>{sig.reasoning}</div></div>}
+                {sig.key_signals&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{JSON.parse(sig.key_signals||"[]").map((s,i)=><span key={i} style={{background:"#1e2d4a",color:"#60a5fa",padding:"2px 7px",borderRadius:3,fontSize:10}}>{s}</span>)}</div>}
+                <div style={{fontSize:10,color:"#334155"}}>
+                  {new Date(sig.created_at).toLocaleString("fr-FR")} · RSI:{sig.rsi?.toFixed(1)} · Prix:{`$${sig.price?.toLocaleString()}`}
+                  {prices[sig.coin]&&<span style={{marginLeft:8,color:((prices[sig.coin]-sig.entry)/sig.entry*100*(sig.action==="LONG"?1:-1))>=0?"#34d399":"#f87171"}}>
+                    · PnL: {((prices[sig.coin]-sig.entry)/sig.entry*100*(sig.action==="LONG"?1:-1)).toFixed(2)}%
+                  </span>}
+                </div>
+              </div>
+            ))
+          }
+        </div>
+      )}
+
+      {/* POSITIONS */}
+      {tab==="positions" && (
+        <div style={{padding:16}}>
+          {!config.wallet?<div style={{textAlign:"center",padding:40,color:"#475569"}}>Définissez votre wallet dans Paramètres</div>
+          :positions.length===0?<div style={{textAlign:"center",padding:40,color:"#475569"}}>Aucune position ouverte</div>
+          :positions.map((pos,i)=>{
+            const p=pos.position; const pnl=parseFloat(p.unrealizedPnl||0);
+            return (
+              <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                    <span style={{background:parseFloat(p.szi)>0?"#052e16":"#2d0a0a",color:parseFloat(p.szi)>0?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{parseFloat(p.szi)>0?"LONG":"SHORT"}</span>
+                    <span style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>{p.coin}/USDC</span>
+                  </div>
+                  <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
+                  {[{l:"TAILLE",v:Math.abs(parseFloat(p.szi)).toFixed(4)},{l:"ENTRÉE",v:`$${parseFloat(p.entryPx||0).toLocaleString()}`},{l:"LEVIER",v:`x${p.leverage?.value||"--"}`}].map((x,j)=>(
+                    <div key={j} style={{background:"#0a0e1a",borderRadius:5,padding:"7px 8px"}}><div style={{fontSize:9,color:"#475569"}}>{x.l}</div><div style={{color:"#e2e8f0",fontWeight:700,fontSize:11}}>{x.v}</div></div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* MARCHÉS */}
+      {tab==="marches" && (
+        <div style={{padding:16,maxWidth:700}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:12}}>Gestion des marchés</div>
+            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+              {[{l:"Tout activer",v:ALL_COINS},{l:"BTC + ETH",v:["BTC","ETH"]},{l:"Top 5",v:["BTC","ETH","SOL","BNB","HYPE"]}].map((x,i)=>(
+                <button key={i} onClick={()=>setActiveCoins(x.v)}
+                  style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#60a5fa",fontSize:11}}>
+                  {x.l}
+                </button>
+              ))}
+              <button onClick={()=>setActiveCoins([])} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#64748b",fontSize:11}}>Tout désactiver</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+              {ALL_COINS.map(coin=>{
+                const on=activeCoins.includes(coin);
+                return (
+                  <div key={coin} onClick={()=>setActiveCoins(p=>on?p.filter(c=>c!==coin):[...p,coin])}
+                    style={{background:on?"#0a0e1a":"transparent",border:`2px solid ${on?"#3b82f6":"#1e2d4a"}`,borderRadius:8,padding:"10px 12px",cursor:"pointer",opacity:on?1:0.4}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontWeight:700,color:on?"#60a5fa":"#64748b"}}>{coin}</span>
+                      <span style={{fontSize:10,fontWeight:700,color:on?"#34d399":"#334155"}}>{on?"ON":"OFF"}</span>
+                    </div>
+                    <div style={{fontSize:10,color:on?"#94a3b8":"#334155",marginTop:2}}>
+                      {prices[coin]?`$${prices[coin].toLocaleString("en-US",{maximumFractionDigits:2})}`:"---"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={saveConfig} style={{width:"100%",background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:12}}>
+              💾 Sauvegarder la sélection
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* PARAMÈTRES */}
+      {tab==="parametres" && (
+        <div style={{padding:16,maxWidth:600}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:20,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>Paramètres de connexion</div>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>WALLET HYPERLIQUID</div>
+              <input value={liveW} onChange={e=>setLiveW(e.target.value)} placeholder="0x..."
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:12}}/>
+              <div style={{fontSize:10,color:"#334155",marginTop:3}}>Lecture seule — visualisation de vos positions</div>
+            </div>
+            <div style={{marginBottom:20}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>CLÉ API ANTHROPIC</div>
+              <input value={liveK} onChange={e=>setLiveK(e.target.value)} type="password" placeholder="sk-ant-... (laisser vide pour ne pas modifier)"
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:12}}/>
+              <div style={{fontSize:10,color:"#334155",marginTop:3}}>Clé stockée de façon sécurisée sur le serveur · {config.has_api_key?"✅ Clé définie":"❌ Non définie"}</div>
+            </div>
+            <button onClick={saveConfig}
+              style={{width:"100%",background:saved?"#052e16":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:saved?"1px solid #34d399":"none",borderRadius:8,padding:"11px",color:saved?"#34d399":"#fff",fontWeight:700,fontSize:12}}>
+              {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
+            </button>
+          </div>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Compte</div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
+              <span style={{color:"#475569",fontSize:11}}>Email</span>
+              <span style={{color:"#94a3b8",fontSize:11}}>{email}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0"}}>
+              <span style={{color:"#475569",fontSize:11}}>Session</span>
+              <span style={{color:"#34d399",fontSize:11}}>Active (30 jours)</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LOGS */}
+      {tab==="logs" && (
+        <div style={{padding:14}}>
+          <div style={{background:"#050810",borderRadius:8,padding:12,height:450,overflowY:"auto",border:"1px solid #0f1629"}}>
+            {logs.length===0?<div style={{color:"#334155",fontSize:11}}>Aucun log local — les logs serveur sont dans Railway...</div>
+            :logs.map((l,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:3}}>
+                <span style={{color:"#334155",fontSize:10,whiteSpace:"nowrap"}}>{l.time}</span>
+                <span style={{color:LOGCOL[l.type]||"#94a3b8",fontSize:11,lineHeight:1.5}}>{l.msg}</span>
+              </div>
+            ))}
+            <div ref={logEnd}/>
+          </div>
+        </div>
+      )}
+
+      <div style={{textAlign:"center",padding:"14px",color:"#1e2d4a",fontSize:10,borderTop:"1px solid #0f1629",marginTop:16}}>
+        HyperBot AI — Serveur autonome 24h/24 · Powered by Claude
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
