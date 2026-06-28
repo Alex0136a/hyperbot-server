@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
 # ── BASE DE DONNÉES ──────────────────────────────────────────
-DB_PATH = "hyperbot.db"
+DB_PATH = "/data/hyperbot.db"
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
