@@ -564,6 +564,22 @@ function App() {
               {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
             </button>
           </div>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Maintenance</div>
+            <div style={{fontSize:10,color:"#475569",marginBottom:10,lineHeight:1.6}}>
+              Nettoie les signaux en double et supprime ceux de plus de 24h. Garde uniquement le signal le plus récent par actif.
+            </div>
+            <button onClick={async()=>{
+              try{
+                const r = await apiCall("/api/cleanup","POST",null,token);
+                alert(r.message);
+                loadData();
+              }catch(e){alert("Erreur: "+e.message);}
+            }} style={{width:"100%",background:"transparent",border:"1px solid #f87171",borderRadius:7,padding:"10px",color:"#f87171",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              🧹 Nettoyer les signaux en double
+            </button>
+          </div>
+
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
             <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Compte</div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
