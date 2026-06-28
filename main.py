@@ -82,6 +82,33 @@ def init_db():
             price REAL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS paper_portfolio (
+            user_id INTEGER PRIMARY KEY,
+            balance REAL DEFAULT 1000.0,
+            initial_balance REAL DEFAULT 1000.0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            coin TEXT NOT NULL,
+            action TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            current_price REAL,
+            size_usdc REAL NOT NULL,
+            leverage INTEGER DEFAULT 1,
+            stop_loss REAL,
+            take_profit1 REAL,
+            take_profit2 REAL,
+            pnl REAL DEFAULT 0,
+            pnl_pct REAL DEFAULT 0,
+            status TEXT DEFAULT 'OPEN',
+            signal_id INTEGER,
+            opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            closed_at TEXT,
+            close_reason TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
     """)
     conn.commit()
     conn.close()
@@ -317,8 +344,28 @@ async def scan_markets(user_id: int):
             if not has_signal or not api_key:
                 continue
 
+            # Un seul signal par coin par scan (5 min)
+            conn_check = get_db()
+            recent = conn_check.execute(
+                "SELECT id FROM signals WHERE user_id=? AND coin=? AND created_at > datetime('now', '-5 minutes')",
+                (user_id, coin)
+            ).fetchone()
+            last_action = conn_check.execute(
+                "SELECT action FROM signals WHERE user_id=? AND coin=? AND created_at > datetime('now', '-30 minutes') ORDER BY created_at DESC LIMIT 1",
+                (user_id, coin)
+            ).fetchone()
+            conn_check.close()
+            if recent:
+                print(f"{coin}: Signal recent, ignore")
+                continue
+
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
-            if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 45:
+            if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 55:
+                continue
+
+            # Ignorer signaux contradictoires
+            if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
+                print(f"{coin}: Contradictoire {last_action['action']} vs {ai.get('action')}, ignore")
                 continue
 
             # Save signal
@@ -337,6 +384,45 @@ async def scan_markets(user_id: int):
             ))
             conn.commit()
             conn.close()
+
+        # Auto-update paper trades
+        async with httpx.AsyncClient() as client2:
+            open_trades = conn.execute(
+                "SELECT DISTINCT coin FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+            ).fetchall() if False else []
+        conn = get_db()
+        paper_trades = conn.execute(
+            "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+        ).fetchall()
+        for trade in paper_trades:
+            price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
+            if not price_row: continue
+            cur = price_row["price"]
+            direction = 1 if trade["action"] == "LONG" else -1
+            pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+            close_reason = None
+            if trade["stop_loss"]:
+                if trade["action"] == "LONG" and cur <= trade["stop_loss"]: close_reason = "STOP_LOSS"
+                elif trade["action"] == "SHORT" and cur >= trade["stop_loss"]: close_reason = "STOP_LOSS"
+            if trade["take_profit2"]:
+                if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
+                elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
+            elif trade["take_profit1"]:
+                if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
+                elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
+            if close_reason:
+                conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                    closed_at=?, close_reason=? WHERE id=?""",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+                     datetime.utcnow().isoformat(), close_reason, trade["id"]))
+                conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                            (trade["size_usdc"], round(pnl,2), user_id))
+                print(f"Trade {trade['coin']} ferme automatiquement: {close_reason} | PnL: {round(pnl,2)} USDC")
+            else:
+                conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        conn.close()
 
         # Update last scan
         conn = get_db()
@@ -512,6 +598,149 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
+
+# ── PAPER TRADING ───────────────────────────────────────────
+class PaperTradeRequest(BaseModel):
+    signal_id: int
+    size_usdc: float = 50.0
+
+class PaperCloseRequest(BaseModel):
+    trade_id: int
+    reason: str = "MANUEL"
+
+def ensure_portfolio(user_id: int, conn):
+    existing = conn.execute("SELECT * FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    if not existing:
+        conn.execute("INSERT INTO paper_portfolio (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+
+@app.get("/api/paper/portfolio")
+def get_paper_portfolio(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    ensure_portfolio(user_id, conn)
+    portfolio = conn.execute("SELECT * FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    trades = conn.execute(
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN' ORDER BY opened_at DESC",
+        (user_id,)
+    ).fetchall()
+    closed = conn.execute(
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT 20",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    open_trades = [dict(t) for t in trades]
+    closed_trades = [dict(t) for t in closed]
+    total_pnl = sum(t["pnl"] for t in open_trades)
+    return {
+        "balance": portfolio["balance"],
+        "initial_balance": portfolio["initial_balance"],
+        "total_pnl": round(total_pnl, 2),
+        "total_pnl_pct": round((portfolio["balance"] + total_pnl - portfolio["initial_balance"]) / portfolio["initial_balance"] * 100, 2),
+        "open_trades": open_trades,
+        "closed_trades": closed_trades,
+    }
+
+@app.post("/api/paper/trade")
+def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    ensure_portfolio(user_id, conn)
+    # Get signal
+    sig = conn.execute("SELECT * FROM signals WHERE id=? AND user_id=?", (req.signal_id, user_id)).fetchone()
+    if not sig:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Signal introuvable")
+    # Get current price
+    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (sig["coin"],)).fetchone()
+    if not price_row:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Prix non disponible")
+    # Check balance
+    portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    if portfolio["balance"] < req.size_usdc:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Solde insuffisant")
+    # Open trade
+    conn.execute("""
+        INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price, size_usdc, leverage,
+        stop_loss, take_profit1, take_profit2, signal_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (user_id, sig["coin"], sig["action"], sig["entry"] or price_row["price"],
+          price_row["price"], req.size_usdc, sig["leverage"] or 1,
+          sig["stop_loss"], sig["take_profit1"], sig["take_profit2"], sig["id"]))
+    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (req.size_usdc, user_id))
+    conn.commit()
+    conn.close()
+    return {"message": f"Trade {sig['action']} {sig['coin']} ouvert pour {req.size_usdc} USDC"}
+
+@app.post("/api/paper/close")
+def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    trade = conn.execute(
+        "SELECT * FROM paper_trades WHERE id=? AND user_id=? AND status='OPEN'",
+        (req.trade_id, user_id)
+    ).fetchone()
+    if not trade:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Trade introuvable")
+    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
+    cur_price = price_row["price"] if price_row else trade["entry_price"]
+    direction = 1 if trade["action"] == "LONG" else -1
+    pnl = (cur_price - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+    conn.execute("""
+        UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+        closed_at=?, close_reason=? WHERE id=?
+    """, (cur_price, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+          datetime.utcnow().isoformat(), req.reason, req.trade_id))
+    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                (trade["size_usdc"], round(pnl,2), user_id))
+    conn.commit()
+    conn.close()
+    return {"message": f"Trade fermé avec PnL: {round(pnl,2)} USDC"}
+
+@app.post("/api/paper/reset")
+def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Portefeuille réinitialisé à 1000 USDC"}
+
+@app.put("/api/paper/update")
+async def update_paper_trades(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    trades = conn.execute(
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+    ).fetchall()
+    for trade in trades:
+        price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
+        if not price_row: continue
+        cur = price_row["price"]
+        direction = 1 if trade["action"] == "LONG" else -1
+        pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+        close_reason = None
+        if trade["stop_loss"]:
+            if trade["action"] == "LONG" and cur <= trade["stop_loss"]: close_reason = "STOP_LOSS"
+            elif trade["action"] == "SHORT" and cur >= trade["stop_loss"]: close_reason = "STOP_LOSS"
+        if trade["take_profit2"]:
+            if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
+            elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
+        elif trade["take_profit1"]:
+            if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
+            elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
+        if close_reason:
+            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                closed_at=?, close_reason=? WHERE id=?""",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
+            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                        (trade["size_usdc"], round(pnl,2), user_id))
+        else:
+            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+    conn.commit()
+    conn.close()
+    return {"message": "Trades mis à jour"}
 
 # ── SERVIR L'INTERFACE ───────────────────────────────────────
 if os.path.exists("static"):
