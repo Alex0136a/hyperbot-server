@@ -302,6 +302,14 @@ function App() {
     } catch(e) { addLog(`❌ ${e.message}`, "error"); }
   };
 
+  const updateTradingMode = async (mode) => {
+    try {
+      await apiCall("/api/config","PUT",{trading_mode:mode},token);
+      loadData();
+      addLog(mode==="paper"?"Mode Paper Trading actif":"Mode Live actif!","system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
   const saveConfig = async () => {
     try {
       await apiCall("/api/config","PUT",{ wallet:liveW, api_key:liveK||undefined, active_coins:activeCoins },token);
@@ -342,9 +350,13 @@ function App() {
             <div style={{width:8,height:8,borderRadius:"50%",background:isRunning?"#34d399":"#475569",boxShadow:isRunning?"0 0 8px #34d399":"none"}}/>
             <span style={{fontSize:11,color:isRunning?"#34d399":"#64748b"}}>{isRunning?"ACTIF":"INACTIF"}</span>
           </div>
+          <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+            <button onClick={()=>updateTradingMode("paper")} style={{padding:"4px 8px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>PAPER</button>
+            <button onClick={()=>updateTradingMode("live")} style={{padding:"4px 8px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>LIVE</button>
+          </div>
           {isRunning
-            ? <button onClick={stopBot} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:"#f87171",fontSize:11,fontWeight:700}}>⏹ ARRÊTER</button>
-            : <button onClick={startBot} disabled={loading} style={{background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:6,padding:"5px 14px",color:"#fff",fontSize:11,fontWeight:700}}>{loading?"...":"▶ DÉMARRER"}</button>
+            ? <button onClick={stopBot} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:"#f87171",fontSize:11,fontWeight:700}}>ARRETER</button>
+            : <button onClick={startBot} disabled={loading} style={{background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:6,padding:"5px 14px",color:"#fff",fontSize:11,fontWeight:700}}>{loading?"...":"DEMARRER"}</button>
           }
           <button onClick={logout} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 10px",color:"#64748b",fontSize:10}}>Déconnexion</button>
         </div>
@@ -404,6 +416,7 @@ function App() {
               {[
                 {l:"Mode",v:"Serveur 24h/24"},
                 {l:"Bot",v:isRunning?"✅ Actif":"⏹ Arrêté"},
+                {l:"Mode trading",v:config.trading_mode==="paper"?"Paper (simulation)":"Live (reel)"},
                 {l:"Dernier scan",v:config.last_scan?new Date(config.last_scan).toLocaleTimeString("fr-FR"):"Jamais"},
                 {l:"Marchés actifs",v:`${activeCoins.length}/${ALL_COINS.length}`},
                 {l:"Clé API",v:config.has_api_key?"✅ Définie":"❌ Manquante"},
@@ -600,43 +613,47 @@ function App() {
             ))}
           </div>
 
-          {/* OUVRIR UN TRADE */}
+          {/* MODE BANNER + SETTINGS */}
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
-            <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>🎯 Exécuter un signal en paper trading</div>
-            <div style={{fontSize:11,color:"#475569",marginBottom:12}}>
-              Sélectionnez un signal dans l'onglet Signaux et entrez son ID ci-dessous pour simuler le trade avec des données réelles.
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:config?.trading_mode==="paper"?"#fbbf24":"#34d399"}}>
+                  {config?.trading_mode==="paper"?"Mode Paper — Simulation autonome":"Mode Live — Trades reels"}
+                </div>
+                <div style={{fontSize:10,color:"#475569",marginTop:2}}>
+                  {config?.trading_mode==="paper"?"Le bot execute automatiquement chaque signal avec capital virtuel":"ATTENTION: trades sur votre vrai compte Hyperliquid"}
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+                <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}}>PAPER</button>
+                <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}}>LIVE</button>
+              </div>
             </div>
-            <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
-              <div style={{flex:1,minWidth:120}}>
-                <div style={{fontSize:9,color:"#475569",marginBottom:4}}>ID DU SIGNAL</div>
-                <input id="paperSigId" placeholder="ex: 42"
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (USDC)</div>
+                <input type="number" defaultValue={config?.max_position_usdc||50} min="10" max="500"
+                  onBlur={e=>apiCall("/api/config","PUT",{max_position_usdc:Number(e.target.value)},token).then(loadData)}
                   style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
               </div>
-              <div style={{flex:1,minWidth:120}}>
-                <div style={{fontSize:9,color:"#475569",marginBottom:4}}>TAILLE (USDC)</div>
-                <input value={paperSize} onChange={e=>setPaperSize(Number(e.target.value))} type="number" min="10" max="500"
+              <div>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
+                <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
+                  onBlur={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
                   style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
               </div>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:10,color:"#334155"}}>
+                Solde initial: 1000 USDC · Le bot trade seul 24h/24
+              </div>
               <button onClick={async()=>{
-                const sigId = document.getElementById("paperSigId").value;
-                if(!sigId){alert("Entrez un ID de signal");return;}
-                try{
-                  const r = await apiCall("/api/paper/trade","POST",{signal_id:parseInt(sigId),size_usdc:paperSize},token);
-                  alert(r.message); loadData();
-                }catch(e){alert("Erreur: "+e.message);}
-              }} style={{background:"linear-gradient(135deg,#34d399,#059669)",border:"none",borderRadius:6,padding:"8px 16px",color:"#fff",fontWeight:700,fontSize:12,whiteSpace:"nowrap"}}>
-                ▶ Exécuter
-              </button>
-              <button onClick={async()=>{
-                if(!confirm("Réinitialiser à 1000 USDC ?"))return;
+                if(!confirm("Reinitialiser le portefeuille a 1000 USDC ?"))return;
                 await apiCall("/api/paper/reset","POST",null,token);
                 loadData();
-              }} style={{background:"transparent",border:"1px solid #334155",borderRadius:6,padding:"8px 12px",color:"#64748b",fontSize:11}}>
-                Reset
+              }} style={{background:"transparent",border:"1px solid #334155",borderRadius:5,padding:"5px 10px",color:"#64748b",fontSize:10}}>
+                Reinitialiser
               </button>
-            </div>
-            <div style={{marginTop:10,fontSize:10,color:"#334155"}}>
-              💡 Trouvez l'ID dans l'onglet Signaux — chaque signal a un numéro unique
             </div>
           </div>
 
