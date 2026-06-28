@@ -798,6 +798,27 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
     conn.close()
     return {"message": "Trades mis à jour"}
 
+# ── NETTOYAGE ────────────────────────────────────────────────
+@app.post("/api/cleanup")
+def cleanup_signals(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action
+    conn.execute("""
+        DELETE FROM signals WHERE id NOT IN (
+            SELECT MAX(id) FROM signals
+            WHERE user_id=?
+            GROUP BY coin, action, date(created_at)
+        ) AND user_id=?
+    """, (user_id, user_id))
+    deleted = conn.execute("SELECT changes()").fetchone()[0]
+    # Supprimer aussi les signaux de plus de 24h
+    conn.execute("DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')", (user_id,))
+    deleted2 = conn.execute("SELECT changes()").fetchone()[0]
+    remaining = conn.execute("SELECT COUNT(*) FROM signals WHERE user_id=?", (user_id,)).fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {"message": f"{deleted + deleted2} signaux supprimés · {remaining} restants"}
+
 # ── SERVIR L'INTERFACE ───────────────────────────────────────
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
