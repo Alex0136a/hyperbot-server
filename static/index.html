@@ -40,6 +40,116 @@ const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB",
 const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
+// ── RAPPORT TXT ──────────────────────────────────────────────
+function generateReport(signals, stats, prices, email) {
+  const now = new Date();
+  const sep = "=".repeat(60), thin = "-".repeat(60);
+  const active = signals.filter(s=>s.action!=="WAIT");
+  let t = "";
+  t += `${sep}
+  HYPERBOT AI -- RAPPORT DE SESSION
+${sep}
+`;
+  t += `  Date     : ${now.toLocaleDateString("fr-FR")} a ${now.toLocaleTimeString("fr-FR")}
+`;
+  t += `  Compte   : ${email}
+`;
+  t += `  Serveur  : Autonome 24h/24 · Railway
+${sep}
+
+`;
+  t += `[ RESUME EXECUTIF ]
+${thin}
+`;
+  t += `  Signaux  : ${stats.total||0} (LONG:${stats.longs||0} / SHORT:${stats.shorts||0})
+`;
+  t += `  Confiance moy. : ${stats.avg_confidence||0}%
+`;
+  t += `  Risk/Reward moy. : ${stats.avg_rr||"--"}
+
+`;
+  t += `[ PRIX MARCHE ]
+${thin}
+`;
+  Object.entries(prices).forEach(([coin,price])=>{ t+=`  ${coin.padEnd(8)}: $${price?.toLocaleString("en-US",{maximumFractionDigits:4})}
+`; });
+  t += `
+[ SIGNAUX DETAILLES (${active.length}) ]
+${thin}
+`;
+  active.forEach((sig,i)=>{
+    t += `
+  [${i+1}] ${sig.action} ${sig.coin}/USDC
+`;
+    t += `  ${"─".repeat(40)}
+`;
+    t += `  Date        : ${new Date(sig.created_at).toLocaleString("fr-FR")}
+`;
+    t += `  Confiance   : ${sig.confidence}%
+`;
+    t += `  Levier      : x${sig.leverage}
+`;
+    t += `  Taille pos. : ${sig.position_size}% du capital
+`;
+    t += `  Risk/Reward : ${sig.risk_reward?.toFixed(2)}
+`;
+    t += `  Timeframe   : ${sig.timeframe}
+`;
+    t += `  Entree      : $${sig.entry?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Stop Loss   : $${sig.stop_loss?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Take Profit1: $${sig.take_profit1?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Take Profit2: $${sig.take_profit2?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Analyse IA  : ${sig.reasoning||"--"}
+`;
+    const ks = JSON.parse(sig.key_signals||"[]");
+    if(ks.length) t += `  Signaux cles: ${ks.join(" | ")}
+`;
+    t += `  RSI         : ${sig.rsi?.toFixed(1)||"--"}
+`;
+    t += `  ATR         : ${sig.atr?.toFixed(4)||"--"}
+`;
+    t += `  VWAP        : ${sig.vwap?.toFixed(2)||"--"}
+`;
+    const cur = prices[sig.coin];
+    if(cur){
+      const dir=sig.action==="LONG"?1:-1;
+      const pnl=((cur-sig.entry)/sig.entry*100*dir).toFixed(2);
+      const tp1=sig.action==="LONG"?cur>=sig.take_profit1:cur<=sig.take_profit1;
+      const tp2=sig.action==="LONG"?cur>=sig.take_profit2:cur<=sig.take_profit2;
+      const sl=sig.action==="LONG"?cur<=sig.stop_loss:cur>=sig.stop_loss;
+      t += `  Prix actuel : $${cur.toLocaleString()}
+`;
+      t += `  PnL estime  : ${pnl>0?"+":""}${pnl}%
+`;
+      t += `  TP1         : ${tp1?"ATTEINT":"En attente"}
+`;
+      t += `  TP2         : ${tp2?"ATTEINT":"En attente"}
+`;
+      t += `  Stop Loss   : ${sl?"TOUCHE":"Intact"}
+`;
+    }
+  });
+  t += `
+${sep}
+  Rapport HyperBot AI · Powered by Claude
+  Collez ce rapport dans Claude pour analyse
+${sep}
+`;
+  return t;
+}
+
+function downloadTxt(content, filename) {
+  const b = new Blob([content],{type:"text/plain;charset=utf-8"});
+  const u = URL.createObjectURL(b);
+  const a = document.createElement("a");
+  a.href=u; a.download=filename; a.click();
+  URL.revokeObjectURL(u);
+}
+
 // ── LOGIN PAGE ───────────────────────────────────────────────
 function LoginPage({ onLogin }) {
   const [mode, setMode] = useState("login");
@@ -208,6 +318,7 @@ function App() {
     {id:"marches",label:`🎯 Marchés (${activeCoins.length}/${ALL_COINS.length})`},
     {id:"parametres",label:"⚙️ Paramètres"},
     {id:"logs",label:"📋 Logs"},
+    {id:"rapport",label:"📄 Rapport"},
   ];
 
   return (
@@ -461,6 +572,65 @@ function App() {
               </div>
             ))}
             <div ref={logEnd}/>
+          </div>
+        </div>
+      )}
+
+      {/* RAPPORT */}
+      {tab==="rapport" && (
+        <div style={{padding:16,maxWidth:800}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:20,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:4}}>📄 Rapport de session</div>
+            <div style={{fontSize:11,color:"#475569",marginBottom:16,lineHeight:1.7}}>
+              Exportez tous les signaux avec niveaux, suivi TP/SL et analyse IA. Collez dans Claude pour analyse approfondie.
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+              {[{l:"Signaux",v:stats.total||0,c:"#60a5fa"},{l:"Confiance moy.",v:`${stats.avg_confidence||0}%`,c:confColor(stats.avg_confidence||0)},{l:"R/R moyen",v:stats.avg_rr||"--",c:"#c084fc"}].map((s,i)=>(
+                <div key={i} style={{background:"#0a0e1a",borderRadius:6,padding:"9px",textAlign:"center"}}>
+                  <div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.v}</div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{background:"#0a0e1a",borderRadius:7,padding:12,marginBottom:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:8,letterSpacing:1}}>SUIVI TP/SL EN TEMPS REEL</div>
+              {signals.filter(s=>s.action!=="WAIT").length===0
+                ?<div style={{color:"#334155",fontSize:11}}>Aucun signal a suivre.</div>
+                :signals.filter(s=>s.action!=="WAIT").slice(0,10).map(sig=>{
+                  const cur=prices[sig.coin]; if(!cur) return null;
+                  const dir=sig.action==="LONG"?1:-1;
+                  const pnl=((cur-sig.entry)/sig.entry*100*dir).toFixed(2);
+                  const tp1=sig.action==="LONG"?cur>=sig.take_profit1:cur<=sig.take_profit1;
+                  const tp2=sig.action==="LONG"?cur>=sig.take_profit2:cur<=sig.take_profit2;
+                  const sl=sig.action==="LONG"?cur<=sig.stop_loss:cur>=sig.stop_loss;
+                  return (
+                    <div key={sig.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0f1629"}}>
+                      <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                        <span style={{color:sig.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{sig.action}</span>
+                        <span style={{color:"#e2e8f0",fontSize:11}}>{sig.coin}</span>
+                        <span style={{color:"#475569",fontSize:10}}>{new Date(sig.created_at).toLocaleTimeString("fr-FR")}</span>
+                      </div>
+                      <div style={{display:"flex",gap:8,fontSize:10}}>
+                        <span style={{color:parseFloat(pnl)>=0?"#34d399":"#f87171",fontWeight:700}}>{pnl>0?"+":""}{pnl}%</span>
+                        <span style={{color:tp1?"#34d399":"#334155"}}>TP1{tp1?"✓":"○"}</span>
+                        <span style={{color:tp2?"#34d399":"#334155"}}>TP2{tp2?"✓":"○"}</span>
+                        <span style={{color:sl?"#f87171":"#334155"}}>SL{sl?"✗":"○"}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              }
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>downloadTxt(generateReport(signals,stats,prices,email),`hyperbot-${new Date().toISOString().slice(0,10)}.txt`)}
+                style={{flex:1,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"11px",color:"#fff",fontWeight:700,fontSize:12}}>
+                ⬇️ Telecharger .txt
+              </button>
+              <button onClick={()=>navigator.clipboard.writeText(generateReport(signals,stats,prices,email)).then(()=>alert("Copie dans le presse-papier !"))}
+                style={{flex:1,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"11px",color:"#94a3b8",fontWeight:700,fontSize:12}}>
+                📋 Copier pour Claude
+              </button>
+            </div>
           </div>
         </div>
       )}
