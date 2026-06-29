@@ -303,10 +303,25 @@ function App() {
   };
 
   const updateTradingMode = async (mode) => {
+    if (mode === config?.trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper Trading" : "LIVE (trades reels)";
+    const confirm1 = window.confirm(
+      `Basculer en mode ${modeLabel} ?
+
+Cela va reinitialiser :
+- Tous les signaux
+- Tous les trades paper
+- L'historique complet
+- Le portefeuille (1000 USDC)
+
+Confirmer ?`
+    );
+    if (!confirm1) return;
     try {
       await apiCall("/api/config","PUT",{trading_mode:mode},token);
+      await apiCall("/api/reset-all","POST",null,token);
       loadData();
-      addLog(mode==="paper"?"Mode Paper Trading actif":"Mode Live actif!","system");
+      addLog(`Mode ${modeLabel} active - reinitialisation complete`, "system");
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
   };
 
@@ -575,8 +590,18 @@ function App() {
                 alert(r.message);
                 loadData();
               }catch(e){alert("Erreur: "+e.message);}
-            }} style={{width:"100%",background:"transparent",border:"1px solid #f87171",borderRadius:7,padding:"10px",color:"#f87171",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+            }} style={{width:"100%",background:"transparent",border:"1px solid #f87171",borderRadius:7,padding:"9px",color:"#f87171",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer",marginBottom:8}}>
               🧹 Nettoyer les signaux en double
+            </button>
+            <button onClick={async()=>{
+              if(!window.confirm("REINITIALISATION COMPLETE\n\nCela va effacer :\n- Tous les signaux\n- Tous les trades paper\n- L'historique\n- Le portefeuille (repart a 1000 USDC)\n\nEtes-vous sur ?")) return;
+              try{
+                const r = await apiCall("/api/reset-all","POST",null,token);
+                alert(r.message);
+                loadData();
+              }catch(e){alert("Erreur: "+e.message);}
+            }} style={{width:"100%",background:"transparent",border:"1px solid #dc2626",borderRadius:7,padding:"9px",color:"#dc2626",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              ⚠️ Reinitialisation complete (signaux + trades + historique)
             </button>
           </div>
 
@@ -641,8 +666,8 @@ function App() {
                 </div>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
-                <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}}>PAPER</button>
-                <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}}>LIVE</button>
+                <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">PAPER</button>
+                <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">LIVE</button>
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
