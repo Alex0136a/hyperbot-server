@@ -271,6 +271,13 @@ EMA20: {tech.get('ema20','N/A')} | EMA50: {tech.get('ema50','N/A')} | EMA200: {t
 BB Upper: {tech.get('bb_upper','N/A')} | Lower: {tech.get('bb_lower','N/A')}
 ATR: {tech.get('atr','N/A')} | VWAP: {tech.get('vwap','N/A')}
 Volume: {tech.get('volume_trend','N/A')}
+BTC MARKET TREND: {tech.get('btc_trend','neutral')} ({tech.get('btc_change',0):.1f}% sur 4h)
+
+STRATEGY CONTEXT:
+- If BTC trend is bullish: prioritize LONG positions on pullbacks, avoid SHORT
+- If BTC trend is bearish: prioritize SHORT positions on bounces, avoid LONG  
+- If BTC trend is neutral: look for reversals from RSI extremes (oversold/overbought)
+
 CONSTRAINTS: Leverage x2-x5, position 5-15% portfolio, min R/R 2:1
 Respond ONLY with JSON (no markdown):
 {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 sentences in French","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
@@ -319,22 +326,22 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
-        # Tendance BTC globale
-        btc_price = prices.get("BTC", 0)
+        # Tendance BTC globale sur 4h
         btc_trend = "neutral"
-        if btc_price:
-            # Verifier si BTC a monte de plus de 1% depuis le VWAP
-            btc_candles = await fetch_candles(client, "BTC", "1h", 4)
-            if btc_candles and len(btc_candles) >= 2:
-                btc_open = float(btc_candles[0]["c"])
-                btc_close = float(btc_candles[-1]["c"])
-                btc_change = (btc_close - btc_open) / btc_open * 100
-                if btc_change > 1.5:
-                    btc_trend = "bullish"
-                    print(f"BTC tendance HAUSSIERE (+{btc_change:.1f}%) - shorts limites")
-                elif btc_change < -1.5:
-                    btc_trend = "bearish"
-                    print(f"BTC tendance BAISSIERE ({btc_change:.1f}%) - longs limites")
+        btc_change = 0
+        btc_candles_4h = await fetch_candles(client, "BTC", "1h", 8)
+        if btc_candles_4h and len(btc_candles_4h) >= 4:
+            btc_open = float(btc_candles_4h[0]["c"])
+            btc_close = float(btc_candles_4h[-1]["c"])
+            btc_change = (btc_close - btc_open) / btc_open * 100
+            if btc_change > 2.0:
+                btc_trend = "bullish"
+                print(f"BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif")
+            elif btc_change < -2.0:
+                btc_trend = "bearish"
+                print(f"BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif")
+            else:
+                print(f"BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif")
 
         # Analyze each coin
         for coin in active_coins:
@@ -373,6 +380,8 @@ async def scan_markets(user_id: int):
                 "atr": round(atr, 4) if atr else None,
                 "vwap": round(vwap, 4) if vwap else None,
                 "volume_trend": "SPIKE" if vol_cur > vol_avg*1.5 else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
+                "btc_trend": btc_trend,
+                "btc_change": btc_change,
             }
 
             # Pre-filter
@@ -409,23 +418,41 @@ async def scan_markets(user_id: int):
             if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 55:
                 continue
 
-            # Filtre RSI directionnel
-            rsi_now = tech.get("rsi")
-            if rsi_now:
-                if ai.get("action") == "SHORT" and rsi_now < 35:
-                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} en survente (rebond probable)")
-                    continue
-                if ai.get("action") == "LONG" and rsi_now > 65:
-                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} en surachat")
-                    continue
+            rsi_now = tech.get("rsi") or 50
+            action = ai.get("action")
 
-            # Filtre tendance BTC globale
-            if btc_trend == "bullish" and ai.get("action") == "SHORT" and coin != "PAXG":
-                print(f"{coin}: SHORT ignore - BTC en tendance haussiere")
-                continue
-            if btc_trend == "bearish" and ai.get("action") == "LONG" and coin != "PAXG":
-                print(f"{coin}: LONG ignore - BTC en tendance baissiere")
-                continue
+            # === MODE TENDANCE HAUSSIERE (BTC +2%) ===
+            if btc_trend == "bullish" and coin != "PAXG":
+                # En tendance haussiere: chercher LONG sur pullbacks
+                if action == "SHORT":
+                    print(f"{coin}: SHORT ignore - marche haussier, on cherche des LONG")
+                    continue
+                if action == "LONG" and rsi_now > 75:
+                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} trop haut meme en tendance")
+                    continue
+                # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
+                print(f"{coin}: LONG autorise en mode tendance haussiere (RSI {rsi_now:.1f})")
+
+            # === MODE TENDANCE BAISSIERE (BTC -2%) ===
+            elif btc_trend == "bearish" and coin != "PAXG":
+                # En tendance baissiere: chercher SHORT sur rebonds
+                if action == "LONG":
+                    print(f"{coin}: LONG ignore - marche baissier, on cherche des SHORT")
+                    continue
+                if action == "SHORT" and rsi_now < 25:
+                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} trop bas meme en tendance")
+                    continue
+                print(f"{coin}: SHORT autorise en mode tendance baissiere (RSI {rsi_now:.1f})")
+
+            # === MODE NEUTRE (retournements) ===
+            else:
+                # En marche neutre: chercher retournements depuis extremes
+                if action == "SHORT" and rsi_now < 30:
+                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} survente extreme, risque rebond")
+                    continue
+                if action == "LONG" and rsi_now > 70:
+                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} surachat extreme, risque correction")
+                    continue
 
             # Ignorer signaux contradictoires
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
