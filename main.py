@@ -562,6 +562,15 @@ async def run_bot_loop(user_id: int):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Auto-redemarrer les bots actifs au redemarrage du serveur
+    conn = get_db()
+    running_users = conn.execute("SELECT user_id FROM bot_config WHERE is_running=1").fetchall()
+    conn.close()
+    for row in running_users:
+        user_id = row["user_id"]
+        task = asyncio.create_task(run_bot_loop(user_id))
+        scanning_tasks[user_id] = task
+        print(f"Bot auto-redemarre pour user {user_id}")
     yield
 
 app = FastAPI(title="HyperBot AI", lifespan=lifespan)
