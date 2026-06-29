@@ -230,6 +230,7 @@ function App() {
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
   const [paper, setPaper] = useState(null);
+  const [botLogs, setBotLogs] = useState([]);
   const [paperSize, setPaperSize] = useState(50);
   const [liveW, setLiveW] = useState("");
   const [liveK, setLiveK] = useState("");
@@ -260,9 +261,11 @@ function App() {
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
         apiCall("/api/paper/portfolio","GET",null,token),
+        apiCall("/api/bot/logs","GET",null,token),
       ]);
       setConfig(cfg);
       setPaper(pap);
+      setBotLogs(logs?.logs || []);
       setSignals(sigs);
       setPrices(prc);
       setStats(st);
@@ -412,7 +415,19 @@ Confirmer ?`
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14}}>
-              <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>DERNIERS SIGNAUX</div>
+              <div style={{fontSize:10,color:"#475569",marginBottom:8,letterSpacing:1}}>ACTIVITE DU BOT</div>
+            <div style={{maxHeight:100,overflowY:"auto",marginBottom:12}}>
+              {botLogs.length===0
+                ? <div style={{fontSize:9,color:"#334155",fontFamily:"monospace"}}>{isRunning?"⚡ En attente...":"● Bot arrêté"}</div>
+                : botLogs.slice(0,6).map((log,i)=>(
+                  <div key={i} style={{display:"flex",gap:6,marginBottom:2}}>
+                    <span style={{fontSize:9,color:"#334155",whiteSpace:"nowrap",fontFamily:"monospace"}}>{log.time}</span>
+                    <span style={{fontSize:9,fontFamily:"monospace",color:log.level==="success"?"#34d399":log.level==="error"?"#f87171":log.level==="warning"?"#fbbf24":"#475569"}}>{log.message}</span>
+                  </div>
+                ))
+              }
+            </div>
+            <div style={{fontSize:9,color:"#475569",marginBottom:10,letterSpacing:1}}>DERNIERS SIGNAUX</div>
               {signals.filter(s=>s.action!=="WAIT").slice(0,5).length===0
                 ? <div style={{color:"#334155",fontSize:11,padding:"16px 0",textAlign:"center"}}>{isRunning?"Analyse en cours...":"Démarrez le bot"}</div>
                 : signals.filter(s=>s.action!=="WAIT").slice(0,5).map(sig=>(
@@ -623,11 +638,11 @@ Confirmer ?`
       {tab==="logs" && (
         <div style={{padding:14}}>
           <div style={{background:"#050810",borderRadius:8,padding:12,height:450,overflowY:"auto",border:"1px solid #0f1629"}}>
-            {logs.length===0?<div style={{color:"#334155",fontSize:11}}>Aucun log local — les logs serveur sont dans Railway...</div>
-            :logs.map((l,i)=>(
+            {botLogs.length===0?<div style={{color:"#334155",fontSize:11}}>{isRunning?"En attente du premier scan...":"Démarrez le bot pour voir les logs"}</div>
+            :botLogs.map((l,i)=>(
               <div key={i} style={{display:"flex",gap:8,marginBottom:3}}>
                 <span style={{color:"#334155",fontSize:10,whiteSpace:"nowrap"}}>{l.time}</span>
-                <span style={{color:LOGCOL[l.type]||"#94a3b8",fontSize:11,lineHeight:1.5}}>{l.msg}</span>
+                <span style={{color:l.level==="success"?"#34d399":l.level==="error"?"#f87171":l.level==="warning"?"#fbbf24":"#94a3b8",fontSize:11,lineHeight:1.5}}>{l.message}</span>
               </div>
             ))}
             <div ref={logEnd}/>
