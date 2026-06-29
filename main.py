@@ -319,6 +319,23 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+        # Tendance BTC globale
+        btc_price = prices.get("BTC", 0)
+        btc_trend = "neutral"
+        if btc_price:
+            # Verifier si BTC a monte de plus de 1% depuis le VWAP
+            btc_candles = await fetch_candles(client, "BTC", "1h", 4)
+            if btc_candles and len(btc_candles) >= 2:
+                btc_open = float(btc_candles[0]["c"])
+                btc_close = float(btc_candles[-1]["c"])
+                btc_change = (btc_close - btc_open) / btc_open * 100
+                if btc_change > 1.5:
+                    btc_trend = "bullish"
+                    print(f"BTC tendance HAUSSIERE (+{btc_change:.1f}%) - shorts limites")
+                elif btc_change < -1.5:
+                    btc_trend = "bearish"
+                    print(f"BTC tendance BAISSIERE ({btc_change:.1f}%) - longs limites")
+
         # Analyze each coin
         for coin in active_coins:
             if coin not in prices:
@@ -364,6 +381,15 @@ async def scan_markets(user_id: int):
             if not has_signal or not api_key:
                 continue
 
+            # Filtre RSI — eviter de shorter en survente ou longer en surachat
+            rsi_val = tech.get("rsi")
+            if rsi_val:
+                if rsi_val < 35:
+                    print(f"{coin}: RSI {rsi_val:.1f} trop bas - pas de SHORT (zone rebond)")
+                    # Autoriser seulement les LONG en survente
+                if rsi_val > 65:
+                    print(f"{coin}: RSI {rsi_val:.1f} trop haut - pas de LONG (zone surachat)")
+
             # Un seul signal par coin par scan (5 min)
             conn_check = get_db()
             recent = conn_check.execute(
@@ -381,6 +407,24 @@ async def scan_markets(user_id: int):
 
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
             if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 55:
+                continue
+
+            # Filtre RSI directionnel
+            rsi_now = tech.get("rsi")
+            if rsi_now:
+                if ai.get("action") == "SHORT" and rsi_now < 35:
+                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} en survente (rebond probable)")
+                    continue
+                if ai.get("action") == "LONG" and rsi_now > 65:
+                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} en surachat")
+                    continue
+
+            # Filtre tendance BTC globale
+            if btc_trend == "bullish" and ai.get("action") == "SHORT" and coin != "PAXG":
+                print(f"{coin}: SHORT ignore - BTC en tendance haussiere")
+                continue
+            if btc_trend == "bearish" and ai.get("action") == "LONG" and coin != "PAXG":
+                print(f"{coin}: LONG ignore - BTC en tendance baissiere")
                 continue
 
             # Ignorer signaux contradictoires
@@ -411,7 +455,9 @@ async def scan_markets(user_id: int):
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
                 size = cfg["max_position_usdc"] or 50.0
-                if portfolio and open_count < max_trades and portfolio["balance"] >= size:
+                # Verifier si coin deja en position ouverte
+                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
                     entry_price = ai.get("entry") or price
                     conn.execute("""
                         INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
