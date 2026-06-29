@@ -353,9 +353,9 @@ async def scan_markets(user_id: int):
             if not candles_raw or len(candles_raw) < 50:
                 continue
 
-            candles = [{"h":float(c["h"]),"l":float(c["l"]),"c":float(c["c"]),"v":float(c["v"])} for c in candles_raw]
-            closes = [c["c"] for c in candles]
-            vols = [c["v"] for c in candles]
+            candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
+            closes = [cd["c"] for cd in candles]
+            vols = [cd["v"] for cd in candles]
 
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
@@ -498,6 +498,9 @@ async def scan_markets(user_id: int):
 
             conn.commit()
             conn.close()
+            except Exception as e:
+                print(f"{coin}: Erreur analyse - {e}")
+                continue
 
         # Auto-update paper trades
         async with httpx.AsyncClient() as client2:
@@ -552,7 +555,10 @@ async def run_bot_loop(user_id: int):
         conn.close()
         if not config or not config["is_running"]:
             break
-        await scan_markets(user_id)
+        try:
+            await scan_markets(user_id)
+        except Exception as e:
+            print(f"Erreur scan global: {e}")
         await asyncio.sleep(60)
 
 # ── FASTAPI APP ──────────────────────────────────────────────
