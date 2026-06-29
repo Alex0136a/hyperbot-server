@@ -24,6 +24,22 @@ from contextlib import asynccontextmanager
 # ── BASE DE DONNÉES ──────────────────────────────────────────
 DB_PATH = "/data/hyperbot.db"
 
+bot_logs_memory = {}  # user_id -> list of log entries (max 50)
+
+def add_bot_log(user_id: int, message: str, level: str = "info"):
+    if user_id not in bot_logs_memory:
+        bot_logs_memory[user_id] = []
+    import datetime
+    entry = {
+        "time": datetime.datetime.utcnow().strftime("%H:%M:%S"),
+        "message": message,
+        "level": level
+    }
+    bot_logs_memory[user_id].insert(0, entry)
+    if len(bot_logs_memory[user_id]) > 50:
+        bot_logs_memory[user_id] = bot_logs_memory[user_id][:50]
+    print(message)
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -336,12 +352,12 @@ async def scan_markets(user_id: int):
             btc_change = (btc_close - btc_open) / btc_open * 100
             if btc_change > 2.0:
                 btc_trend = "bullish"
-                print(f"BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif")
+                add_bot_log(user_id, f"🟢 BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif", "success")
             elif btc_change < -2.0:
                 btc_trend = "bearish"
-                print(f"BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif")
+                add_bot_log(user_id, f"🔴 BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif", "error")
             else:
-                print(f"BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif")
+                add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
 
         # Analyze each coin
         for coin in active_coins:
@@ -394,10 +410,10 @@ async def scan_markets(user_id: int):
             rsi_val = tech.get("rsi")
             if rsi_val:
                 if rsi_val < 35:
-                    print(f"{coin}: RSI {rsi_val:.1f} trop bas - pas de SHORT (zone rebond)")
+                    add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop bas - pas de SHORT", "warning")
                     # Autoriser seulement les LONG en survente
                 if rsi_val > 65:
-                    print(f"{coin}: RSI {rsi_val:.1f} trop haut - pas de LONG (zone surachat)")
+                    add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop haut - pas de LONG", "warning")
 
             # Un seul signal par coin par scan (5 min)
             conn_check = get_db()
@@ -411,7 +427,7 @@ async def scan_markets(user_id: int):
             ).fetchone()
             conn_check.close()
             if recent:
-                print(f"{coin}: Signal recent, ignore")
+                add_bot_log(user_id, f"🔄 {coin}: Signal récent, ignoré", "info")
                 continue
 
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
@@ -425,24 +441,24 @@ async def scan_markets(user_id: int):
             if btc_trend == "bullish" and coin != "PAXG":
                 # En tendance haussiere: chercher LONG sur pullbacks
                 if action == "SHORT":
-                    print(f"{coin}: SHORT ignore - marche haussier, on cherche des LONG")
+                    add_bot_log(user_id, f"↩️ {coin}: SHORT ignoré - marché haussier", "info")
                     continue
                 if action == "LONG" and rsi_now > 75:
                     print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} trop haut meme en tendance")
                     continue
                 # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
-                print(f"{coin}: LONG autorise en mode tendance haussiere (RSI {rsi_now:.1f})")
+                add_bot_log(user_id, f"✅ {coin}: LONG autorisé - tendance haussière (RSI {rsi_now:.1f})", "success")
 
             # === MODE TENDANCE BAISSIERE (BTC -2%) ===
             elif btc_trend == "bearish" and coin != "PAXG":
                 # En tendance baissiere: chercher SHORT sur rebonds
                 if action == "LONG":
-                    print(f"{coin}: LONG ignore - marche baissier, on cherche des SHORT")
+                    add_bot_log(user_id, f"↩️ {coin}: LONG ignoré - marché baissier", "info")
                     continue
                 if action == "SHORT" and rsi_now < 25:
                     print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} trop bas meme en tendance")
                     continue
-                print(f"{coin}: SHORT autorise en mode tendance baissiere (RSI {rsi_now:.1f})")
+                add_bot_log(user_id, f"✅ {coin}: SHORT autorisé - tendance baissière (RSI {rsi_now:.1f})", "success")
 
             # === MODE NEUTRE (retournements) ===
             else:
@@ -456,7 +472,7 @@ async def scan_markets(user_id: int):
 
             # Ignorer signaux contradictoires
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
-                print(f"{coin}: Contradictoire {last_action['action']} vs {ai.get('action')}, ignore")
+                add_bot_log(user_id, f"⚡ {coin}: Signal contradictoire ignoré", "warning")
                 continue
 
             # Save signal
@@ -494,7 +510,7 @@ async def scan_markets(user_id: int):
                            ai.get("leverage") or 1, ai.get("stopLoss"),
                            ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id))
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
-                    print(f"PAPER TRADE AUTO: {ai['action']} {coin} @  | Taille: {size} USDC")
+                    add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
 
             conn.commit()
             conn.close()
@@ -531,7 +547,7 @@ async def scan_markets(user_id: int):
                      datetime.utcnow().isoformat(), close_reason, trade["id"]))
                 conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                             (trade["size_usdc"], round(pnl,2), user_id))
-                print(f"Trade {trade['coin']} ferme automatiquement: {close_reason} | PnL: {round(pnl,2)} USDC")
+                add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
             else:
                 conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
                             (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
@@ -902,6 +918,12 @@ def reset_all(user_id: int = Depends(get_current_user)):
     conn.commit()
     conn.close()
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
+
+# ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/bot/logs")
+def get_bot_logs(user_id: int = Depends(get_current_user)):
+    logs = bot_logs_memory.get(user_id, [])
+    return {"logs": logs}
 
 # ── NETTOYAGE ────────────────────────────────────────────────
 @app.post("/api/cleanup")
