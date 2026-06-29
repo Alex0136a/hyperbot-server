@@ -625,8 +625,11 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET active_coins=? WHERE user_id=?",
                     (json.dumps(req.active_coins), user_id))
     if req.trading_mode is not None:
+        old_mode = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         conn.execute("UPDATE bot_config SET trading_mode=? WHERE user_id=?",
                     (req.trading_mode, user_id))
+        # Log le changement de mode
+        print(f"Mode change: {old_mode['trading_mode'] if old_mode else 'unknown'} -> {req.trading_mode} pour user {user_id}")
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
@@ -843,6 +846,23 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
     conn.commit()
     conn.close()
     return {"message": "Trades mis à jour"}
+
+# ── REINITIALISATION COMPLETE ────────────────────────────────
+@app.post("/api/reset-all")
+def reset_all(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    # Fermer tous les trades paper ouverts
+    conn.execute("UPDATE paper_trades SET status='CLOSED', close_reason='RESET', closed_at=? WHERE user_id=? AND status='OPEN'",
+                (datetime.utcnow().isoformat(), user_id))
+    # Supprimer tout l'historique paper
+    conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
+    # Remettre le portefeuille a zero
+    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
+    # Supprimer tous les signaux
+    conn.execute("DELETE FROM signals WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── NETTOYAGE ────────────────────────────────────────────────
 @app.post("/api/cleanup")
