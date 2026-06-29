@@ -498,9 +498,6 @@ async def scan_markets(user_id: int):
 
             conn.commit()
             conn.close()
-            except Exception as e:
-                print(f"{coin}: Erreur analyse - {e}")
-                continue
 
         # Auto-update paper trades
         async with httpx.AsyncClient() as client2:
