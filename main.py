@@ -86,6 +86,10 @@ def init_db():
         conn.execute("UPDATE bot_config SET active_coins=?", (coins_json,))
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -474,12 +478,28 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"🔄 {coin}: Signal récent, ignoré", "info")
                 continue
 
+            # Verifier si coin deja en position ouverte
+            conn_check = get_db()
+            coin_already_open = conn_check.execute(
+                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'",
+                (user_id, coin)
+            ).fetchone()
+            ai_continuous = config["ai_continuous"] if "ai_continuous" in config.keys() else 0
+            conn_check.close()
+
+            if coin_already_open and not ai_continuous:
+                add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte - analyse IA skippée", "info")
+                continue
+
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
             if not ai:
                 add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
                 continue
             action_ia = ai.get("action", "WAIT")
             confidence_ia = ai.get("confidence", 0)
+            if coin_already_open and ai_continuous:
+                add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
+                continue
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             if action_ia == "WAIT" or confidence_ia < 50:
                 continue
@@ -817,6 +837,17 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     scanning_tasks[user_id] = task
     add_bot_log(user_id, "▶️ Bot démarré", "success")
     return {"message": "Bot démarré"}
+
+@app.put("/api/config/ai-continuous")
+def toggle_ai_continuous(req: dict, user_id: int = Depends(get_current_user)):
+    value = 1 if req.get("enabled") else 0
+    conn = get_db()
+    conn.execute("UPDATE bot_config SET ai_continuous=? WHERE user_id=?", (value, user_id))
+    conn.commit()
+    conn.close()
+    status = "activée" if value else "désactivée"
+    add_bot_log(user_id, f"🔄 Analyse IA continue {status}", "info")
+    return {"ai_continuous": value}
 
 @app.post("/api/bot/stop")
 def stop_bot(user_id: int = Depends(get_current_user)):
