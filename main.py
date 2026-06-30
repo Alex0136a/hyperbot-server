@@ -459,7 +459,13 @@ async def scan_markets(user_id: int):
                 continue
 
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
-            if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 50:
+            if not ai:
+                add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
+                continue
+            action_ia = ai.get("action", "WAIT")
+            confidence_ia = ai.get("confidence", 0)
+            add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
+            if action_ia == "WAIT" or confidence_ia < 50:
                 continue
 
             rsi_now = tech.get("rsi") or 50
