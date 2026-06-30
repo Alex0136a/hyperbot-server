@@ -573,17 +573,23 @@ async def scan_markets(user_id: int):
         conn.close()
 
 async def run_bot_loop(user_id: int):
-    while True:
-        conn = get_db()
-        config = conn.execute("SELECT is_running FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        conn.close()
-        if not config or not config["is_running"]:
-            break
-        try:
-            await scan_markets(user_id)
-        except Exception as e:
-            print(f"Erreur scan global: {e}")
-        await asyncio.sleep(60)
+    try:
+        while True:
+            conn = get_db()
+            config = conn.execute("SELECT is_running FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            conn.close()
+            if not config or not config["is_running"]:
+                break
+            try:
+                await scan_markets(user_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                add_bot_log(user_id, f"⚠️ Erreur scan: {e}", "error")
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        add_bot_log(user_id, "🛑 Boucle de scan interrompue", "info")
+        raise
 
 # ── FASTAPI APP ──────────────────────────────────────────────
 @asynccontextmanager
@@ -715,9 +721,12 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     conn.close()
     if not user["api_key"]:
         raise HTTPException(status_code=400, detail="Clé API Anthropic manquante dans les paramètres")
-    if user_id not in scanning_tasks or scanning_tasks[user_id].done():
-        task = asyncio.create_task(run_bot_loop(user_id))
-        scanning_tasks[user_id] = task
+    # Annuler une eventuelle tache zombie avant d'en creer une nouvelle
+    if user_id in scanning_tasks and not scanning_tasks[user_id].done():
+        scanning_tasks[user_id].cancel()
+    task = asyncio.create_task(run_bot_loop(user_id))
+    scanning_tasks[user_id] = task
+    add_bot_log(user_id, "▶️ Bot démarré", "success")
     return {"message": "Bot démarré"}
 
 @app.post("/api/bot/stop")
@@ -726,6 +735,11 @@ def stop_bot(user_id: int = Depends(get_current_user)):
     conn.execute("UPDATE bot_config SET is_running=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
+    # Annulation immediate de la tache en cours, sans attendre la fin du sleep(60)
+    if user_id in scanning_tasks and not scanning_tasks[user_id].done():
+        scanning_tasks[user_id].cancel()
+        del scanning_tasks[user_id]
+    add_bot_log(user_id, "⏹️ Bot arrêté manuellement", "info")
     return {"message": "Bot arrêté"}
 
 @app.get("/api/signals")
