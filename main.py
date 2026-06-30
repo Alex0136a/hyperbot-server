@@ -337,10 +337,21 @@ Respond ONLY with JSON (no markdown):
             json={"model": "claude-sonnet-4-6", "max_tokens": 1000, "messages": [{"role": "user", "content": prompt}]},
             timeout=30
         )
+        if r.status_code != 200:
+            print(f"Anthropic API erreur {r.status_code}: {r.text[:200]}")
+            return None
         data = r.json()
+        if "error" in data:
+            print(f"Anthropic API erreur: {data['error']}")
+            return None
         text = "".join(b.get("text","") for b in data.get("content",[]))
-        return json.loads(text.replace("```json","").replace("```","").strip())
-    except:
+        clean = text.replace("```json","").replace("```","").strip()
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        print(f"JSON parse erreur pour {coin}: {e} | text={text[:100] if 'text' in dir() else 'N/A'}")
+        return None
+    except Exception as e:
+        print(f"Anthropic appel erreur pour {coin}: {type(e).__name__}: {e}")
         return None
 
 # ── MOTEUR DE SCAN ───────────────────────────────────────────
