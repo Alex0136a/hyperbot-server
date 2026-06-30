@@ -254,7 +254,7 @@ function App() {
   const loadData = useCallback(async () => {
     if (!token) return;
     try {
-      const [cfg, sigs, prc, st, pos, pap] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, pap, botLogsRes] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -265,7 +265,7 @@ function App() {
       ]);
       setConfig(cfg);
       setPaper(pap);
-      setBotLogs(logs?.logs || []);
+      setBotLogs(botLogsRes?.logs || []);
       setSignals(sigs);
       setPrices(prc);
       setStats(st);
