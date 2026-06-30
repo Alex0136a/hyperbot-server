@@ -230,6 +230,7 @@ function App() {
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
   const [paper, setPaper] = useState(null);
+  const [aiContinuous, setAiContinuous] = useState(false);
   const [botLogs, setBotLogs] = useState([]);
   const [paperSize, setPaperSize] = useState(50);
   const [liveW, setLiveW] = useState("");
@@ -265,6 +266,7 @@ function App() {
       ]);
       setConfig(cfg);
       setPaper(pap);
+      setAiContinuous(cfg?.ai_continuous === 1);
       setBotLogs(botLogsRes?.logs || []);
       setSignals(sigs);
       setPrices(prc);
@@ -593,6 +595,23 @@ Confirmer ?`
               style={{width:"100%",background:saved?"#052e16":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:saved?"1px solid #34d399":"none",borderRadius:8,padding:"11px",color:saved?"#34d399":"#fff",fontWeight:700,fontSize:12}}>
               {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
             </button>
+          </div>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8}}>🤖 Analyse IA continue</div>
+            <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
+              Par défaut, l'IA ne s'appelle pas si un coin est déjà en position (économie de crédits).
+              Activez pour recevoir les avis IA en continu — utile pour le trading manuel.
+            </div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <span style={{fontSize:12,color:"#94a3b8"}}>{aiContinuous ? "🟢 Activée — L'IA analyse même les positions ouvertes" : "⚫ Désactivée — L'IA skip les coins déjà ouverts"}</span>
+              <button onClick={()=>{
+                const newVal = !aiContinuous;
+                setAiContinuous(newVal);
+                apiCall("/api/config/ai-continuous","PUT",{enabled:newVal},token).then(loadData);
+              }} style={{background:aiContinuous?"#052e16":"#1e2d4a",border:aiContinuous?"1px solid #34d399":"1px solid #475569",borderRadius:8,padding:"8px 16px",color:aiContinuous?"#34d399":"#94a3b8",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                {aiContinuous ? "✅ ON" : "⭕ OFF"}
+              </button>
+            </div>
           </div>
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
             <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Maintenance</div>
