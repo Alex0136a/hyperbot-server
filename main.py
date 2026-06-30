@@ -81,6 +81,11 @@ def init_db():
         conn.execute("ALTER TABLE paper_trades ADD COLUMN lowest_price REAL")
         conn.commit()
     except: pass
+    try:
+        coins_json = '["BTC","ETH","HYPE"]'
+        conn.execute("UPDATE bot_config SET active_coins=?", (coins_json,))
+        conn.commit()
+    except: pass
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -670,7 +675,7 @@ async def run_bot_loop(user_id: int):
                 raise
             except Exception as e:
                 add_bot_log(user_id, f"⚠️ Erreur scan: {e}", "error")
-            await asyncio.sleep(60)
+            await asyncio.sleep(180)
     except asyncio.CancelledError:
         add_bot_log(user_id, "🛑 Boucle de scan interrompue", "info")
         raise
