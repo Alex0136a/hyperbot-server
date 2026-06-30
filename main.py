@@ -65,6 +65,22 @@ def init_db():
         conn.execute("ALTER TABLE paper_portfolio ADD COLUMN initial_balance REAL DEFAULT 1000.0")
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN tp1_hit INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN trailing_sl REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN highest_price REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN lowest_price REAL")
+        conn.commit()
+    except: pass
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +160,10 @@ def init_db():
             opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
             closed_at TEXT,
             close_reason TEXT,
+            tp1_hit INTEGER DEFAULT 0,
+            trailing_sl REAL,
+            highest_price REAL,
+            lowest_price REAL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
     """)
@@ -281,7 +301,9 @@ async def fetch_positions(client, address):
 # ── ANALYSE IA ───────────────────────────────────────────────
 async def analyze_with_ai(client, coin, tech, ob, price, api_key):
     prompt = f"""You are an elite quantitative trading analyst for crypto perpetual futures on Hyperliquid.
-Analyze {coin}/USDC and provide a precise trading decision.
+You think like a professional trader: you ACCEPT risk, you ANTICIPATE moves, not react to fear.
+Analyze {coin}/USDC and provide a decisive trading decision.
+
 PRICE: ${price}
 RSI: {tech.get('rsi','N/A')} | MACD Bull: {tech.get('macd_bull','N/A')} | Bear: {tech.get('macd_bear','N/A')}
 EMA20: {tech.get('ema20','N/A')} | EMA50: {tech.get('ema50','N/A')} | EMA200: {tech.get('ema200','N/A')}
@@ -290,10 +312,15 @@ ATR: {tech.get('atr','N/A')} | VWAP: {tech.get('vwap','N/A')}
 Volume: {tech.get('volume_trend','N/A')}
 BTC MARKET TREND: {tech.get('btc_trend','neutral')} ({tech.get('btc_change',0):.1f}% sur 4h)
 
-STRATEGY CONTEXT:
-- If BTC trend is bullish: prioritize LONG positions on pullbacks, avoid SHORT
-- If BTC trend is bearish: prioritize SHORT positions on bounces, avoid LONG  
-- If BTC trend is neutral: look for reversals from RSI extremes (oversold/overbought)
+TRADER PHILOSOPHY:
+- RSI < 25: extreme oversold = HIGH probability LONG opportunity (anticipate bounce)
+- RSI > 75: extreme overbought = HIGH probability SHORT opportunity (anticipate correction)
+- RSI 25-45: oversold zone = LONG bias if any bullish confluence
+- RSI 55-75: overbought zone = SHORT bias if any bearish confluence
+- If BTC trend is bullish: favor LONG, SHORT only with very strong signals
+- If BTC trend is bearish: favor SHORT, LONG only with very strong signals
+- If BTC trend is neutral: look for reversals, both directions valid
+- Risk management is handled by SL/TP — your job is to find the BEST ENTRY
 
 CONSTRAINTS: Leverage x2-x5, position 5-15% portfolio, min R/R 2:1
 Respond ONLY with JSON (no markdown):
@@ -410,10 +437,11 @@ async def scan_markets(user_id: int):
             # Filtre RSI — eviter de shorter en survente ou longer en surachat
             rsi_val = tech.get("rsi")
             if rsi_val:
-                if rsi_val < 40:
-                    add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop bas - pas de SHORT", "warning")
-                if rsi_val > 60:
-                    add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop haut - pas de LONG", "warning")
+                # Info seulement - l'IA decide du timing
+                if rsi_val < 30:
+                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_val:.1f} - survente (IA juge)", "info")
+                elif rsi_val > 70:
+                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_val:.1f} - surachat (IA juge)", "info")
 
             # Un seul signal par coin par scan (5 min)
             conn_check = get_db()
@@ -431,7 +459,7 @@ async def scan_markets(user_id: int):
                 continue
 
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
-            if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 55:
+            if not ai or ai.get("action") == "WAIT" or ai.get("confidence", 0) < 50:
                 continue
 
             rsi_now = tech.get("rsi") or 50
@@ -444,7 +472,7 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"↩️ {coin}: SHORT ignoré - marché haussier", "info")
                     continue
                 if action == "LONG" and rsi_now > 75:
-                    add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI {rsi_now:.1f} trop haut (tendance)", "warning")
+                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} haut en tendance - IA juge", "info")
                     continue
                 # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
                 add_bot_log(user_id, f"✅ {coin}: LONG autorisé - tendance haussière (RSI {rsi_now:.1f})", "success")
@@ -456,30 +484,14 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"↩️ {coin}: LONG ignoré - marché baissier", "info")
                     continue
                 if action == "SHORT" and rsi_now < 25:
-                    add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI {rsi_now:.1f} trop bas (tendance)", "warning")
+                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} bas en tendance - IA juge", "info")
                     continue
                 add_bot_log(user_id, f"✅ {coin}: SHORT autorisé - tendance baissière (RSI {rsi_now:.1f})", "success")
 
             # === MODE NEUTRE (retournements) ===
             else:
-                # En marche neutre: seuils resserres 40/60 + confirmation anti-faux-signal
-                if action == "SHORT" and rsi_now < 40:
-                    add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI {rsi_now:.1f} en survente (seuil 40)", "warning")
-                    continue
-                if action == "LONG" and rsi_now > 60:
-                    add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI {rsi_now:.1f} en surachat (seuil 60)", "warning")
-                    continue
-                if user_id not in rsi_history:
-                    rsi_history[user_id] = {}
-                prev_rsi = rsi_history[user_id].get(coin)
-                rsi_history[user_id][coin] = rsi_now
-                if prev_rsi is not None:
-                    if action == "LONG" and rsi_now < prev_rsi - 1:
-                        add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI en baisse ({prev_rsi:.1f}→{rsi_now:.1f})", "warning")
-                        continue
-                    if action == "SHORT" and rsi_now > prev_rsi + 1:
-                        add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI en hausse ({prev_rsi:.1f}→{rsi_now:.1f})", "warning")
-                        continue
+                # L'IA decide - on lui fait confiance sur le timing
+                add_bot_log(user_id, f"🤖 {coin}: Mode neutre - IA analyse (RSI {rsi_now:.1f})", "info")
 
             # Ignorer signaux contradictoires
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
@@ -542,15 +554,70 @@ async def scan_markets(user_id: int):
             direction = 1 if trade["action"] == "LONG" else -1
             pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
             close_reason = None
-            if trade["stop_loss"]:
-                if trade["action"] == "LONG" and cur <= trade["stop_loss"]: close_reason = "STOP_LOSS"
-                elif trade["action"] == "SHORT" and cur >= trade["stop_loss"]: close_reason = "STOP_LOSS"
-            if trade["take_profit2"]:
-                if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
-                elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
-            elif trade["take_profit1"]:
-                if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
-                elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
+            trailing_pct = 0.015  # 1.5% trailing distance
+            tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
+            trailing_sl = trade["trailing_sl"]
+            highest = trade["highest_price"] or cur
+            lowest = trade["lowest_price"] or cur
+
+            # Mettre a jour highest/lowest price
+            new_highest = max(highest, cur)
+            new_lowest = min(lowest, cur)
+
+            if trade["action"] == "LONG":
+                # TP1 pas encore atteint
+                if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
+                    # TP1 atteint : fermer 50%, SL remonte a breakeven, activer trailing
+                    pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
+                        highest_price=?, current_price=? WHERE id=?""",
+                        (trade["entry_price"], new_highest, cur, trade["id"]))
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
+                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
+                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
+                    conn.commit()
+                    continue
+                # Trailing SL actif apres TP1
+                if tp1_hit:
+                    new_trailing_sl = new_highest * (1 - trailing_pct)
+                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
+                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
+                        (effective_sl, new_highest, cur, trade["id"]))
+                    if cur <= effective_sl:
+                        close_reason = "TRAILING_SL"
+                else:
+                    # SL normal avant TP1
+                    if trade["stop_loss"] and cur <= trade["stop_loss"]:
+                        close_reason = "STOP_LOSS"
+                    conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
+                        (new_highest, cur, trade["id"]))
+
+            elif trade["action"] == "SHORT":
+                # TP1 pas encore atteint
+                if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
+                    pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
+                        lowest_price=?, current_price=? WHERE id=?""",
+                        (trade["entry_price"], new_lowest, cur, trade["id"]))
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
+                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
+                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
+                    conn.commit()
+                    continue
+                # Trailing SL actif apres TP1
+                if tp1_hit:
+                    new_trailing_sl = new_lowest * (1 + trailing_pct)
+                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
+                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
+                        (effective_sl, new_lowest, cur, trade["id"]))
+                    if cur >= effective_sl:
+                        close_reason = "TRAILING_SL"
+                else:
+                    if trade["stop_loss"] and cur >= trade["stop_loss"]:
+                        close_reason = "STOP_LOSS"
+                    conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
+                        (new_lowest, cur, trade["id"]))
+
             if close_reason:
                 conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                     closed_at=?, close_reason=? WHERE id=?""",
