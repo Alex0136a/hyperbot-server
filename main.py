@@ -905,11 +905,15 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
     open_trades = [dict(t) for t in trades]
     closed_trades = [dict(t) for t in closed]
     total_pnl = sum(t["pnl"] for t in open_trades)
+    # Capital total = balance disponible + marges bloquees dans les trades ouverts
+    open_margin = sum(t["size_usdc"] for t in open_trades)
+    total_capital = portfolio["balance"] + open_margin
+    performance_pct = round((total_capital + total_pnl - portfolio["initial_balance"]) / portfolio["initial_balance"] * 100, 2)
     return {
         "balance": portfolio["balance"],
         "initial_balance": portfolio["initial_balance"],
         "total_pnl": round(total_pnl, 2),
-        "total_pnl_pct": round((portfolio["balance"] + total_pnl - portfolio["initial_balance"]) / portfolio["initial_balance"] * 100, 2),
+        "total_pnl_pct": performance_pct,
         "open_trades": open_trades,
         "closed_trades": closed_trades,
     }
