@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 DB_PATH = "/data/hyperbot.db"
 
 bot_logs_memory = {}  # user_id -> list of log entries (max 50)
+rsi_history = {}  # user_id -> {coin: last_rsi} for confirmation tracking
 
 def add_bot_log(user_id: int, message: str, level: str = "info"):
     if user_id not in bot_logs_memory:
@@ -409,10 +410,9 @@ async def scan_markets(user_id: int):
             # Filtre RSI — eviter de shorter en survente ou longer en surachat
             rsi_val = tech.get("rsi")
             if rsi_val:
-                if rsi_val < 35:
+                if rsi_val < 40:
                     add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop bas - pas de SHORT", "warning")
-                    # Autoriser seulement les LONG en survente
-                if rsi_val > 65:
+                if rsi_val > 60:
                     add_bot_log(user_id, f"⛔ {coin}: RSI {rsi_val:.1f} trop haut - pas de LONG", "warning")
 
             # Un seul signal par coin par scan (5 min)
@@ -444,7 +444,7 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"↩️ {coin}: SHORT ignoré - marché haussier", "info")
                     continue
                 if action == "LONG" and rsi_now > 75:
-                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} trop haut meme en tendance")
+                    add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI {rsi_now:.1f} trop haut (tendance)", "warning")
                     continue
                 # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
                 add_bot_log(user_id, f"✅ {coin}: LONG autorisé - tendance haussière (RSI {rsi_now:.1f})", "success")
@@ -456,19 +456,30 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"↩️ {coin}: LONG ignoré - marché baissier", "info")
                     continue
                 if action == "SHORT" and rsi_now < 25:
-                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} trop bas meme en tendance")
+                    add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI {rsi_now:.1f} trop bas (tendance)", "warning")
                     continue
                 add_bot_log(user_id, f"✅ {coin}: SHORT autorisé - tendance baissière (RSI {rsi_now:.1f})", "success")
 
             # === MODE NEUTRE (retournements) ===
             else:
-                # En marche neutre: chercher retournements depuis extremes
-                if action == "SHORT" and rsi_now < 30:
-                    print(f"{coin}: SHORT ignore - RSI {rsi_now:.1f} survente extreme, risque rebond")
+                # En marche neutre: seuils resserres 40/60 + confirmation anti-faux-signal
+                if action == "SHORT" and rsi_now < 40:
+                    add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI {rsi_now:.1f} en survente (seuil 40)", "warning")
                     continue
-                if action == "LONG" and rsi_now > 70:
-                    print(f"{coin}: LONG ignore - RSI {rsi_now:.1f} surachat extreme, risque correction")
+                if action == "LONG" and rsi_now > 60:
+                    add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI {rsi_now:.1f} en surachat (seuil 60)", "warning")
                     continue
+                if user_id not in rsi_history:
+                    rsi_history[user_id] = {}
+                prev_rsi = rsi_history[user_id].get(coin)
+                rsi_history[user_id][coin] = rsi_now
+                if prev_rsi is not None:
+                    if action == "LONG" and rsi_now < prev_rsi - 1:
+                        add_bot_log(user_id, f"⛔ {coin}: LONG ignoré - RSI en baisse ({prev_rsi:.1f}→{rsi_now:.1f})", "warning")
+                        continue
+                    if action == "SHORT" and rsi_now > prev_rsi + 1:
+                        add_bot_log(user_id, f"⛔ {coin}: SHORT ignoré - RSI en hausse ({prev_rsi:.1f}→{rsi_now:.1f})", "warning")
+                        continue
 
             # Ignorer signaux contradictoires
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
