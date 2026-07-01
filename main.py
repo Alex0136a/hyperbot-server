@@ -769,6 +769,13 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                         (new_lowest, cur, trade["id"]))
 
+            # Toujours mettre à jour le prix et PnL actuels
+            if not close_reason:
+                conn.execute(
+                    "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
+                )
+
             if close_reason:
                 conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                     closed_at=?, close_reason=? WHERE id=?""",
