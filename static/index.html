@@ -1,1281 +1,890 @@
-"""
-HyperBot AI — Backend Python FastAPI
-Serveur principal avec authentification, API et moteur de scan
-"""
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>HyperBot AI</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0e1a; color: #e2e8f0; font-family: 'IBM Plex Mono','Courier New',monospace; font-size: 13px; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #1e2d4a; border-radius: 3px; }
+input { outline: none; }
+button { cursor: pointer; font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import Optional, List
-import sqlite3
-import hashlib
-import secrets
-import json
-import asyncio
-import httpx
-import time
-import os
-from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
+// ── API CLIENT ───────────────────────────────────────────────
+const API = window.location.origin;
 
-# ── BASE DE DONNÉES ──────────────────────────────────────────
-DB_PATH = "/data/hyperbot.db"
+async function apiCall(path, method="GET", body=null, token=null) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const r = await fetch(`${API}${path}`, {
+    method, headers, body: body ? JSON.stringify(body) : null
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || "Erreur serveur");
+  return data;
+}
 
-bot_logs_memory = {}  # user_id -> list of log entries (max 50)
-rsi_history = {}  # user_id -> {coin: last_rsi} for confirmation tracking
+// ── CONSTANTES ───────────────────────────────────────────────
+const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"];
+const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
+const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
-def add_bot_log(user_id: int, message: str, level: str = "info"):
-    if user_id not in bot_logs_memory:
-        bot_logs_memory[user_id] = []
-    import datetime
-    entry = {
-        "time": datetime.datetime.utcnow().strftime("%H:%M:%S"),
-        "message": message,
-        "level": level
+// ── RAPPORT TXT ──────────────────────────────────────────────
+function generateReport(signals, stats, prices, email) {
+  const now = new Date();
+  const sep = "=".repeat(60), thin = "-".repeat(60);
+  const active = signals.filter(s=>s.action!=="WAIT");
+  let t = "";
+  t += `${sep}
+  HYPERBOT AI -- RAPPORT DE SESSION
+${sep}
+`;
+  t += `  Date     : ${now.toLocaleDateString("fr-FR")} a ${now.toLocaleTimeString("fr-FR")}
+`;
+  t += `  Compte   : ${email}
+`;
+  t += `  Serveur  : Autonome 24h/24 · Railway
+${sep}
+
+`;
+  t += `[ RESUME EXECUTIF ]
+${thin}
+`;
+  t += `  Signaux  : ${stats.total||0} (LONG:${stats.longs||0} / SHORT:${stats.shorts||0})
+`;
+  t += `  Confiance moy. : ${stats.avg_confidence||0}%
+`;
+  t += `  Risk/Reward moy. : ${stats.avg_rr||"--"}
+
+`;
+  t += `[ PRIX MARCHE ]
+${thin}
+`;
+  Object.entries(prices).forEach(([coin,price])=>{ t+=`  ${coin.padEnd(8)}: $${price?.toLocaleString("en-US",{maximumFractionDigits:4})}
+`; });
+  t += `
+[ SIGNAUX DETAILLES (${active.length}) ]
+${thin}
+`;
+  active.forEach((sig,i)=>{
+    t += `
+  [${i+1}] ${sig.action} ${sig.coin}/USDC
+`;
+    t += `  ${"─".repeat(40)}
+`;
+    t += `  Date        : ${new Date(sig.created_at).toLocaleString("fr-FR")}
+`;
+    t += `  Confiance   : ${sig.confidence}%
+`;
+    t += `  Levier      : x${sig.leverage}
+`;
+    t += `  Taille pos. : ${sig.position_size}% du capital
+`;
+    t += `  Risk/Reward : ${sig.risk_reward?.toFixed(2)}
+`;
+    t += `  Timeframe   : ${sig.timeframe}
+`;
+    t += `  Entree      : $${sig.entry?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Stop Loss   : $${sig.stop_loss?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Take Profit1: $${sig.take_profit1?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Take Profit2: $${sig.take_profit2?.toLocaleString("en-US",{maximumFractionDigits:6})}
+`;
+    t += `  Analyse IA  : ${sig.reasoning||"--"}
+`;
+    const ks = JSON.parse(sig.key_signals||"[]");
+    if(ks.length) t += `  Signaux cles: ${ks.join(" | ")}
+`;
+    t += `  RSI         : ${sig.rsi?.toFixed(1)||"--"}
+`;
+    t += `  ATR         : ${sig.atr?.toFixed(4)||"--"}
+`;
+    t += `  VWAP        : ${sig.vwap?.toFixed(2)||"--"}
+`;
+    const cur = prices[sig.coin];
+    if(cur){
+      const dir=sig.action==="LONG"?1:-1;
+      const pnl=((cur-sig.entry)/sig.entry*100*dir).toFixed(2);
+      const tp1=sig.action==="LONG"?cur>=sig.take_profit1:cur<=sig.take_profit1;
+      const tp2=sig.action==="LONG"?cur>=sig.take_profit2:cur<=sig.take_profit2;
+      const sl=sig.action==="LONG"?cur<=sig.stop_loss:cur>=sig.stop_loss;
+      t += `  Prix actuel : $${cur.toLocaleString()}
+`;
+      t += `  PnL estime  : ${pnl>0?"+":""}${pnl}%
+`;
+      t += `  TP1         : ${tp1?"ATTEINT":"En attente"}
+`;
+      t += `  TP2         : ${tp2?"ATTEINT":"En attente"}
+`;
+      t += `  Stop Loss   : ${sl?"TOUCHE":"Intact"}
+`;
     }
-    bot_logs_memory[user_id].insert(0, entry)
-    if len(bot_logs_memory[user_id]) > 50:
-        bot_logs_memory[user_id] = bot_logs_memory[user_id][:50]
-    print(message)
-    # Sauvegarde persistante en DB (garder 500 derniers logs)
-    try:
-        conn = get_db()
-        conn.execute(
-            "INSERT INTO bot_activity_log (user_id, level, message) VALUES (?,?,?)",
-            (user_id, level, message)
-        )
-        # Nettoyer les vieux logs au-dela de 500
-        conn.execute("""DELETE FROM bot_activity_log WHERE user_id=? AND id NOT IN (
-            SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 500
-        )""", (user_id, user_id))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+  });
+  t += `
+${sep}
+  Rapport HyperBot AI · Powered by Claude
+  Collez ce rapport dans Claude pour analyse
+${sep}
+`;
+  return t;
+}
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+function downloadTxt(content, filename) {
+  const b = new Blob([content],{type:"text/plain;charset=utf-8"});
+  const u = URL.createObjectURL(b);
+  const a = document.createElement("a");
+  a.href=u; a.download=filename; a.click();
+  URL.revokeObjectURL(u);
+}
 
-def init_db():
-    conn = get_db()
-    # Migration: ajouter les nouvelles colonnes si elles n'existent pas
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trading_mode TEXT DEFAULT 'paper'")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN max_open_trades INTEGER DEFAULT 5")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE paper_portfolio ADD COLUMN initial_balance REAL DEFAULT 1000.0")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE paper_trades ADD COLUMN tp1_hit INTEGER DEFAULT 0")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE paper_trades ADD COLUMN trailing_sl REAL")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE paper_trades ADD COLUMN highest_price REAL")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE paper_trades ADD COLUMN lowest_price REAL")
-        conn.commit()
-    except: pass
-    try:
-        coins_json = '["BTC","ETH","HYPE"]'
-        conn.execute("UPDATE bot_config SET active_coins=?", (coins_json,))
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
-        conn.commit()
-    except: pass
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            wallet TEXT DEFAULT '',
-            api_key TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            expires_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            coin TEXT NOT NULL,
-            action TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            entry REAL,
-            stop_loss REAL,
-            take_profit1 REAL,
-            take_profit2 REAL,
-            leverage INTEGER,
-            position_size INTEGER,
-            risk_reward REAL,
-            timeframe TEXT,
-            reasoning TEXT,
-            key_signals TEXT,
-            price REAL,
-            rsi REAL,
-            atr REAL,
-            vwap REAL,
-            status TEXT DEFAULT 'ACTIVE',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS bot_config (
-            user_id INTEGER PRIMARY KEY,
-            active_coins TEXT DEFAULT '["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"]',
-            is_running INTEGER DEFAULT 0,
-            trading_mode TEXT DEFAULT 'paper',
-            max_position_usdc REAL DEFAULT 50.0,
-            max_open_trades INTEGER DEFAULT 5,
-            last_scan TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS prices (
-            coin TEXT PRIMARY KEY,
-            price REAL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS paper_portfolio (
-            user_id INTEGER PRIMARY KEY,
-            balance REAL DEFAULT 1000.0,
-            initial_balance REAL DEFAULT 1000.0,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS bot_activity_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            level TEXT DEFAULT 'info',
-            message TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            coin TEXT NOT NULL,
-            action TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            current_price REAL,
-            size_usdc REAL NOT NULL,
-            leverage INTEGER DEFAULT 1,
-            stop_loss REAL,
-            take_profit1 REAL,
-            take_profit2 REAL,
-            pnl REAL DEFAULT 0,
-            pnl_pct REAL DEFAULT 0,
-            status TEXT DEFAULT 'OPEN',
-            signal_id INTEGER,
-            opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            closed_at TEXT,
-            close_reason TEXT,
-            tp1_hit INTEGER DEFAULT 0,
-            trailing_sl REAL,
-            highest_price REAL,
-            lowest_price REAL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-    """)
-    conn.commit()
-    conn.close()
+// ── LOGIN PAGE ───────────────────────────────────────────────
+function LoginPage({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-# ── AUTHENTIFICATION ─────────────────────────────────────────
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+  const submit = async () => {
+    if (!email || !password) { setError("Remplissez tous les champs"); return; }
+    setLoading(true); setError("");
+    try {
+      const path = mode === "login" ? "/api/login" : "/api/register";
+      const data = await apiCall(path, "POST", { email, password });
+      if (mode === "register") { setMode("login"); setError("Compte créé ! Connectez-vous."); setLoading(false); return; }
+      localStorage.setItem("hb_token", data.token);
+      localStorage.setItem("hb_email", data.email);
+      onLogin(data.token, data.email);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
 
-def create_token() -> str:
-    return secrets.token_urlsafe(32)
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0e1a"}}>
+      <div style={{width:380,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:12,padding:32}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{width:48,height:48,borderRadius:12,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,margin:"0 auto 12px"}}>⚡</div>
+          <div style={{fontSize:20,fontWeight:700,color:"#f1f5f9"}}>HyperBot AI</div>
+          <div style={{fontSize:11,color:"#64748b",marginTop:4}}>Trading autonome · Hyperliquid</div>
+        </div>
 
-def verify_token(token: str) -> Optional[int]:
-    conn = get_db()
-    row = conn.execute(
-        "SELECT user_id FROM sessions WHERE token=? AND expires_at>?",
-        (token, datetime.utcnow().isoformat())
-    ).fetchone()
-    conn.close()
-    return row["user_id"] if row else None
+        <div style={{display:"flex",gap:4,marginBottom:20,background:"#0a0e1a",borderRadius:8,padding:4}}>
+          {["login","register"].map(m=>(
+            <button key={m} onClick={()=>{setMode(m);setError("");}}
+              style={{flex:1,padding:"8px",borderRadius:6,border:"none",background:mode===m?"#1e2d4a":"transparent",color:mode===m?"#60a5fa":"#64748b",fontSize:11,fontWeight:mode===m?700:400}}>
+              {m==="login"?"Connexion":"Créer un compte"}
+            </button>
+          ))}
+        </div>
 
-security = HTTPBearer()
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>EMAIL</div>
+          <input value={email} onChange={e=>setEmail(e.target.value)} type="email" placeholder="votre@email.com"
+            style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
+        </div>
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    user_id = verify_token(credentials.credentials)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Session expirée, veuillez vous reconnecter")
-    return user_id
+        <div style={{marginBottom:20}}>
+          <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>MOT DE PASSE</div>
+          <input value={password} onChange={e=>setPassword(e.target.value)} type="password" placeholder="••••••••"
+            onKeyDown={e=>e.key==="Enter"&&submit()}
+            style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
+        </div>
 
-# ── MOTEUR D'ANALYSE TECHNIQUE ───────────────────────────────
-def calc_ema(prices, period):
-    if len(prices) < period:
-        return []
-    k = 2 / (period + 1)
-    emas = [sum(prices[:period]) / period]
-    for i in range(period, len(prices)):
-        emas.append(prices[i] * k + emas[-1] * (1 - k))
-    return emas
+        {error && <div style={{background:error.includes("créé")?"#052e16":"#2d0a0a",border:`1px solid ${error.includes("créé")?"#34d399":"#f87171"}`,borderRadius:6,padding:"8px 12px",marginBottom:12,fontSize:11,color:error.includes("créé")?"#34d399":"#f87171"}}>{error}</div>}
 
-def calc_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    gains, losses = 0, 0
-    for i in range(1, period + 1):
-        d = prices[i] - prices[i-1]
-        if d > 0: gains += d
-        else: losses -= d
-    ag, al = gains/period, losses/period
-    for i in range(period+1, len(prices)):
-        d = prices[i] - prices[i-1]
-        ag = (ag*(period-1) + max(d,0)) / period
-        al = (al*(period-1) + max(-d,0)) / period
-    if al == 0: return 100
-    return 100 - 100/(1 + ag/al)
+        <button onClick={submit} disabled={loading}
+          style={{width:"100%",background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:8,padding:"12px",color:"#fff",fontWeight:700,fontSize:13}}>
+          {loading?"Chargement...":(mode==="login"?"Se connecter":"Créer le compte")}
+        </button>
 
-def calc_macd(prices):
-    e12 = calc_ema(prices, 12)
-    e26 = calc_ema(prices, 26)
-    if not e12 or not e26:
-        return None
-    off = len(e12) - len(e26)
-    macd_line = [e12[i+off] - v for i, v in enumerate(e26)]
-    sig = calc_ema(macd_line, 9)
-    if not sig:
-        return None
-    off_m = len(macd_line) - len(sig)
-    return {
-        "macd": macd_line[-1],
-        "signal": sig[-1],
-        "histogram": macd_line[-1] - sig[-1],
-        "crossBull": macd_line[-1] > sig[-1] and macd_line[-2+off_m] <= sig[-2],
-        "crossBear": macd_line[-1] < sig[-1] and macd_line[-2+off_m] >= sig[-2],
+        <div style={{textAlign:"center",marginTop:16,fontSize:10,color:"#334155"}}>
+          Vos données sont chiffrées et stockées en sécurité
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ─────────────────────────────────────────────────
+function App() {
+  const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
+  const [email, setEmail] = useState(()=>localStorage.getItem("hb_email")||"");
+  const [config, setConfig] = useState(null);
+  const [signals, setSignals] = useState([]);
+  const [prices, setPrices] = useState({});
+  const [stats, setStats] = useState({});
+  const [positions, setPositions] = useState([]);
+  const [tab, setTab] = useState("dashboard");
+  const [logs, setLogs] = useState([]);
+  const [paper, setPaper] = useState(null);
+  const [aiContinuous, setAiContinuous] = useState(false);
+  const [botLogs, setBotLogs] = useState([]);
+  const [persistentLogs, setPersistentLogs] = useState(false);
+  const [paperSize, setPaperSize] = useState(50);
+  const [liveW, setLiveW] = useState("");
+  const [liveK, setLiveK] = useState("");
+  const [activeCoins, setActiveCoins] = useState(ALL_COINS);
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const logEnd = useRef(null);
+  const pollRef = useRef(null);
+
+  const addLog = useCallback((msg, type="info") => {
+    setLogs(p=>[...p.slice(-199),{msg,type,time:new Date().toLocaleTimeString("fr-FR")}]);
+  },[]);
+
+  const logout = () => {
+    apiCall("/api/logout","POST",null,token).catch(()=>{});
+    localStorage.removeItem("hb_token");
+    localStorage.removeItem("hb_email");
+    setToken(""); setEmail("");
+  };
+
+  const loadData = useCallback(async () => {
+    if (!token) return;
+    try {
+      const [cfg, sigs, prc, st, pos, pap, botLogsRes] = await Promise.all([
+        apiCall("/api/config","GET",null,token),
+        apiCall("/api/signals?limit=50","GET",null,token),
+        apiCall("/api/prices","GET",null,token),
+        apiCall("/api/stats","GET",null,token),
+        apiCall("/api/positions","GET",null,token),
+        apiCall("/api/paper/portfolio","GET",null,token),
+        apiCall("/api/bot/logs","GET",null,token),
+      ]);
+      setConfig(cfg);
+      setPaper(pap);
+      setAiContinuous(cfg?.ai_continuous === 1);
+      setBotLogs(botLogsRes?.logs || []);
+      setSignals(sigs);
+      setPrices(prc);
+      setStats(st);
+      setPositions(pos);
+      setLiveW(cfg.wallet||"");
+      setActiveCoins(cfg.active_coins||ALL_COINS);
+    } catch(e) {
+      if (e.message.includes("Session")) { logout(); }
     }
+  },[token]);
 
-def calc_bb(prices, period=20, mult=2):
-    if len(prices) < period:
-        return None
-    sl = prices[-period:]
-    mean = sum(sl) / period
-    std = (sum((x-mean)**2 for x in sl) / period) ** 0.5
-    return {"upper": mean+mult*std, "middle": mean, "lower": mean-mult*std}
+  useEffect(() => {
+    if (token) {
+      loadData();
+      pollRef.current = setInterval(loadData, 15000);
+    }
+    return () => clearInterval(pollRef.current);
+  }, [token, loadData]);
 
-def calc_atr(candles, period=14):
-    if len(candles) < period+1:
-        return None
-    trs = [max(c["h"]-c["l"], abs(c["h"]-candles[i]["c"]), abs(c["l"]-candles[i]["c"]))
-           for i, c in enumerate(candles[1:])]
-    return sum(trs[-period:]) / period
+  useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
 
-def calc_vwap(candles):
-    tv, v = 0, 0
-    for c in candles:
-        tp = (c["h"]+c["l"]+c["c"]) / 3
-        tv += tp * c["v"]
-        v += c["v"]
-    return tv/v if v else None
+  const startBot = async () => {
+    setLoading(true);
+    try {
+      await apiCall("/api/bot/start","POST",null,token);
+      addLog("🚀 Bot démarré — Scan toutes les 60s", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+    setLoading(false);
+  };
 
-# ── HYPERLIQUID API ──────────────────────────────────────────
-HL_BASE = "https://api.hyperliquid.xyz"
+  const stopBot = async () => {
+    try {
+      await apiCall("/api/bot/stop","POST",null,token);
+      addLog("⏹ Bot arrêté", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+  };
 
-async def hl_post(client, endpoint, payload):
-    try:
-        r = await client.post(f"{HL_BASE}{endpoint}", json=payload, timeout=10)
-        return r.json()
-    except:
-        return None
+  const updateTradingMode = async (mode) => {
+    if (mode === config?.trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper Trading" : "LIVE (trades reels)";
+    const confirm1 = window.confirm(
+      `Basculer en mode ${modeLabel} ?
 
-async def fetch_all_metas(client):
-    data = await hl_post(client, "/info", {"type": "metaAndAssetCtxs"})
-    if not data:
-        return {}
-    meta, ctxs = data
-    prices = {}
-    for i, asset in enumerate(meta["universe"]):
-        if ctxs[i].get("markPx"):
-            prices[asset["name"]] = float(ctxs[i]["markPx"])
-    return prices
+Cela va reinitialiser :
+- Tous les signaux
+- Tous les trades paper
+- L'historique complet
+- Le portefeuille (1000 USDC)
 
-async def fetch_candles(client, coin, interval="15m", count=200):
-    now = int(time.time() * 1000)
-    ms = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000}.get(interval, 900000)
-    data = await hl_post(client, "/info", {
-        "type": "candleSnapshot",
-        "req": {"coin": coin, "interval": interval, "startTime": now - ms*count, "endTime": now}
-    })
-    return data or []
+Confirmer ?`
+    );
+    if (!confirm1) return;
+    try {
+      await apiCall("/api/config","PUT",{trading_mode:mode},token);
+      await apiCall("/api/reset-all","POST",null,token);
+      loadData();
+      addLog(`Mode ${modeLabel} active - reinitialisation complete`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
 
-async def fetch_positions(client, address):
-    if not address:
-        return []
-    data = await hl_post(client, "/info", {"type": "clearinghouseState", "user": address})
-    return data.get("assetPositions", []) if data else []
+  const saveConfig = async () => {
+    try {
+      await apiCall("/api/config","PUT",{ wallet:liveW, api_key:liveK||undefined, active_coins:activeCoins },token);
+      setSaved(true); setTimeout(()=>setSaved(false),2500);
+      addLog("✅ Paramètres sauvegardés", "system");
+      loadData();
+    } catch(e) { addLog(`❌ ${e.message}`, "error"); }
+  };
 
-# ── ANALYSE IA ───────────────────────────────────────────────
-async def analyze_with_ai(client, coin, tech, ob, price, api_key):
-    prompt = f"""You are an elite quantitative trading analyst for crypto perpetual futures on Hyperliquid.
-You think like a professional trader: you ACCEPT risk, you ANTICIPATE moves, not react to fear.
-Analyze {coin}/USDC and provide a decisive trading decision.
+  if (!token) return <LoginPage onLogin={(t,e)=>{setToken(t);setEmail(e);}}/>;
+  if (!config) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:"#60a5fa"}}>Chargement...</div>;
 
-PRICE: ${price}
-RSI: {tech.get('rsi','N/A')} | MACD Bull: {tech.get('macd_bull','N/A')} | Bear: {tech.get('macd_bear','N/A')}
-EMA20: {tech.get('ema20','N/A')} | EMA50: {tech.get('ema50','N/A')} | EMA200: {tech.get('ema200','N/A')}
-BB Upper: {tech.get('bb_upper','N/A')} | Lower: {tech.get('bb_lower','N/A')}
-ATR: {tech.get('atr','N/A')} | VWAP: {tech.get('vwap','N/A')}
-Volume: {tech.get('volume_trend','N/A')}
-BTC MARKET TREND: {tech.get('btc_trend','neutral')} ({tech.get('btc_change',0):.1f}% sur 4h)
+  const isRunning = config.is_running;
+  const TABS = [
+    {id:"dashboard",label:"📊 Tableau de bord"},
+    {id:"signaux",label:`⚡ Signaux (${stats.total||0})`},
+    {id:"positions",label:`📈 Positions (${positions.length})`},
+    {id:"marches",label:`🎯 Marchés (${activeCoins.length}/${ALL_COINS.length})`},
+    {id:"parametres",label:"⚙️ Paramètres"},
+    {id:"logs",label:"📋 Logs"},
+    {id:"paper",label:`🎮 Paper Trading`},
+    {id:"rapport",label:"📄 Rapport"},
+  ];
 
-TRADER PHILOSOPHY:
-- RSI < 25: extreme oversold = HIGH probability LONG opportunity (anticipate bounce)
-- RSI > 75: extreme overbought = HIGH probability SHORT opportunity (anticipate correction)
-- RSI 25-45: oversold zone = LONG bias if any bullish confluence
-- RSI 55-75: overbought zone = SHORT bias if any bearish confluence
-- If BTC trend is bullish: favor LONG, SHORT only with very strong signals
-- If BTC trend is bearish: favor SHORT, LONG only with very strong signals
-- If BTC trend is neutral: look for reversals, both directions valid
-- Risk management is handled by SL/TP — your job is to find the BEST ENTRY
+  return (
+    <div style={{background:"#0a0e1a",minHeight:"100vh"}}>
+      {/* HEADER */}
+      <div style={{background:"linear-gradient(135deg,#0f1629,#1a1f35)",borderBottom:"1px solid #1e2d4a",padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>⚡</div>
+          <div>
+            <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>HyperBot AI</div>
+            <div style={{fontSize:10,color:"#64748b"}}>{email}</div>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:isRunning?"#34d399":"#475569",boxShadow:isRunning?"0 0 8px #34d399":"none"}}/>
+            <span style={{fontSize:11,color:isRunning?"#34d399":"#64748b"}}>{isRunning?"ACTIF":"INACTIF"}</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+            <button onClick={()=>updateTradingMode("paper")} style={{padding:"4px 8px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>PAPER</button>
+            <button onClick={()=>updateTradingMode("live")} style={{padding:"4px 8px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>LIVE</button>
+          </div>
+          {isRunning
+            ? <button onClick={stopBot} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:"#f87171",fontSize:11,fontWeight:700}}>ARRETER</button>
+            : <button onClick={startBot} disabled={loading} style={{background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",border:"none",borderRadius:6,padding:"5px 14px",color:"#fff",fontSize:11,fontWeight:700}}>{loading?"...":"DEMARRER"}</button>
+          }
+          <button onClick={logout} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 10px",color:"#64748b",fontSize:10}}>Déconnexion</button>
+        </div>
+      </div>
 
-CONSTRAINTS: Leverage x2-x5, position 5-15% portfolio, min R/R 2:1
-Respond ONLY with JSON (no markdown):
-{{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 sentences in French","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
+      {/* STATS */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:"#1e2d4a"}}>
+        {[{l:"SIGNAUX",v:stats.total||0,c:"#60a5fa"},{l:"LONG",v:stats.longs||0,c:"#34d399"},{l:"SHORT",v:stats.shorts||0,c:"#f87171"},{l:"CONFIANCE",v:stats.avg_confidence?`${stats.avg_confidence}%`:"--",c:confColor(stats.avg_confidence||0)}].map((s,i)=>(
+          <div key={i} style={{background:"#0a0e1a",padding:"10px",textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:700,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
 
-    try:
-        r = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            json={"model": "claude-sonnet-4-6", "max_tokens": 1000, "messages": [{"role": "user", "content": prompt}]},
-            timeout=30
-        )
-        if r.status_code != 200:
-            print(f"Anthropic API erreur {r.status_code}: {r.text[:200]}")
-            return None
-        data = r.json()
-        if "error" in data:
-            print(f"Anthropic API erreur: {data['error']}")
-            return None
-        text = "".join(b.get("text","") for b in data.get("content",[]))
-        clean = text.replace("```json","").replace("```","").strip()
-        return json.loads(clean)
-    except json.JSONDecodeError as e:
-        print(f"JSON parse erreur pour {coin}: {e} | text={text[:100] if 'text' in dir() else 'N/A'}")
-        return None
-    except Exception as e:
-        print(f"Anthropic appel erreur pour {coin}: {type(e).__name__}: {e}")
-        return None
+      {/* TABS */}
+      <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-# ── MOTEUR DE SCAN ───────────────────────────────────────────
-scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
-positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
+      {/* DASHBOARD */}
+      {tab==="dashboard" && (
+        <div style={{padding:16}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:14}}>
+            <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>PRIX EN TEMPS RÉEL</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
+              {ALL_COINS.filter(c=>prices[c]).map(coin=>(
+                <div key={coin} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:5,padding:"5px 10px",display:"flex",gap:7,alignItems:"center"}}>
+                  <span style={{color:"#64748b",fontSize:10}}>{coin}</span>
+                  <span style={{color:"#e2e8f0",fontWeight:700,fontSize:12}}>${prices[coin]?.toLocaleString("en-US",{maximumFractionDigits:2})}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:8,letterSpacing:1}}>ACTIVITE DU BOT</div>
+            <div style={{maxHeight:100,overflowY:"auto",marginBottom:12}}>
+              {botLogs.length===0
+                ? <div style={{fontSize:9,color:"#334155",fontFamily:"monospace"}}>{isRunning?"⚡ En attente...":"● Bot arrêté"}</div>
+                : botLogs.slice(0,6).map((log,i)=>(
+                  <div key={i} style={{display:"flex",gap:6,marginBottom:2}}>
+                    <span style={{fontSize:9,color:"#334155",whiteSpace:"nowrap",fontFamily:"monospace"}}>{log.time}</span>
+                    <span style={{fontSize:9,fontFamily:"monospace",color:log.level==="success"?"#34d399":log.level==="error"?"#f87171":log.level==="warning"?"#fbbf24":"#475569"}}>{log.message}</span>
+                  </div>
+                ))
+              }
+            </div>
+            <div style={{fontSize:9,color:"#475569",marginBottom:10,letterSpacing:1}}>DERNIERS SIGNAUX</div>
+              {signals.filter(s=>s.action!=="WAIT").slice(0,5).length===0
+                ? <div style={{color:"#334155",fontSize:11,padding:"16px 0",textAlign:"center"}}>{isRunning?"Analyse en cours...":"Démarrez le bot"}</div>
+                : signals.filter(s=>s.action!=="WAIT").slice(0,5).map(sig=>(
+                  <div key={sig.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                      <span style={{background:sig.action==="LONG"?"#052e16":"#2d0a0a",color:sig.action==="LONG"?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{sig.action}</span>
+                      <span style={{color:"#e2e8f0",fontSize:12}}>{sig.coin}</span>
+                    </div>
+                    <span style={{color:confColor(sig.confidence),fontWeight:700}}>{sig.confidence}%</span>
+                  </div>
+                ))
+              }
+            </div>
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>STATUT SERVEUR</div>
+              {[
+                {l:"Mode",v:"Serveur 24h/24"},
+                {l:"Bot",v:isRunning?"✅ Actif":"⏹ Arrêté"},
+                {l:"Mode trading",v:config.trading_mode==="paper"?"Paper (simulation)":"Live (reel)"},
+                {l:"Dernier scan",v:config.last_scan?new Date(config.last_scan).toLocaleTimeString("fr-FR"):"Jamais"},
+                {l:"Marchés actifs",v:`${activeCoins.length}/${ALL_COINS.length}`},
+                {l:"Clé API",v:config.has_api_key?"✅ Définie":"❌ Manquante"},
+                {l:"Wallet",v:config.wallet?`${config.wallet.slice(0,8)}...`:"Non défini"},
+              ].map((x,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:i<5?"1px solid #0a0e1a":"none"}}>
+                  <span style={{color:"#475569",fontSize:10}}>{x.l}</span>
+                  <span style={{color:"#94a3b8",fontSize:10}}>{x.v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
-async def scan_markets(user_id: int):
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    config = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-
-    if not user or not config:
-        return
-
-    active_coins = json.loads(config["active_coins"])
-    api_key = user["api_key"]
-
-    async with httpx.AsyncClient() as client:
-        # Fetch prices
-        prices = await fetch_all_metas(client)
-
-        # Update prices in DB
-        conn = get_db()
-        for coin, price in prices.items():
-            conn.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
-                        (coin, price, datetime.utcnow().isoformat()))
-        conn.commit()
-        conn.close()
-
-        # Tendance BTC globale sur 4h
-        btc_trend = "neutral"
-        btc_change = 0
-        btc_candles_4h = await fetch_candles(client, "BTC", "1h", 8)
-        if btc_candles_4h and len(btc_candles_4h) >= 4:
-            btc_open = float(btc_candles_4h[0]["c"])
-            btc_close = float(btc_candles_4h[-1]["c"])
-            btc_change = (btc_close - btc_open) / btc_open * 100
-            if btc_change > 2.0:
-                btc_trend = "bullish"
-                add_bot_log(user_id, f"🟢 BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif", "success")
-            elif btc_change < -2.0:
-                btc_trend = "bearish"
-                add_bot_log(user_id, f"🔴 BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif", "error")
-            else:
-                add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
-
-        # Analyze each coin
-        for coin in active_coins:
-            if coin not in prices:
-                continue
-
-            price = prices[coin]
-            candles_raw = await fetch_candles(client, coin)
-            if not candles_raw or len(candles_raw) < 50:
-                continue
-
-            candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
-            closes = [cd["c"] for cd in candles]
-            vols = [cd["v"] for cd in candles]
-
-            e20 = calc_ema(closes, 20)
-            e50 = calc_ema(closes, 50)
-            e200 = calc_ema(closes, 200)
-            macd = calc_macd(closes)
-            bb = calc_bb(closes)
-            atr = calc_atr(candles)
-            vwap = calc_vwap(candles)
-            rsi = calc_rsi(closes)
-            vol_avg = sum(vols[-20:]) / 20
-            vol_cur = vols[-1]
-
-            tech = {
-                "rsi": round(rsi, 2) if rsi else None,
-                "macd_bull": macd["crossBull"] if macd else False,
-                "macd_bear": macd["crossBear"] if macd else False,
-                "ema20": round(e20[-1], 4) if e20 else None,
-                "ema50": round(e50[-1], 4) if e50 else None,
-                "ema200": round(e200[-1], 4) if e200 else None,
-                "bb_upper": round(bb["upper"], 4) if bb else None,
-                "bb_lower": round(bb["lower"], 4) if bb else None,
-                "atr": round(atr, 4) if atr else None,
-                "vwap": round(vwap, 4) if vwap else None,
-                "volume_trend": "SPIKE" if vol_cur > vol_avg*1.5 else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
-                "btc_trend": btc_trend,
-                "btc_change": btc_change,
-            }
-
-            # Pre-filter
-            has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5 or True
-
-            if not has_signal or not api_key:
-                continue
-
-            # Filtre RSI — eviter de shorter en survente ou longer en surachat
-            rsi_val = tech.get("rsi")
-            if rsi_val:
-                # Info seulement - l'IA decide du timing
-                if rsi_val < 30:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_val:.1f} - survente (IA juge)", "info")
-                elif rsi_val > 70:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_val:.1f} - surachat (IA juge)", "info")
-
-            # Un seul signal par coin par scan (5 min)
-            conn_check = get_db()
-            recent = conn_check.execute(
-                "SELECT id FROM signals WHERE user_id=? AND coin=? AND created_at > datetime('now', '-5 minutes')",
-                (user_id, coin)
-            ).fetchone()
-            last_action = conn_check.execute(
-                "SELECT action FROM signals WHERE user_id=? AND coin=? AND created_at > datetime('now', '-30 minutes') ORDER BY created_at DESC LIMIT 1",
-                (user_id, coin)
-            ).fetchone()
-            conn_check.close()
-            if recent:
-                add_bot_log(user_id, f"🔄 {coin}: Signal récent, ignoré", "info")
-                continue
-
-            # Verifier si coin deja en position ouverte
-            conn_check = get_db()
-            coin_already_open = conn_check.execute(
-                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'",
-                (user_id, coin)
-            ).fetchone()
-            ai_continuous = config["ai_continuous"] if "ai_continuous" in config.keys() else 0
-            conn_check.close()
-
-            if coin_already_open and not ai_continuous:
-                add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte - analyse IA skippée", "info")
-                continue
-
-            ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
-            if not ai:
-                add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
-                continue
-            action_ia = ai.get("action", "WAIT")
-            confidence_ia = ai.get("confidence", 0)
-            if coin_already_open and ai_continuous:
-                add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
-                continue
-            add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
-            if action_ia == "WAIT" or confidence_ia < 50:
-                continue
-
-            rsi_now = tech.get("rsi") or 50
-            action = ai.get("action")
-
-            # === MODE TENDANCE HAUSSIERE (BTC +2%) ===
-            if btc_trend == "bullish" and coin != "PAXG":
-                # En tendance haussiere: chercher LONG sur pullbacks
-                if action == "SHORT":
-                    add_bot_log(user_id, f"↩️ {coin}: SHORT ignoré - marché haussier", "info")
-                    continue
-                if action == "LONG" and rsi_now > 75:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} haut en tendance - IA juge", "info")
-                    continue
-                # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
-                add_bot_log(user_id, f"✅ {coin}: LONG autorisé - tendance haussière (RSI {rsi_now:.1f})", "success")
-
-            # === MODE TENDANCE BAISSIERE (BTC -2%) ===
-            elif btc_trend == "bearish" and coin != "PAXG":
-                # En tendance baissiere: chercher SHORT sur rebonds
-                if action == "LONG":
-                    add_bot_log(user_id, f"↩️ {coin}: LONG ignoré - marché baissier", "info")
-                    continue
-                if action == "SHORT" and rsi_now < 25:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} bas en tendance - IA juge", "info")
-                    continue
-                add_bot_log(user_id, f"✅ {coin}: SHORT autorisé - tendance baissière (RSI {rsi_now:.1f})", "success")
-
-            # === MODE NEUTRE (retournements) ===
-            else:
-                # L'IA decide - on lui fait confiance sur le timing
-                add_bot_log(user_id, f"🤖 {coin}: Mode neutre - IA analyse (RSI {rsi_now:.1f})", "info")
-
-            # Ignorer signaux contradictoires avec signal recent
-            if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
-                add_bot_log(user_id, f"⚡ {coin}: Signal contradictoire ignoré (dernier: {last_action['action']})", "warning")
-                continue
-
-            # Bloquer si position ouverte dans le sens inverse
-            conn_pos = get_db()
-            open_opposite = conn_pos.execute(
-                """SELECT action FROM paper_trades 
-                   WHERE user_id=? AND coin=? AND status='OPEN'""",
-                (user_id, coin)
-            ).fetchone()
-            conn_pos.close()
-            if open_opposite and open_opposite["action"] != ai.get("action"):
-                add_bot_log(user_id, f"🚫 {coin}: Position {open_opposite['action']} déjà ouverte — signal {ai.get('action')} bloqué", "warning")
-                continue
-
-            # Save signal
-            conn = get_db()
-            conn.execute("""
-                INSERT INTO signals (user_id,coin,action,confidence,entry,stop_loss,take_profit1,take_profit2,
-                leverage,position_size,risk_reward,timeframe,reasoning,key_signals,price,rsi,atr,vwap)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                user_id, coin, ai["action"], ai["confidence"],
-                ai.get("entry"), ai.get("stopLoss"), ai.get("takeProfit1"), ai.get("takeProfit2"),
-                ai.get("leverage"), ai.get("positionSize"), ai.get("riskReward"),
-                ai.get("timeframe"), ai.get("reasoning"),
-                json.dumps(ai.get("keySignals", [])),
-                price, tech["rsi"], tech["atr"], tech["vwap"]
+      {/* SIGNAUX */}
+      {tab==="signaux" && (
+        <div style={{padding:16}}>
+          {signals.filter(s=>s.action!=="WAIT").length===0
+            ? <div style={{textAlign:"center",padding:50,color:"#475569"}}>{isRunning?"Analyse IA en cours...":"Aucun signal — démarrez le bot"}</div>
+            : signals.filter(s=>s.action!=="WAIT").map(sig=>(
+              <div key={sig.id} style={{background:"#0f1629",border:`1px solid ${sig.action==="LONG"?"#14532d":"#450a0a"}`,borderRadius:10,padding:14,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{background:sig.action==="LONG"?"#052e16":"#2d0a0a",color:sig.action==="LONG"?"#34d399":"#f87171",padding:"3px 9px",borderRadius:5,fontSize:12,fontWeight:700}}>{sig.action}</span>
+                    <span style={{fontSize:15,fontWeight:700,color:"#f1f5f9"}}>{sig.coin}/USDC</span>
+                    <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 7px",borderRadius:4,fontSize:10}}>x{sig.leverage}</span>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:18,fontWeight:700,color:confColor(sig.confidence)}}>{sig.confidence}%</div>
+                    <div style={{fontSize:9,color:"#475569"}}>CONFIANCE</div>
+                  </div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
+                  {[{l:"ENTRÉE",v:`$${sig.entry?.toFixed(4)}`,c:"#60a5fa"},{l:"STOP LOSS",v:`$${sig.stop_loss?.toFixed(4)}`,c:"#f87171"},{l:"TP1",v:`$${sig.take_profit1?.toFixed(4)}`,c:"#34d399"},{l:"TP2",v:`$${sig.take_profit2?.toFixed(4)}`,c:"#34d399"}].map((x,i)=>(
+                    <div key={i} style={{background:"#0a0e1a",borderRadius:5,padding:"7px 8px"}}>
+                      <div style={{fontSize:9,color:"#475569",marginBottom:2}}>{x.l}</div>
+                      <div style={{fontSize:11,fontWeight:700,color:x.c}}>{x.v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:10}}>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>TAILLE</div><div style={{color:"#e2e8f0",fontWeight:700}}>{sig.position_size}%</div></div>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>RISK/REWARD</div><div style={{color:sig.risk_reward>=2?"#34d399":"#fbbf24",fontWeight:700}}>{sig.risk_reward?.toFixed(2)}</div></div>
+                  <div style={{background:"#0a0e1a",borderRadius:5,padding:"6px 8px"}}><div style={{fontSize:9,color:"#475569"}}>TIMEFRAME</div><div style={{color:"#94a3b8",fontSize:11}}>{sig.timeframe}</div></div>
+                </div>
+                {sig.reasoning&&<div style={{background:"#0a0e1a",borderRadius:5,padding:9,marginBottom:8,borderLeft:"3px solid #8b5cf6"}}><div style={{fontSize:9,color:"#c084fc",marginBottom:3}}>🤖 ANALYSE IA</div><div style={{color:"#94a3b8",fontSize:11,lineHeight:1.6}}>{sig.reasoning}</div></div>}
+                {sig.key_signals&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{JSON.parse(sig.key_signals||"[]").map((s,i)=><span key={i} style={{background:"#1e2d4a",color:"#60a5fa",padding:"2px 7px",borderRadius:3,fontSize:10}}>{s}</span>)}</div>}
+                <div style={{fontSize:10,color:"#334155"}}>
+                  {new Date(sig.created_at).toLocaleString("fr-FR")} · RSI:{sig.rsi?.toFixed(1)} · Prix:{`$${sig.price?.toLocaleString()}`}
+                  {prices[sig.coin]&&<span style={{marginLeft:8,color:((prices[sig.coin]-sig.entry)/sig.entry*100*(sig.action==="LONG"?1:-1))>=0?"#34d399":"#f87171"}}>
+                    · PnL: {((prices[sig.coin]-sig.entry)/sig.entry*100*(sig.action==="LONG"?1:-1)).toFixed(2)}%
+                  </span>}
+                </div>
+              </div>
             ))
-            sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+          }
+        </div>
+      )}
 
-            # Auto-execute en mode paper
-            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            if cfg and cfg["trading_mode"] == "paper":
-                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
-                portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-                max_trades = cfg["max_open_trades"] or 5
-                size = cfg["max_position_usdc"] or 50.0
-                # Verifier si coin deja en position ouverte
-                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
-                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
-                    entry_price = ai.get("entry") or price
-                    conn.execute("""
-                        INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
-                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                    """, (user_id, coin, ai["action"], entry_price, price, size,
-                           ai.get("leverage") or 1, ai.get("stopLoss"),
-                           ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
-                    add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
+      {/* POSITIONS */}
+      {tab==="positions" && (
+        <div style={{padding:16}}>
+          {!config.wallet?<div style={{textAlign:"center",padding:40,color:"#475569"}}>Définissez votre wallet dans Paramètres</div>
+          :positions.length===0?<div style={{textAlign:"center",padding:40,color:"#475569"}}>Aucune position ouverte</div>
+          :positions.map((pos,i)=>{
+            const p=pos.position; const pnl=parseFloat(p.unrealizedPnl||0);
+            return (
+              <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                    <span style={{background:parseFloat(p.szi)>0?"#052e16":"#2d0a0a",color:parseFloat(p.szi)>0?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{parseFloat(p.szi)>0?"LONG":"SHORT"}</span>
+                    <span style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>{p.coin}/USDC</span>
+                  </div>
+                  <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
+                  {[{l:"TAILLE",v:Math.abs(parseFloat(p.szi)).toFixed(4)},{l:"ENTRÉE",v:`$${parseFloat(p.entryPx||0).toLocaleString()}`},{l:"LEVIER",v:`x${p.leverage?.value||"--"}`}].map((x,j)=>(
+                    <div key={j} style={{background:"#0a0e1a",borderRadius:5,padding:"7px 8px"}}><div style={{fontSize:9,color:"#475569"}}>{x.l}</div><div style={{color:"#e2e8f0",fontWeight:700,fontSize:11}}>{x.v}</div></div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-            conn.commit()
-            conn.close()
+      {/* MARCHÉS */}
+      {tab==="marches" && (
+        <div style={{padding:16,maxWidth:700}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:12}}>Gestion des marchés</div>
+            <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+              {[{l:"Tout activer",v:ALL_COINS},{l:"BTC + ETH",v:["BTC","ETH"]},{l:"Top 5",v:["BTC","ETH","SOL","BNB","HYPE"]}].map((x,i)=>(
+                <button key={i} onClick={()=>setActiveCoins(x.v)}
+                  style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#60a5fa",fontSize:11}}>
+                  {x.l}
+                </button>
+              ))}
+              <button onClick={()=>setActiveCoins([])} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#64748b",fontSize:11}}>Tout désactiver</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+              {ALL_COINS.map(coin=>{
+                const on=activeCoins.includes(coin);
+                return (
+                  <div key={coin} onClick={()=>setActiveCoins(p=>on?p.filter(c=>c!==coin):[...p,coin])}
+                    style={{background:on?"#0a0e1a":"transparent",border:`2px solid ${on?"#3b82f6":"#1e2d4a"}`,borderRadius:8,padding:"10px 12px",cursor:"pointer",opacity:on?1:0.4}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontWeight:700,color:on?"#60a5fa":"#64748b"}}>{coin}</span>
+                      <span style={{fontSize:10,fontWeight:700,color:on?"#34d399":"#334155"}}>{on?"ON":"OFF"}</span>
+                    </div>
+                    <div style={{fontSize:10,color:on?"#94a3b8":"#334155",marginTop:2}}>
+                      {prices[coin]?`$${prices[coin].toLocaleString("en-US",{maximumFractionDigits:2})}`:"---"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={saveConfig} style={{width:"100%",background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:12}}>
+              💾 Sauvegarder la sélection
+            </button>
+          </div>
+        </div>
+      )}
 
-        # Auto-update paper trades
-        async with httpx.AsyncClient() as client2:
-            open_trades = conn.execute(
-                "SELECT DISTINCT coin FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-            ).fetchall() if False else []
-        conn = get_db()
-        paper_trades = conn.execute(
-            "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-        ).fetchall()
-        for trade in paper_trades:
-            price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
-            if not price_row: continue
-            cur = price_row["price"]
-            direction = 1 if trade["action"] == "LONG" else -1
-            pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-            close_reason = None
-            trailing_pct = 0.015  # 1.5% trailing distance
-            tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-            trailing_sl = trade["trailing_sl"]
-            highest = trade["highest_price"] or cur
-            lowest = trade["lowest_price"] or cur
+      {/* PARAMÈTRES */}
+      {tab==="parametres" && (
+        <div style={{padding:16,maxWidth:600}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:20,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>Paramètres de connexion</div>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>WALLET HYPERLIQUID</div>
+              <input value={liveW} onChange={e=>setLiveW(e.target.value)} placeholder="0x..."
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:12}}/>
+              <div style={{fontSize:10,color:"#334155",marginTop:3}}>Lecture seule — visualisation de vos positions</div>
+            </div>
+            <div style={{marginBottom:20}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>CLÉ API ANTHROPIC</div>
+              <input value={liveK} onChange={e=>setLiveK(e.target.value)} type="password" placeholder="sk-ant-... (laisser vide pour ne pas modifier)"
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:12}}/>
+              <div style={{fontSize:10,color:"#334155",marginTop:3}}>Clé stockée de façon sécurisée sur le serveur · {config.has_api_key?"✅ Clé définie":"❌ Non définie"}</div>
+            </div>
+            <button onClick={saveConfig}
+              style={{width:"100%",background:saved?"#052e16":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:saved?"1px solid #34d399":"none",borderRadius:8,padding:"11px",color:saved?"#34d399":"#fff",fontWeight:700,fontSize:12}}>
+              {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
+            </button>
+          </div>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8}}>🤖 Analyse IA continue</div>
+            <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
+              Par défaut, l'IA ne s'appelle pas si un coin est déjà en position (économie de crédits).
+              Activez pour recevoir les avis IA en continu — utile pour le trading manuel.
+            </div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <span style={{fontSize:12,color:"#94a3b8"}}>{aiContinuous ? "🟢 Activée — L'IA analyse même les positions ouvertes" : "⚫ Désactivée — L'IA skip les coins déjà ouverts"}</span>
+              <button onClick={()=>{
+                const newVal = !aiContinuous;
+                setAiContinuous(newVal);
+                apiCall("/api/config/ai-continuous","PUT",{enabled:newVal},token).then(loadData);
+              }} style={{background:aiContinuous?"#052e16":"#1e2d4a",border:aiContinuous?"1px solid #34d399":"1px solid #475569",borderRadius:8,padding:"8px 16px",color:aiContinuous?"#34d399":"#94a3b8",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+                {aiContinuous ? "✅ ON" : "⭕ OFF"}
+              </button>
+            </div>
+          </div>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Maintenance</div>
+            <div style={{fontSize:10,color:"#475569",marginBottom:10,lineHeight:1.6}}>
+              Nettoie les signaux en double et supprime ceux de plus de 24h. Garde uniquement le signal le plus récent par actif.
+            </div>
+            <button onClick={async()=>{
+              try{
+                const r = await apiCall("/api/cleanup","POST",null,token);
+                alert(r.message);
+                loadData();
+              }catch(e){alert("Erreur: "+e.message);}
+            }} style={{width:"100%",background:"transparent",border:"1px solid #f87171",borderRadius:7,padding:"9px",color:"#f87171",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+              🧹 Nettoyer les signaux en double
+            </button>
+            <button onClick={async()=>{
+              if(!window.confirm("REINITIALISATION COMPLETE\n\nCela va effacer :\n- Tous les signaux\n- Tous les trades paper\n- L'historique\n- Le portefeuille (repart a 1000 USDC)\n\nEtes-vous sur ?")) return;
+              try{
+                const r = await apiCall("/api/reset-all","POST",null,token);
+                alert(r.message);
+                loadData();
+              }catch(e){alert("Erreur: "+e.message);}
+            }} style={{width:"100%",background:"transparent",border:"1px solid #dc2626",borderRadius:7,padding:"9px",color:"#dc2626",fontFamily:"inherit",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              ⚠️ Reinitialisation complete (signaux + trades + historique)
+            </button>
+          </div>
 
-            # Mettre a jour highest/lowest price
-            new_highest = max(highest, cur)
-            new_lowest = min(lowest, cur)
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:10}}>Compte</div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
+              <span style={{color:"#475569",fontSize:11}}>Email</span>
+              <span style={{color:"#94a3b8",fontSize:11}}>{email}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0"}}>
+              <span style={{color:"#475569",fontSize:11}}>Session</span>
+              <span style={{color:"#34d399",fontSize:11}}>Active (30 jours)</span>
+            </div>
+          </div>
+        </div>
+      )}
 
-            if trade["action"] == "LONG":
-                # TP1 pas encore atteint
-                if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                    # TP1 atteint : fermer 50%, SL remonte a breakeven, activer trailing
-                    pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
-                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                        highest_price=?, current_price=? WHERE id=?""",
-                        (trade["entry_price"], new_highest, cur, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
-                    conn.commit()
-                    continue
-                # Trailing SL actif apres TP1
-                if tp1_hit:
-                    new_trailing_sl = new_highest * (1 - trailing_pct)
-                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_highest, cur, trade["id"]))
-                    if cur <= effective_sl:
-                        close_reason = "TRAILING_SL"
-                else:
-                    # SL normal avant TP1
-                    if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                        close_reason = "STOP_LOSS"
-                    conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                        (new_highest, cur, trade["id"]))
+      {/* LOGS */}
+      {tab==="logs" && (
+        <div style={{padding:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:10,color:"#475569"}}>{persistentLogs?"📚 Historique persistant (200 entrées)":"⚡ Session courante (50 entrées)"}</span>
+            <button onClick={async()=>{
+              const v=!persistentLogs; setPersistentLogs(v);
+              const r=await apiCall(v?"/api/bot/logs?persistent=true":"/api/bot/logs","GET",null,token);
+              setBotLogs(r?.logs||[]);
+            }} style={{background:persistentLogs?"#1e3a5f":"#0f1629",border:persistentLogs?"1px solid #3b82f6":"1px solid #1e2d4a",borderRadius:6,padding:"4px 10px",color:persistentLogs?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+              {persistentLogs?"📚 PERSISTANT":"⚡ SESSION"}
+            </button>
+          </div>
+          <div style={{background:"#050810",borderRadius:8,padding:12,height:420,overflowY:"auto",border:"1px solid #0f1629"}}>
+            {botLogs.length===0?<div style={{color:"#334155",fontSize:11}}>{isRunning?"En attente du premier scan...":"Démarrez le bot pour voir les logs"}</div>
+            :botLogs.map((l,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:3}}>
+                <span style={{color:"#334155",fontSize:10,whiteSpace:"nowrap"}}>{l.time}</span>
+                <span style={{color:l.level==="success"?"#34d399":l.level==="error"?"#f87171":l.level==="warning"?"#fbbf24":"#94a3b8",fontSize:11,lineHeight:1.5}}>{l.message}</span>
+              </div>
+            ))}
+            <div ref={logEnd}/>
+          </div>
+        </div>
+      )}
 
-            elif trade["action"] == "SHORT":
-                # TP1 pas encore atteint
-                if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                    pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
-                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                        lowest_price=?, current_price=? WHERE id=?""",
-                        (trade["entry_price"], new_lowest, cur, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
-                    conn.commit()
-                    continue
-                # Trailing SL actif apres TP1
-                if tp1_hit:
-                    new_trailing_sl = new_lowest * (1 + trailing_pct)
-                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_lowest, cur, trade["id"]))
-                    if cur >= effective_sl:
-                        close_reason = "TRAILING_SL"
-                else:
-                    if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                        close_reason = "STOP_LOSS"
-                    conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                        (new_lowest, cur, trade["id"]))
+      {/* PAPER TRADING */}
+      {tab==="paper" && (
+        <div style={{padding:16,maxWidth:900}}>
 
-            if close_reason:
-                conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                    closed_at=?, close_reason=? WHERE id=?""",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                     datetime.utcnow().isoformat(), close_reason, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                            (trade["size_usdc"], round(pnl,2), user_id))
-                add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-            else:
-                conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-        conn.commit()
-        conn.close()
+          {/* STATS PORTEFEUILLE */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
+            {[
+              {l:"SOLDE VIRTUEL",v:`${paper?.balance?.toFixed(2)||"1000.00"} USDC`,c:"#60a5fa"},
+              {l:"PNL OUVERT",v:`${paper?.total_pnl>=0?"+":""}${paper?.total_pnl?.toFixed(2)||"0.00"} USDC`,c:paper?.total_pnl>=0?"#34d399":"#f87171"},
+              {l:"PERFORMANCE",v:`${paper?.total_pnl_pct>=0?"+":""}${paper?.total_pnl_pct?.toFixed(2)||"0.00"}%`,c:paper?.total_pnl_pct>=0?"#34d399":"#f87171"},
+              {l:"TRADES OUVERTS",v:paper?.open_trades?.length||0,c:"#c084fc"},
+            ].map((s,i)=>(
+              <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"12px",textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:700,color:s.c}}>{s.v}</div>
+                <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
 
-        # Update last scan
-        conn = get_db()
-        conn.execute("UPDATE bot_config SET last_scan=? WHERE user_id=?",
-                    (datetime.utcnow().isoformat(), user_id))
-        conn.commit()
-        conn.close()
+          {/* MODE BANNER + SETTINGS */}
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:config?.trading_mode==="paper"?"#fbbf24":"#34d399"}}>
+                  {config?.trading_mode==="paper"?"Mode Paper — Simulation autonome":"Mode Live — Trades reels"}
+                </div>
+                <div style={{fontSize:10,color:"#475569",marginTop:2}}>
+                  {config?.trading_mode==="paper"?"Le bot execute automatiquement chaque signal avec capital virtuel":"ATTENTION: trades sur votre vrai compte Hyperliquid"}
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+                <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">PAPER</button>
+                <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">LIVE</button>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (USDC)</div>
+                <input type="number" defaultValue={config?.max_position_usdc||50} min="10" max="500"
+                  onBlur={e=>apiCall("/api/config","PUT",{max_position_usdc:Number(e.target.value)},token).then(loadData)}
+                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
+                <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
+                  onBlur={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
+                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+              </div>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:10,color:"#334155"}}>
+                Solde initial: 1000 USDC · Le bot trade seul 24h/24
+              </div>
+              <button onClick={async()=>{
+                if(!confirm("Reinitialiser le portefeuille a 1000 USDC ?"))return;
+                await apiCall("/api/paper/reset","POST",null,token);
+                loadData();
+              }} style={{background:"transparent",border:"1px solid #334155",borderRadius:5,padding:"5px 10px",color:"#64748b",fontSize:10}}>
+                Reinitialiser
+              </button>
+            </div>
+          </div>
 
-async def check_positions_loop(user_id: int):
-    """Boucle rapide 60s - suivi SL/TP/Trailing des positions ouvertes"""
-    try:
-        while True:
-            conn = get_db()
-            config = conn.execute("SELECT is_running FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            conn.close()
-            if not config or not config["is_running"]:
-                break
-            try:
-                await update_open_positions(user_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                add_bot_log(user_id, f"⚠️ Erreur suivi positions: {e}", "error")
-            await asyncio.sleep(60)
-    except asyncio.CancelledError:
-        raise
+          {/* TRADES OUVERTS */}
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📈 Trades ouverts</div>
+            {!paper?.open_trades?.length
+              ? <div style={{color:"#334155",fontSize:11,textAlign:"center",padding:"20px 0"}}>Aucun trade ouvert — exécutez un signal !</div>
+              : paper.open_trades.map(trade=>(
+                <div key={trade.id} style={{background:"#0a0e1a",borderRadius:8,padding:12,marginBottom:8,border:`1px solid ${trade.pnl>=0?"#14532d":"#450a0a"}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{background:trade.action==="LONG"?"#052e16":"#2d0a0a",color:trade.action==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700}}>{trade.action}</span>
+                      <span style={{color:"#f1f5f9",fontWeight:700}}>{trade.coin}/USDC</span>
+                      <span style={{color:"#64748b",fontSize:10}}>x{trade.leverage}</span>
+                    </div>
+                    <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
+                        {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                      </span>
+                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontSize:11}}>
+                        ({trade.pnl_pct>=0?"+":""}{trade.pnl_pct?.toFixed(2)}%)
+                      </span>
+                      <button onClick={async()=>{
+                        await apiCall("/api/paper/close","POST",{trade_id:trade.id,reason:"MANUEL"},token);
+                        loadData();
+                      }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:10,fontWeight:700}}>
+                        Fermer
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+                    {[
+                      {l:"ENTRÉE",v:`$${trade.entry_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                      {l:"ACTUEL",v:`$${trade.current_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                      {l:"TAILLE",v:`${trade.size_usdc} USDC`},
+                      {l:"OUVERT",v:new Date(trade.opened_at).toLocaleTimeString("fr-FR")},
+                    ].map((x,i)=>(
+                      <div key={i} style={{background:"#0f1629",borderRadius:5,padding:"5px 8px"}}>
+                        <div style={{fontSize:8,color:"#475569"}}>{x.l}</div>
+                        <div style={{color:"#94a3b8",fontSize:11,fontWeight:500}}>{x.v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",gap:8,marginTop:8,fontSize:10}}>
+                    <span style={{color:"#f87171"}}>SL: ${trade.stop_loss?.toFixed(4)}</span>
+                    <span style={{color:"#34d399"}}>TP1: ${trade.take_profit1?.toFixed(4)}</span>
+                    <span style={{color:"#34d399"}}>TP2: ${trade.take_profit2?.toFixed(4)}</span>
+                  </div>
+                </div>
+              ))
+            }
+          </div>
 
-async def update_open_positions(user_id: int):
-    """Met a jour SL/TP/Trailing sur les positions ouvertes"""
-    conn = get_db()
-    paper_trades = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
-        (user_id,)
-    ).fetchall()
-    if not paper_trades:
-        conn.close()
-        return
-    async with httpx.AsyncClient() as client:
-        prices = await fetch_all_metas(client)
-    for trade in paper_trades:
-        trade = dict(trade)
-        cur = prices.get(trade["coin"])
-        if not cur:
-            continue
-        pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
-        close_reason = None
-        trailing_pct = 0.015
-        tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-        trailing_sl = trade["trailing_sl"]
-        highest = trade["highest_price"] or cur
-        lowest = trade["lowest_price"] or cur
-        new_highest = max(highest, cur)
-        new_lowest = min(lowest, cur)
+          {/* HISTORIQUE */}
+          {paper?.closed_trades?.length > 0 && (
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (20 derniers)</div>
+              {paper.closed_trades.map(trade=>(
+                <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
+                    <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
+                    <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                  </div>
+                  <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                    <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
+                      {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                    </span>
+                    <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
-        if trade["action"] == "LONG":
-            if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_highest, cur, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
-                conn.commit()
-                continue
-            if tp1_hit:
-                # Verifier TP2 d'abord
-                if trade["take_profit2"] and cur >= trade["take_profit2"]:
-                    close_reason = "TP2"
-                else:
-                    # Trailing SL
-                    new_trailing_sl = new_highest * (1 - trailing_pct)
-                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_highest, cur, trade["id"]))
-                    if cur <= effective_sl:
-                        close_reason = "TRAILING_SL"
-            else:
-                if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                    close_reason = "STOP_LOSS"
-                conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                    (new_highest, cur, trade["id"]))
-        elif trade["action"] == "SHORT":
-            if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_lowest, cur, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
-                conn.commit()
-                continue
-            if tp1_hit:
-                # Verifier TP2 d'abord
-                if trade["take_profit2"] and cur <= trade["take_profit2"]:
-                    close_reason = "TP2"
-                else:
-                    # Trailing SL
-                    new_trailing_sl = new_lowest * (1 + trailing_pct)
-                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_lowest, cur, trade["id"]))
-                    if cur >= effective_sl:
-                        close_reason = "TRAILING_SL"
-            else:
-                if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                    close_reason = "STOP_LOSS"
-                conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                    (new_lowest, cur, trade["id"]))
+      {/* RAPPORT */}
+      {tab==="rapport" && (
+        <div style={{padding:16,maxWidth:800}}>
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:20,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:4}}>📄 Rapport de session</div>
+            <div style={{fontSize:11,color:"#475569",marginBottom:16,lineHeight:1.7}}>
+              Exportez tous les signaux avec niveaux, suivi TP/SL et analyse IA. Collez dans Claude pour analyse approfondie.
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+              {[{l:"Signaux",v:stats.total||0,c:"#60a5fa"},{l:"Confiance moy.",v:`${stats.avg_confidence||0}%`,c:confColor(stats.avg_confidence||0)},{l:"R/R moyen",v:stats.avg_rr||"--",c:"#c084fc"}].map((s,i)=>(
+                <div key={i} style={{background:"#0a0e1a",borderRadius:6,padding:"9px",textAlign:"center"}}>
+                  <div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.v}</div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{background:"#0a0e1a",borderRadius:7,padding:12,marginBottom:14}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:8,letterSpacing:1}}>SUIVI TP/SL EN TEMPS REEL</div>
+              {signals.filter(s=>s.action!=="WAIT").length===0
+                ?<div style={{color:"#334155",fontSize:11}}>Aucun signal a suivre.</div>
+                :signals.filter(s=>s.action!=="WAIT").slice(0,10).map(sig=>{
+                  const cur=prices[sig.coin]; if(!cur) return null;
+                  const dir=sig.action==="LONG"?1:-1;
+                  const pnl=((cur-sig.entry)/sig.entry*100*dir).toFixed(2);
+                  const tp1=sig.action==="LONG"?cur>=sig.take_profit1:cur<=sig.take_profit1;
+                  const tp2=sig.action==="LONG"?cur>=sig.take_profit2:cur<=sig.take_profit2;
+                  const sl=sig.action==="LONG"?cur<=sig.stop_loss:cur>=sig.stop_loss;
+                  return (
+                    <div key={sig.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0f1629"}}>
+                      <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                        <span style={{color:sig.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{sig.action}</span>
+                        <span style={{color:"#e2e8f0",fontSize:11}}>{sig.coin}</span>
+                        <span style={{color:"#475569",fontSize:10}}>{new Date(sig.created_at).toLocaleTimeString("fr-FR")}</span>
+                      </div>
+                      <div style={{display:"flex",gap:8,fontSize:10}}>
+                        <span style={{color:parseFloat(pnl)>=0?"#34d399":"#f87171",fontWeight:700}}>{pnl>0?"+":""}{pnl}%</span>
+                        <span style={{color:tp1?"#34d399":"#334155"}}>TP1{tp1?"✓":"○"}</span>
+                        <span style={{color:tp2?"#34d399":"#334155"}}>TP2{tp2?"✓":"○"}</span>
+                        <span style={{color:sl?"#f87171":"#334155"}}>SL{sl?"✗":"○"}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              }
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>downloadTxt(generateReport(signals,stats,prices,email),`hyperbot-${new Date().toISOString().slice(0,10)}.txt`)}
+                style={{flex:1,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"11px",color:"#fff",fontWeight:700,fontSize:12}}>
+                ⬇️ Telecharger .txt
+              </button>
+              <button onClick={()=>navigator.clipboard.writeText(generateReport(signals,stats,prices,email)).then(()=>alert("Copie dans le presse-papier !"))}
+                style={{flex:1,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"11px",color:"#94a3b8",fontWeight:700,fontSize:12}}>
+                📋 Copier pour Claude
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            # Si TP1 deja touche, on rend seulement la moitie restante + PnL sur cette moitie
-            remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (remaining, pnl, user_id))
-            emoji = "🎯" if close_reason in ("TP1","TP2") else "🏁"
-            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL total: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-        conn.commit()
-    conn.close()
+      <div style={{textAlign:"center",padding:"14px",color:"#1e2d4a",fontSize:10,borderTop:"1px solid #0f1629",marginTop:16}}>
+        HyperBot AI — Serveur autonome 24h/24 · Powered by Claude
+      </div>
+    </div>
+  );
+}
 
-async def run_bot_loop(user_id: int):
-    """Boucle principale 3min - analyse IA et nouveaux signaux"""
-    try:
-        while True:
-            conn = get_db()
-            config = conn.execute("SELECT is_running FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            conn.close()
-            if not config or not config["is_running"]:
-                break
-            try:
-                await scan_markets(user_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                add_bot_log(user_id, f"⚠️ Erreur scan: {e}", "error")
-            await asyncio.sleep(180)
-    except asyncio.CancelledError:
-        add_bot_log(user_id, "🛑 Boucle de scan interrompue", "info")
-        raise
-
-# ── FASTAPI APP ──────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    # Auto-redemarrer les bots actifs au redemarrage du serveur
-    conn = get_db()
-    running_users = conn.execute("SELECT user_id FROM bot_config WHERE is_running=1").fetchall()
-    conn.close()
-    for row in running_users:
-        user_id = row["user_id"]
-        task = asyncio.create_task(run_bot_loop(user_id))
-        scanning_tasks[user_id] = task
-        print(f"Bot auto-redemarre pour user {user_id}")
-    yield
-
-app = FastAPI(title="HyperBot AI", lifespan=lifespan)
-
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-# ── MODÈLES ──────────────────────────────────────────────────
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-class UpdateConfigRequest(BaseModel):
-    wallet: Optional[str] = None
-    api_key: Optional[str] = None
-    active_coins: Optional[List[str]] = None
-    trading_mode: Optional[str] = None
-    max_position_usdc: Optional[float] = None
-    max_open_trades: Optional[int] = None
-
-# ── ROUTES AUTH ──────────────────────────────────────────────
-@app.post("/api/register")
-def register(req: RegisterRequest):
-    conn = get_db()
-    try:
-        conn.execute("INSERT INTO users (email, password_hash) VALUES (?,?)",
-                    (req.email.lower(), hash_password(req.password)))
-        user_id = conn.execute("SELECT id FROM users WHERE email=?", (req.email.lower(),)).fetchone()["id"]
-        conn.execute("INSERT INTO bot_config (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-        return {"message": "Compte créé avec succès"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Cet email est déjà utilisé")
-    finally:
-        conn.close()
-
-@app.post("/api/login")
-def login(req: LoginRequest):
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE email=? AND password_hash=?",
-                       (req.email.lower(), hash_password(req.password))).fetchone()
-    if not user:
-        conn.close()
-        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
-    token = create_token()
-    expires = (datetime.utcnow() + timedelta(days=30)).isoformat()
-    conn.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)",
-                (token, user["id"], expires))
-    conn.commit()
-    conn.close()
-    return {"token": token, "email": user["email"]}
-
-@app.post("/api/logout")
-def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    conn = get_db()
-    conn.execute("DELETE FROM sessions WHERE token=?", (credentials.credentials,))
-    conn.commit()
-    conn.close()
-    return {"message": "Déconnecté"}
-
-# ── ROUTES BOT ───────────────────────────────────────────────
-@app.get("/api/config")
-def get_config(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    user = conn.execute("SELECT email, wallet, api_key FROM users WHERE id=?", (user_id,)).fetchone()
-    config = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return {
-        "email": user["email"],
-        "wallet": user["wallet"],
-        "has_api_key": bool(user["api_key"]),
-        "active_coins": json.loads(config["active_coins"]),
-        "is_running": bool(config["is_running"]),
-        "trading_mode": config["trading_mode"] or "paper",
-        "max_position_usdc": config["max_position_usdc"] or 50.0,
-        "max_open_trades": config["max_open_trades"] or 5,
-        "last_scan": config["last_scan"],
-    }
-
-@app.put("/api/config")
-def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    if req.wallet is not None:
-        conn.execute("UPDATE users SET wallet=? WHERE id=?", (req.wallet, user_id))
-    if req.api_key is not None:
-        conn.execute("UPDATE users SET api_key=? WHERE id=?", (req.api_key, user_id))
-    if req.active_coins is not None:
-        conn.execute("UPDATE bot_config SET active_coins=? WHERE user_id=?",
-                    (json.dumps(req.active_coins), user_id))
-    if req.trading_mode is not None:
-        old_mode = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        conn.execute("UPDATE bot_config SET trading_mode=? WHERE user_id=?",
-                    (req.trading_mode, user_id))
-        # Log le changement de mode
-        print(f"Mode change: {old_mode['trading_mode'] if old_mode else 'unknown'} -> {req.trading_mode} pour user {user_id}")
-    if req.max_position_usdc is not None:
-        conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
-                    (req.max_position_usdc, user_id))
-    if req.max_open_trades is not None:
-        conn.execute("UPDATE bot_config SET max_open_trades=? WHERE user_id=?",
-                    (req.max_open_trades, user_id))
-    conn.commit()
-    conn.close()
-    return {"message": "Configuration mise à jour"}
-
-@app.post("/api/bot/start")
-async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    user = conn.execute("SELECT api_key FROM users WHERE id=?", (user_id,)).fetchone()
-    conn.execute("UPDATE bot_config SET is_running=1 WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    if not user["api_key"]:
-        raise HTTPException(status_code=400, detail="Clé API Anthropic manquante dans les paramètres")
-    # Annuler taches zombies avant d'en creer de nouvelles
-    if user_id in scanning_tasks and not scanning_tasks[user_id].done():
-        scanning_tasks[user_id].cancel()
-    if user_id in positions_tasks and not positions_tasks[user_id].done():
-        positions_tasks[user_id].cancel()
-    # Lancer boucle scan IA (3min) et boucle suivi positions (60s)
-    scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
-    positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
-    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 60s", "success")
-    return {"message": "Bot démarré"}
-
-@app.put("/api/config/ai-continuous")
-def toggle_ai_continuous(req: dict, user_id: int = Depends(get_current_user)):
-    value = 1 if req.get("enabled") else 0
-    conn = get_db()
-    conn.execute("UPDATE bot_config SET ai_continuous=? WHERE user_id=?", (value, user_id))
-    conn.commit()
-    conn.close()
-    status = "activée" if value else "désactivée"
-    add_bot_log(user_id, f"🔄 Analyse IA continue {status}", "info")
-    return {"ai_continuous": value}
-
-@app.post("/api/bot/stop")
-def stop_bot(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    conn.execute("UPDATE bot_config SET is_running=0 WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    # Annulation immediate de la tache en cours, sans attendre la fin du sleep(60)
-    if user_id in scanning_tasks and not scanning_tasks[user_id].done():
-        scanning_tasks[user_id].cancel()
-        del scanning_tasks[user_id]
-    if user_id in positions_tasks and not positions_tasks[user_id].done():
-        positions_tasks[user_id].cancel()
-        del positions_tasks[user_id]
-    add_bot_log(user_id, "⏹️ Bot arrêté manuellement", "info")
-    return {"message": "Bot arrêté"}
-
-@app.get("/api/signals")
-def get_signals(limit: int = 50, user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM signals WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-        (user_id, limit)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-@app.get("/api/prices")
-def get_prices():
-    conn = get_db()
-    rows = conn.execute("SELECT coin, price FROM prices").fetchall()
-    conn.close()
-    return {r["coin"]: r["price"] for r in rows}
-
-@app.get("/api/positions")
-async def get_positions(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    user = conn.execute("SELECT wallet FROM users WHERE id=?", (user_id,)).fetchone()
-    conn.close()
-    if not user["wallet"]:
-        return []
-    async with httpx.AsyncClient() as client:
-        return await fetch_positions(client, user["wallet"])
-
-@app.get("/api/stats")
-def get_stats(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    signals = conn.execute(
-        "SELECT action, confidence, risk_reward FROM signals WHERE user_id=? AND action!='WAIT'",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-    total = len(signals)
-    longs = sum(1 for s in signals if s["action"] == "LONG")
-    shorts = sum(1 for s in signals if s["action"] == "SHORT")
-    avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
-    avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
-    return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
-
-# ── PAPER TRADING ───────────────────────────────────────────
-class PaperTradeRequest(BaseModel):
-    signal_id: int
-    size_usdc: float = 50.0
-
-class PaperCloseRequest(BaseModel):
-    trade_id: int
-    reason: str = "MANUEL"
-
-def ensure_portfolio(user_id: int, conn):
-    existing = conn.execute("SELECT * FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-    if not existing:
-        conn.execute("INSERT INTO paper_portfolio (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-
-@app.get("/api/paper/portfolio")
-def get_paper_portfolio(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    ensure_portfolio(user_id, conn)
-    portfolio = conn.execute("SELECT * FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-    trades = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN' ORDER BY opened_at DESC",
-        (user_id,)
-    ).fetchall()
-    closed = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT 20",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-    open_trades = [dict(t) for t in trades]
-    closed_trades = [dict(t) for t in closed]
-    total_pnl = sum(t["pnl"] for t in open_trades)
-    # Capital total = balance disponible + marges bloquees dans les trades ouverts
-    open_margin = sum(t["size_usdc"] for t in open_trades)
-    total_capital = portfolio["balance"] + open_margin
-    performance_pct = round((total_capital + total_pnl - portfolio["initial_balance"]) / portfolio["initial_balance"] * 100, 2)
-    return {
-        "balance": portfolio["balance"],
-        "initial_balance": portfolio["initial_balance"],
-        "total_pnl": round(total_pnl, 2),
-        "total_pnl_pct": performance_pct,
-        "open_trades": open_trades,
-        "closed_trades": closed_trades,
-    }
-
-@app.post("/api/paper/trade")
-def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    ensure_portfolio(user_id, conn)
-    # Get signal
-    sig = conn.execute("SELECT * FROM signals WHERE id=? AND user_id=?", (req.signal_id, user_id)).fetchone()
-    if not sig:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Signal introuvable")
-    # Get current price
-    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (sig["coin"],)).fetchone()
-    if not price_row:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Prix non disponible")
-    # Check balance
-    portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-    if portfolio["balance"] < req.size_usdc:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Solde insuffisant")
-    # Open trade
-    conn.execute("""
-        INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price, size_usdc, leverage,
-        stop_loss, take_profit1, take_profit2, signal_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (user_id, sig["coin"], sig["action"], sig["entry"] or price_row["price"],
-          price_row["price"], req.size_usdc, sig["leverage"] or 1,
-          sig["stop_loss"], sig["take_profit1"], sig["take_profit2"], sig["id"]))
-    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (req.size_usdc, user_id))
-    conn.commit()
-    conn.close()
-    return {"message": f"Trade {sig['action']} {sig['coin']} ouvert pour {req.size_usdc} USDC"}
-
-@app.post("/api/paper/close")
-def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    trade = conn.execute(
-        "SELECT * FROM paper_trades WHERE id=? AND user_id=? AND status='OPEN'",
-        (req.trade_id, user_id)
-    ).fetchone()
-    if not trade:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Trade introuvable")
-    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
-    cur_price = price_row["price"] if price_row else trade["entry_price"]
-    direction = 1 if trade["action"] == "LONG" else -1
-    pnl = (cur_price - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-    conn.execute("""
-        UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-        closed_at=?, close_reason=? WHERE id=?
-    """, (cur_price, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-          datetime.utcnow().isoformat(), req.reason, req.trade_id))
-    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (trade["size_usdc"], round(pnl,2), user_id))
-    conn.commit()
-    conn.close()
-    return {"message": f"Trade fermé avec PnL: {round(pnl,2)} USDC"}
-
-@app.post("/api/paper/reset")
-def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
-    conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Portefeuille réinitialisé à 1000 USDC"}
-
-@app.put("/api/paper/update")
-async def update_paper_trades(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    trades = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-    ).fetchall()
-    for trade in trades:
-        price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
-        if not price_row: continue
-        cur = price_row["price"]
-        direction = 1 if trade["action"] == "LONG" else -1
-        pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-        close_reason = None
-        if trade["stop_loss"]:
-            if trade["action"] == "LONG" and cur <= trade["stop_loss"]: close_reason = "STOP_LOSS"
-            elif trade["action"] == "SHORT" and cur >= trade["stop_loss"]: close_reason = "STOP_LOSS"
-        if trade["take_profit2"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
-        elif trade["take_profit1"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                        (trade["size_usdc"], round(pnl,2), user_id))
-        else:
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-    conn.commit()
-    conn.close()
-    return {"message": "Trades mis à jour"}
-
-# ── REINITIALISATION COMPLETE ────────────────────────────────
-@app.post("/api/reset-all")
-def reset_all(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    # Fermer tous les trades paper ouverts
-    conn.execute("UPDATE paper_trades SET status='CLOSED', close_reason='RESET', closed_at=? WHERE user_id=? AND status='OPEN'",
-                (datetime.utcnow().isoformat(), user_id))
-    # Supprimer tout l'historique paper
-    conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
-    # Remettre le portefeuille a zero
-    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
-    # Supprimer tous les signaux
-    conn.execute("DELETE FROM signals WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
-
-# ── LOGS BOT ─────────────────────────────────────────────────
-@app.get("/api/bot/logs")
-def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = False):
-    if persistent:
-        # Logs persistants depuis la DB
-        conn = get_db()
-        rows = conn.execute(
-            """SELECT level, message, created_at FROM bot_activity_log 
-               WHERE user_id=? ORDER BY id DESC LIMIT 200""",
-            (user_id,)
-        ).fetchall()
-        conn.close()
-        logs = [{"time": r["created_at"][11:19], "message": r["message"], "level": r["level"]} for r in rows]
-        return {"logs": logs}
-    # Logs en memoire (session courante)
-    logs = bot_logs_memory.get(user_id, [])
-    return {"logs": logs}
-
-# ── NETTOYAGE ────────────────────────────────────────────────
-@app.post("/api/cleanup")
-def cleanup_signals(user_id: int = Depends(get_current_user)):
-    conn = get_db()
-    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action
-    conn.execute("""
-        DELETE FROM signals WHERE id NOT IN (
-            SELECT MAX(id) FROM signals
-            WHERE user_id=?
-            GROUP BY coin, action, date(created_at)
-        ) AND user_id=?
-    """, (user_id, user_id))
-    deleted = conn.execute("SELECT changes()").fetchone()[0]
-    # Supprimer aussi les signaux de plus de 24h
-    conn.execute("DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')", (user_id,))
-    deleted2 = conn.execute("SELECT changes()").fetchone()[0]
-    remaining = conn.execute("SELECT COUNT(*) FROM signals WHERE user_id=?", (user_id,)).fetchone()[0]
-    conn.commit()
-    conn.close()
-    return {"message": f"{deleted + deleted2} signaux supprimés · {remaining} restants"}
-
-# ── SERVIR L'INTERFACE ───────────────────────────────────────
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/")
-def serve_index():
-    if os.path.exists("static/index.html"):
-        return FileResponse("static/index.html")
-    return {"message": "HyperBot AI API — Interface non trouvée"}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
