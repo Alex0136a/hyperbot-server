@@ -774,17 +774,25 @@ async def update_open_positions(user_id: int):
                 conn.commit()
                 continue
             if tp1_hit:
-                # Verifier TP2 d'abord
-                if trade["take_profit2"] and cur >= trade["take_profit2"]:
-                    close_reason = "TP2"
+                # Trailing progressif selon niveaux atteints
+                tp2 = trade["take_profit2"]
+                if tp2 and cur >= tp2 * 1.02:
+                    # Au-dela de TP2 + 2% → trailing ultra serré 0.5%
+                    trailing_pct = 0.005
+                elif tp2 and cur >= tp2:
+                    # TP2 atteint → trailing serré 0.8%
+                    trailing_pct = 0.008
                 else:
-                    # Trailing SL
-                    new_trailing_sl = new_highest * (1 - trailing_pct)
-                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_highest, cur, trade["id"]))
-                    if cur <= effective_sl:
-                        close_reason = "TRAILING_SL"
+                    # Entre TP1 et TP2 → trailing normal 1.5%
+                    trailing_pct = 0.015
+                new_trailing_sl = new_highest * (1 - trailing_pct)
+                effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
+                conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
+                    (effective_sl, new_highest, cur, trade["id"]))
+                if cur <= effective_sl:
+                    close_reason = "TRAILING_SL"
+                    if tp2 and trade["highest_price"] and trade["highest_price"] >= tp2:
+                        close_reason = "TRAILING_SL_POST_TP2"
             else:
                 if trade["stop_loss"] and cur <= trade["stop_loss"]:
                     close_reason = "STOP_LOSS"
@@ -801,17 +809,25 @@ async def update_open_positions(user_id: int):
                 conn.commit()
                 continue
             if tp1_hit:
-                # Verifier TP2 d'abord
-                if trade["take_profit2"] and cur <= trade["take_profit2"]:
-                    close_reason = "TP2"
+                # Trailing progressif selon niveaux atteints
+                tp2 = trade["take_profit2"]
+                if tp2 and cur <= tp2 * 0.98:
+                    # Au-dela de TP2 - 2% → trailing ultra serré 0.5%
+                    trailing_pct = 0.005
+                elif tp2 and cur <= tp2:
+                    # TP2 atteint → trailing serré 0.8%
+                    trailing_pct = 0.008
                 else:
-                    # Trailing SL
-                    new_trailing_sl = new_lowest * (1 + trailing_pct)
-                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_lowest, cur, trade["id"]))
-                    if cur >= effective_sl:
-                        close_reason = "TRAILING_SL"
+                    # Entre TP1 et TP2 → trailing normal 1.5%
+                    trailing_pct = 0.015
+                new_trailing_sl = new_lowest * (1 + trailing_pct)
+                effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
+                conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
+                    (effective_sl, new_lowest, cur, trade["id"]))
+                if cur >= effective_sl:
+                    close_reason = "TRAILING_SL"
+                    if tp2 and trade["lowest_price"] and trade["lowest_price"] <= tp2:
+                        close_reason = "TRAILING_SL_POST_TP2"
             else:
                 if trade["stop_loss"] and cur >= trade["stop_loss"]:
                     close_reason = "STOP_LOSS"
