@@ -559,9 +559,21 @@ async def scan_markets(user_id: int):
                 # L'IA decide - on lui fait confiance sur le timing
                 add_bot_log(user_id, f"🤖 {coin}: Mode neutre - IA analyse (RSI {rsi_now:.1f})", "info")
 
-            # Ignorer signaux contradictoires
+            # Ignorer signaux contradictoires avec signal recent
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
-                add_bot_log(user_id, f"⚡ {coin}: Signal contradictoire ignoré", "warning")
+                add_bot_log(user_id, f"⚡ {coin}: Signal contradictoire ignoré (dernier: {last_action['action']})", "warning")
+                continue
+
+            # Bloquer si position ouverte dans le sens inverse
+            conn_pos = get_db()
+            open_opposite = conn_pos.execute(
+                """SELECT action FROM paper_trades 
+                   WHERE user_id=? AND coin=? AND status='OPEN'""",
+                (user_id, coin)
+            ).fetchone()
+            conn_pos.close()
+            if open_opposite and open_opposite["action"] != ai.get("action"):
+                add_bot_log(user_id, f"🚫 {coin}: Position {open_opposite['action']} déjà ouverte — signal {ai.get('action')} bloqué", "warning")
                 continue
 
             # Save signal
@@ -762,12 +774,17 @@ async def update_open_positions(user_id: int):
                 conn.commit()
                 continue
             if tp1_hit:
-                new_trailing_sl = new_highest * (1 - trailing_pct)
-                effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                    (effective_sl, new_highest, cur, trade["id"]))
-                if cur <= effective_sl:
-                    close_reason = "TRAILING_SL"
+                # Verifier TP2 d'abord
+                if trade["take_profit2"] and cur >= trade["take_profit2"]:
+                    close_reason = "TP2"
+                else:
+                    # Trailing SL
+                    new_trailing_sl = new_highest * (1 - trailing_pct)
+                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
+                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
+                        (effective_sl, new_highest, cur, trade["id"]))
+                    if cur <= effective_sl:
+                        close_reason = "TRAILING_SL"
             else:
                 if trade["stop_loss"] and cur <= trade["stop_loss"]:
                     close_reason = "STOP_LOSS"
@@ -784,12 +801,17 @@ async def update_open_positions(user_id: int):
                 conn.commit()
                 continue
             if tp1_hit:
-                new_trailing_sl = new_lowest * (1 + trailing_pct)
-                effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                    (effective_sl, new_lowest, cur, trade["id"]))
-                if cur >= effective_sl:
-                    close_reason = "TRAILING_SL"
+                # Verifier TP2 d'abord
+                if trade["take_profit2"] and cur <= trade["take_profit2"]:
+                    close_reason = "TP2"
+                else:
+                    # Trailing SL
+                    new_trailing_sl = new_lowest * (1 + trailing_pct)
+                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
+                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
+                        (effective_sl, new_lowest, cur, trade["id"]))
+                    if cur >= effective_sl:
+                        close_reason = "TRAILING_SL"
             else:
                 if trade["stop_loss"] and cur >= trade["stop_loss"]:
                     close_reason = "STOP_LOSS"
@@ -801,9 +823,12 @@ async def update_open_positions(user_id: int):
                 closed_at=?, close_reason=? WHERE id=?""",
                 (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
                  datetime.utcnow().isoformat(), close_reason, trade["id"]))
+            # Si TP1 deja touche, on rend seulement la moitie restante + PnL sur cette moitie
+            remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
             conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (trade["size_usdc"] * (0.5 if tp1_hit else 1), pnl, user_id))
-            add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+                (remaining, pnl, user_id))
+            emoji = "🎯" if close_reason in ("TP1","TP2") else "🏁"
+            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL total: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
         conn.commit()
     conn.close()
 
