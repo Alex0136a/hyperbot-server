@@ -578,23 +578,6 @@ Confirmer ?`
                 );
               })}
             </div>
-            {/* FINNHUB KEY */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🗓️ Clé API Finnhub (Calendrier Macro)</div>
-              <div style={{fontSize:10,color:"#334155",marginBottom:8}}>Gratuit sur finnhub.io — active les alertes FOMC/CPI/NFP automatiques</div>
-              <input
-                type="password"
-                placeholder="Clé Finnhub (ex: d1abc123...)"
-                value={finnhubKey}
-                onChange={e=>setFinnhubKey(e.target.value)}
-                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}
-              />
-              <button onClick={()=>apiCall("/api/config/finnhub","PUT",{finnhub_key:finnhubKey},token).then(()=>loadData())}
-                style={{width:"100%",background:"linear-gradient(135deg,#b45309,#d97706)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
-                🗓️ Sauvegarder clé Finnhub
-              </button>
-            </div>
-
             <button onClick={saveConfig} style={{width:"100%",background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:12}}>
               💾 Sauvegarder la sélection
             </button>
@@ -625,6 +608,23 @@ Confirmer ?`
             </button>
           </div>
 
+          {/* FINNHUB KEY */}
+          <div style={{background:"#0f1629",border:"1px solid #b45309",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:4}}>🗓️ Calendrier Macro (Finnhub)</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:12}}>Clé gratuite sur finnhub.io — alertes FOMC/CPI/NFP automatiques</div>
+            <input
+              type="password"
+              placeholder="Clé Finnhub (ex: d1abc123...)"
+              value={finnhubKey}
+              onChange={e=>setFinnhubKey(e.target.value)}
+              style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}
+            />
+            <button onClick={()=>apiCall("/api/config/finnhub","PUT",{finnhub_key:finnhubKey},token).then(()=>loadData())}
+              style={{width:"100%",background:"linear-gradient(135deg,#b45309,#d97706)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+              🗓️ Sauvegarder clé Finnhub
+            </button>
+          </div>
+
           {/* FILTRES TEMPORELS */}
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
             <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:4}}>⏰ Filtres de trading</div>
@@ -632,8 +632,8 @@ Confirmer ?`
             
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🌙 Heures creuses (02h-06h UTC)</div>
-                <div style={{fontSize:10,color:"#334155"}}>Suspend les trades pendant les heures de faible liquidité</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🌙 Session creuse (21h-23h UTC)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Fin session USA — liquidité faible. Session Asie (00h-08h) reste active pour HYPE/SOL/INJ</div>
               </div>
               <button onClick={()=>{
                 const v=!filterHours; setFilterHours(v);
