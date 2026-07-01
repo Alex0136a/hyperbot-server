@@ -232,6 +232,7 @@ function App() {
   const [paper, setPaper] = useState(null);
   const [aiContinuous, setAiContinuous] = useState(false);
   const [botLogs, setBotLogs] = useState([]);
+  const [persistentLogs, setPersistentLogs] = useState(false);
   const [paperSize, setPaperSize] = useState(50);
   const [liveW, setLiveW] = useState("");
   const [liveK, setLiveK] = useState("");
@@ -656,7 +657,17 @@ Confirmer ?`
       {/* LOGS */}
       {tab==="logs" && (
         <div style={{padding:14}}>
-          <div style={{background:"#050810",borderRadius:8,padding:12,height:450,overflowY:"auto",border:"1px solid #0f1629"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:10,color:"#475569"}}>{persistentLogs?"📚 Historique persistant (200 entrées)":"⚡ Session courante (50 entrées)"}</span>
+            <button onClick={async()=>{
+              const v=!persistentLogs; setPersistentLogs(v);
+              const r=await apiCall(v?"/api/bot/logs?persistent=true":"/api/bot/logs","GET",null,token);
+              setBotLogs(r?.logs||[]);
+            }} style={{background:persistentLogs?"#1e3a5f":"#0f1629",border:persistentLogs?"1px solid #3b82f6":"1px solid #1e2d4a",borderRadius:6,padding:"4px 10px",color:persistentLogs?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+              {persistentLogs?"📚 PERSISTANT":"⚡ SESSION"}
+            </button>
+          </div>
+          <div style={{background:"#050810",borderRadius:8,padding:12,height:420,overflowY:"auto",border:"1px solid #0f1629"}}>
             {botLogs.length===0?<div style={{color:"#334155",fontSize:11}}>{isRunning?"En attente du premier scan...":"Démarrez le bot pour voir les logs"}</div>
             :botLogs.map((l,i)=>(
               <div key={i} style={{display:"flex",gap:8,marginBottom:3}}>
