@@ -1248,11 +1248,27 @@ def get_signals(limit: int = 50, user_id: int = Depends(get_current_user)):
     return [dict(r) for r in rows]
 
 @app.get("/api/prices")
-def get_prices():
+async def get_prices():
     conn = get_db()
     rows = conn.execute("SELECT coin, price FROM prices").fetchall()
     conn.close()
-    return {r["coin"]: r["price"] for r in rows}
+    prices = {r["coin"]: r["price"] for r in rows}
+    # Si pas de prix en DB, fetcher depuis Hyperliquid
+    if not prices:
+        try:
+            async with httpx.AsyncClient() as client:
+                all_prices = await fetch_all_metas(client)
+                prices = all_prices
+                # Sauvegarder en DB
+                conn2 = get_db()
+                for coin, price in all_prices.items():
+                    conn2.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
+                                (coin, price, datetime.utcnow().isoformat()))
+                conn2.commit()
+                conn2.close()
+        except:
+            pass
+    return {"prices": prices}
 
 @app.get("/api/positions")
 async def get_positions(user_id: int = Depends(get_current_user)):
