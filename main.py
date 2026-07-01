@@ -1245,7 +1245,8 @@ def get_signals(limit: int = 50, user_id: int = Depends(get_current_user)):
         (user_id, limit)
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    signals = [dict(r) for r in rows]
+    return {"signals": signals, "total": len(signals)}
 
 @app.get("/api/prices")
 async def get_prices():
