@@ -591,7 +591,8 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
                 continue
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
-            if action_ia == "WAIT" or confidence_ia < 50:
+            if action_ia == "WAIT" or confidence_ia < 65:
+                add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < 65%) — ignoré", "info")
                 continue
 
             rsi_now = tech.get("rsi") or 50
