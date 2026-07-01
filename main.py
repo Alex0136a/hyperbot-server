@@ -424,6 +424,9 @@ async def scan_markets(user_id: int):
     active_coins = json.loads(config["active_coins"])
     api_key = user["api_key"]
 
+    # Reset auto filtre macro si annonce passée
+    await auto_reset_macro_filter(user_id)
+
     # === LECTURE FILTRES ===
     filter_hours = config["filter_hours"] if config and "filter_hours" in config.keys() else 1
     filter_weekend = config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1
@@ -855,7 +858,6 @@ async def check_positions_loop(user_id: int):
                 break
             try:
                 await update_open_positions(user_id)
-                await auto_reset_macro_filter(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
