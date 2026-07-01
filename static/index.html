@@ -344,7 +344,7 @@ Confirmer ?`
 
   const saveConfig = async () => {
     try {
-      await apiCall("/api/config","PUT",{ wallet:liveW, api_key:liveK||undefined, active_coins:activeCoins },token);
+      await apiCall("/api/config","PUT",{ wallet:liveW, api_key:(liveK && !liveK.startsWith("****"))?liveK:undefined, active_coins:activeCoins },token);
       setSaved(true); setTimeout(()=>setSaved(false),2500);
       addLog("✅ Paramètres sauvegardés", "system");
       loadData();
@@ -600,7 +600,8 @@ Confirmer ?`
             </div>
             <div style={{marginBottom:20}}>
               <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>CLÉ API ANTHROPIC</div>
-              <input value={liveK} onChange={e=>setLiveK(e.target.value)} type="password" placeholder="sk-ant-... (laisser vide pour ne pas modifier)"
+              <input value={liveK} onChange={e=>setLiveK(e.target.value)} type="password"
+                placeholder={config?.has_api_key ? "✅ Clé active — saisir pour changer" : "sk-ant-... (clé Anthropic)"}
                 style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:12}}/>
               <div style={{fontSize:10,color:"#334155",marginTop:3}}>Clé stockée de façon sécurisée sur le serveur · {config.has_api_key?"✅ Clé définie":"❌ Non définie"}</div>
             </div>
