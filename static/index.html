@@ -36,7 +36,7 @@ async function apiCall(path, method="GET", body=null, token=null) {
 }
 
 // ── CONSTANTES ───────────────────────────────────────────────
-const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"];
+const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"];
 const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
@@ -231,6 +231,11 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [paper, setPaper] = useState(null);
   const [aiContinuous, setAiContinuous] = useState(false);
+  const [filterHours, setFilterHours] = useState(true);
+  const [finnhubKey, setFinnhubKey] = useState("");
+  const [filterWeekend, setFilterWeekend] = useState(true);
+  const [filterMacro, setFilterMacro] = useState(false);
+  const [dailyStats, setDailyStats] = useState(null);
   const [botLogs, setBotLogs] = useState([]);
   const [persistentLogs, setPersistentLogs] = useState(false);
   const [paperSize, setPaperSize] = useState(50);
@@ -268,6 +273,10 @@ function App() {
       setConfig(cfg);
       setPaper(pap);
       setAiContinuous(cfg?.ai_continuous === 1);
+      setFilterHours(cfg?.filter_hours !== 0);
+      if(!cfg?.has_finnhub_key) setFinnhubKey(""); // Ne pas écraser si déjà définie
+      setFilterWeekend(cfg?.filter_weekend !== 0);
+      setFilterMacro(cfg?.filter_macro === 1);
       setBotLogs(botLogsRes?.logs || []);
       setSignals(sigs);
       setPrices(prc);
@@ -353,6 +362,7 @@ Confirmer ?`
     {id:"logs",label:"📋 Logs"},
     {id:"paper",label:`🎮 Paper Trading`},
     {id:"rapport",label:"📄 Rapport"},
+    {id:"stats",label:"📊 Performance"},
   ];
 
   return (
@@ -396,7 +406,7 @@ Confirmer ?`
       {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
         {TABS.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r));}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
             {t.label}
           </button>
         ))}
@@ -597,6 +607,70 @@ Confirmer ?`
               {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
             </button>
           </div>
+
+          {/* FINNHUB KEY */}
+          <div style={{background:"#0f1629",border:"1px solid #b45309",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:4}}>🗓️ Calendrier Macro (Finnhub)</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:12}}>Clé gratuite sur finnhub.io — alertes FOMC/CPI/NFP automatiques</div>
+            <input
+              type="password"
+              placeholder="Clé Finnhub (ex: d1abc123...)"
+              value={finnhubKey}
+              onChange={e=>setFinnhubKey(e.target.value)}
+              style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}
+            />
+            <button onClick={()=>apiCall("/api/config/finnhub","PUT",{finnhub_key:finnhubKey},token).then(()=>loadData())}
+              style={{width:"100%",background:"linear-gradient(135deg,#b45309,#d97706)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}
+              disabled={!finnhubKey}>
+              🗓️ {finnhubKey ? "Sauvegarder clé Finnhub" : "Entrez votre clé Finnhub"}
+            </button>
+          </div>
+
+          {/* FILTRES TEMPORELS */}
+          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:4}}>⏰ Filtres de trading</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:12}}>Contrôlez quand le bot peut ouvrir de nouveaux trades</div>
+            
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🌙 Session creuse (21h-23h UTC)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Fin session USA — liquidité faible. Session Asie (00h-08h) reste active pour HYPE/SOL/INJ</div>
+              </div>
+              <button onClick={()=>{
+                const v=!filterHours; setFilterHours(v);
+                apiCall("/api/config/filters","PUT",{"filter_hours":v},token);
+              }} style={{background:filterHours?"#1e3a5f22":"#0f1629",border:filterHours?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:filterHours?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {filterHours?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>📅 Week-end (Sam/Dim)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Suspend les trades le week-end (volumes faibles)</div>
+              </div>
+              <button onClick={()=>{
+                const v=!filterWeekend; setFilterWeekend(v);
+                apiCall("/api/config/filters","PUT",{"filter_weekend":v},token);
+              }} style={{background:filterWeekend?"#1e3a5f22":"#0f1629",border:filterWeekend?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:filterWeekend?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {filterWeekend?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0"}}>
+              <div>
+                <div style={{fontSize:11,color:"#f87171",fontWeight:700}}>⚠️ Pause macro (FOMC/CPI/NFP)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Override manuel — suspend tout nouveau trade immédiatement</div>
+              </div>
+              <button onClick={()=>{
+                const v=!filterMacro; setFilterMacro(v);
+                apiCall("/api/config/filters","PUT",{"filter_macro":v},token);
+              }} style={{background:filterMacro?"#2d0a0a":"#0f1629",border:filterMacro?"1px solid #f87171":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:filterMacro?"#f87171":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {filterMacro?"🔴 ACTIF":"⭕ OFF"}
+              </button>
+            </div>
+          </div>
+
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:14}}>
             <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8}}>🤖 Analyse IA continue</div>
             <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
@@ -815,6 +889,73 @@ Confirmer ?`
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* STATS PERFORMANCE */}
+      {tab==="stats" && (
+        <div style={{padding:14}}>
+          {!dailyStats ? <div style={{color:"#475569",fontSize:12,textAlign:"center",padding:40}}>Chargement...</div> : (<>
+          {/* RESUME GLOBAL */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
+            <div style={{background:"#052e16",border:"1px solid #34d399",borderRadius:10,padding:14,textAlign:"center"}}>
+              <div style={{fontSize:20,fontWeight:800,color:"#34d399"}}>{dailyStats.summary.total_wins}</div>
+              <div style={{fontSize:10,color:"#34d399"}}>TRADES GAGNANTS</div>
+              <div style={{fontSize:14,fontWeight:700,color:"#34d399"}}>+{dailyStats.summary.total_wins_usdc} USDC</div>
+            </div>
+            <div style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:10,padding:14,textAlign:"center"}}>
+              <div style={{fontSize:20,fontWeight:800,color:"#f87171"}}>{dailyStats.summary.total_losses}</div>
+              <div style={{fontSize:10,color:"#f87171"}}>TRADES PERDANTS</div>
+              <div style={{fontSize:14,fontWeight:700,color:"#f87171"}}>{dailyStats.summary.total_losses_usdc} USDC</div>
+            </div>
+            <div style={{background:"#0a0e1a",border:"1px solid #3b82f6",borderRadius:10,padding:14,textAlign:"center"}}>
+              <div style={{fontSize:20,fontWeight:800,color:"#60a5fa"}}>{dailyStats.summary.win_rate}%</div>
+              <div style={{fontSize:10,color:"#60a5fa"}}>WIN RATE</div>
+              <div style={{fontSize:14,fontWeight:700,color: (dailyStats.summary.total_wins_usdc + dailyStats.summary.total_losses_usdc) >= 0 ? "#34d399":"#f87171"}}>
+                {(dailyStats.summary.total_wins_usdc + dailyStats.summary.total_losses_usdc).toFixed(2)} USDC NET
+              </div>
+            </div>
+          </div>
+
+          {/* STATS PAR JOUR */}
+          <div style={{background:"#0a0e1a",borderRadius:10,padding:14,border:"1px solid #1e2d4a",marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,letterSpacing:1}}>PAR JOUR</div>
+            {dailyStats.daily.map((d,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                <span style={{fontSize:11,color:"#64748b"}}>{d.day}</span>
+                <span style={{fontSize:11,color:"#34d399"}}>✅ {d.wins} (+{d.total_wins_usdc?.toFixed(2)} USDC)</span>
+                <span style={{fontSize:11,color:"#f87171"}}>❌ {d.losses} ({d.total_losses_usdc?.toFixed(2)} USDC)</span>
+                <span style={{fontSize:11,fontWeight:700,color:d.net_pnl>=0?"#34d399":"#f87171"}}>{d.net_pnl?.toFixed(2)} USDC</span>
+              </div>
+            ))}
+          </div>
+
+          {/* DETAIL GAINS */}
+          <div style={{background:"#052e16",borderRadius:10,padding:14,border:"1px solid #34d399",marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#34d399",marginBottom:10,letterSpacing:1}}>✅ TRADES GAGNANTS</div>
+            {dailyStats.wins.map((t,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #0a2a1a",fontSize:10}}>
+                <span style={{color:"#34d399",fontWeight:700}}>{t.action} {t.coin}</span>
+                <span style={{color:"#64748b"}}>{t.close_reason}</span>
+                <span style={{color:"#34d399",fontWeight:700}}>+{t.pnl?.toFixed(2)} USDC</span>
+                <span style={{color:"#334155"}}>{t.closed_at?.slice(11,16)}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* DETAIL PERTES */}
+          <div style={{background:"#2d0a0a",borderRadius:10,padding:14,border:"1px solid #f87171"}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#f87171",marginBottom:10,letterSpacing:1}}>❌ TRADES PERDANTS</div>
+            {dailyStats.losses.map((t,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #2a0a0a",fontSize:10}}>
+                <span style={{color:"#f87171",fontWeight:700}}>{t.action} {t.coin}</span>
+                <span style={{color:"#64748b"}}>{t.close_reason}</span>
+                <span style={{color:"#f87171",fontWeight:700}}>{t.pnl?.toFixed(2)} USDC</span>
+                <span style={{color:"#334155"}}>{t.closed_at?.slice(11,16)}</span>
+              </div>
+            ))}
+          </div>
+          </>)}
         </div>
       )}
 
