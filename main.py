@@ -475,11 +475,12 @@ async def scan_markets(user_id: int):
         # Fetch prices
         prices = await fetch_all_metas(client)
 
-        # Update prices in DB
+        # Update prices en DB uniquement pour les coins actifs
         conn = get_db()
-        for coin, price in prices.items():
-            conn.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
-                        (coin, price, datetime.utcnow().isoformat()))
+        for coin in active_coins:
+            if coin in prices:
+                conn.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
+                            (coin, prices[coin], datetime.utcnow().isoformat()))
         conn.commit()
         conn.close()
 
@@ -772,12 +773,14 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                         (new_lowest, cur, trade["id"]))
 
-            # Toujours mettre à jour le prix et PnL actuels
+            # Mettre à jour prix seulement si changement significatif (> 0.05%)
             if not close_reason:
-                conn.execute(
-                    "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
-                )
+                last_price = trade.get("current_price") or trade["entry_price"]
+                if last_price and abs(cur - last_price) / last_price > 0.0005:
+                    conn.execute(
+                        "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
+                    )
 
             if close_reason:
                 conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
