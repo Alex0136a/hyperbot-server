@@ -364,7 +364,8 @@ Respond ONLY with JSON (no markdown):
         return None
 
 # ── MOTEUR DE SCAN ───────────────────────────────────────────
-scanning_tasks = {}
+scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
+positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
 
 async def scan_markets(user_id: int):
     conn = get_db()
@@ -681,7 +682,110 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+async def check_positions_loop(user_id: int):
+    """Boucle rapide 60s - suivi SL/TP/Trailing des positions ouvertes"""
+    try:
+        while True:
+            conn = get_db()
+            config = conn.execute("SELECT is_running FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            conn.close()
+            if not config or not config["is_running"]:
+                break
+            try:
+                await update_open_positions(user_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                add_bot_log(user_id, f"⚠️ Erreur suivi positions: {e}", "error")
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        raise
+
+async def update_open_positions(user_id: int):
+    """Met a jour SL/TP/Trailing sur les positions ouvertes"""
+    conn = get_db()
+    paper_trades = conn.execute(
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
+        (user_id,)
+    ).fetchall()
+    if not paper_trades:
+        conn.close()
+        return
+    async with httpx.AsyncClient() as client:
+        prices = await fetch_all_metas(client)
+    for trade in paper_trades:
+        trade = dict(trade)
+        cur = prices.get(trade["coin"])
+        if not cur:
+            continue
+        pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
+        close_reason = None
+        trailing_pct = 0.015
+        tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
+        trailing_sl = trade["trailing_sl"]
+        highest = trade["highest_price"] or cur
+        lowest = trade["lowest_price"] or cur
+        new_highest = max(highest, cur)
+        new_lowest = min(lowest, cur)
+
+        if trade["action"] == "LONG":
+            if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
+                pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
+                    (trade["entry_price"], new_highest, cur, trade["id"]))
+                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
+                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
+                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
+                conn.commit()
+                continue
+            if tp1_hit:
+                new_trailing_sl = new_highest * (1 - trailing_pct)
+                effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
+                conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
+                    (effective_sl, new_highest, cur, trade["id"]))
+                if cur <= effective_sl:
+                    close_reason = "TRAILING_SL"
+            else:
+                if trade["stop_loss"] and cur <= trade["stop_loss"]:
+                    close_reason = "STOP_LOSS"
+                conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
+                    (new_highest, cur, trade["id"]))
+        elif trade["action"] == "SHORT":
+            if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
+                pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
+                    (trade["entry_price"], new_lowest, cur, trade["id"]))
+                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
+                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
+                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
+                conn.commit()
+                continue
+            if tp1_hit:
+                new_trailing_sl = new_lowest * (1 + trailing_pct)
+                effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
+                conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
+                    (effective_sl, new_lowest, cur, trade["id"]))
+                if cur >= effective_sl:
+                    close_reason = "TRAILING_SL"
+            else:
+                if trade["stop_loss"] and cur >= trade["stop_loss"]:
+                    close_reason = "STOP_LOSS"
+                conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
+                    (new_lowest, cur, trade["id"]))
+
+        if close_reason:
+            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                closed_at=?, close_reason=? WHERE id=?""",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
+            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                (trade["size_usdc"] * (0.5 if tp1_hit else 1), pnl, user_id))
+            add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+        conn.commit()
+    conn.close()
+
 async def run_bot_loop(user_id: int):
+    """Boucle principale 3min - analyse IA et nouveaux signaux"""
     try:
         while True:
             conn = get_db()
@@ -830,12 +934,15 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     conn.close()
     if not user["api_key"]:
         raise HTTPException(status_code=400, detail="Clé API Anthropic manquante dans les paramètres")
-    # Annuler une eventuelle tache zombie avant d'en creer une nouvelle
+    # Annuler taches zombies avant d'en creer de nouvelles
     if user_id in scanning_tasks and not scanning_tasks[user_id].done():
         scanning_tasks[user_id].cancel()
-    task = asyncio.create_task(run_bot_loop(user_id))
-    scanning_tasks[user_id] = task
-    add_bot_log(user_id, "▶️ Bot démarré", "success")
+    if user_id in positions_tasks and not positions_tasks[user_id].done():
+        positions_tasks[user_id].cancel()
+    # Lancer boucle scan IA (3min) et boucle suivi positions (60s)
+    scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
+    positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
+    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 60s", "success")
     return {"message": "Bot démarré"}
 
 @app.put("/api/config/ai-continuous")
@@ -859,6 +966,9 @@ def stop_bot(user_id: int = Depends(get_current_user)):
     if user_id in scanning_tasks and not scanning_tasks[user_id].done():
         scanning_tasks[user_id].cancel()
         del scanning_tasks[user_id]
+    if user_id in positions_tasks and not positions_tasks[user_id].done():
+        positions_tasks[user_id].cancel()
+        del positions_tasks[user_id]
     add_bot_log(user_id, "⏹️ Bot arrêté manuellement", "info")
     return {"message": "Bot arrêté"}
 
