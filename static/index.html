@@ -790,10 +790,14 @@ Confirmer ?`
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
-                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (USDC)</div>
-                <input type="number" defaultValue={config?.max_position_usdc||50} min="10" max="500"
-                  onBlur={e=>apiCall("/api/config","PUT",{max_position_usdc:Number(e.target.value)},token).then(loadData)}
-                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <input type="number" defaultValue={config?.position_pct||8} min="1" max="50"
+                    onBlur={e=>apiCall("/api/config","PUT",{position_pct:Number(e.target.value)},token).then(loadData)}
+                    style={{flex:1,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                  <span style={{color:"#60a5fa",fontWeight:700,fontSize:14}}>%</span>
+                </div>
+                <div style={{fontSize:9,color:"#334155",marginTop:4}}>≈ {Math.round((config?.position_pct||8)*10)} USDC sur 1000 USDC · Adaptatif</div>
               </div>
               <div>
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
