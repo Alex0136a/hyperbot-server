@@ -105,6 +105,22 @@ def init_db():
         conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_hours INTEGER DEFAULT 1")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN finnhub_key TEXT")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_weekend INTEGER DEFAULT 1")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_macro INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +417,49 @@ async def scan_markets(user_id: int):
 
     active_coins = json.loads(config["active_coins"])
     api_key = user["api_key"]
+
+    # === CALENDRIER MACRO FINNHUB ===
+    finnhub_key = user.get("finnhub_key") if user else None
+    if finnhub_key and not filter_macro:
+        macro_data = await check_macro_calendar(user_id, finnhub_key)
+        for event in macro_data.get("events", []):
+            hours = event["hours_left"]
+            name = event["event"]
+            if hours <= 0:
+                add_bot_log(user_id, f"📰 {name} vient d'être publié — volatilité possible", "warning")
+            elif hours <= 2:
+                # Auto-activer le filtre macro
+                conn_m = get_db()
+                conn_m.execute("UPDATE bot_config SET filter_macro=1 WHERE user_id=?", (user_id,))
+                conn_m.commit()
+                conn_m.close()
+                add_bot_log(user_id, f"🔴 AUTO-PAUSE: {name} dans {hours}h — filtre macro activé automatiquement", "error")
+                return
+            elif hours <= 24:
+                add_bot_log(user_id, f"⚠️ MACRO ALERT: {name} dans {round(hours)}h — préparez-vous", "warning")
+    
+    # === FILTRES TEMPORELS ===
+    from datetime import datetime as dt
+    now_utc = dt.utcnow()
+    hour_utc = now_utc.hour
+    weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
+
+    filter_hours = config["filter_hours"] if "filter_hours" in config.keys() else 1
+    filter_weekend = config["filter_weekend"] if "filter_weekend" in config.keys() else 1
+    filter_macro = config["filter_macro"] if "filter_macro" in config.keys() else 0
+
+    if filter_hours and 2 <= hour_utc < 6:
+        add_bot_log(user_id, f"🌙 Heures creuses ({hour_utc}h UTC) — pas de nouveaux trades", "info")
+        return
+
+    if filter_weekend and weekday >= 5:
+        day_name = "Samedi" if weekday == 5 else "Dimanche"
+        add_bot_log(user_id, f"📅 {day_name} — trading suspendu (week-end)", "info")
+        return
+
+    if filter_macro:
+        add_bot_log(user_id, f"⚠️ Pause macro activée manuellement — pas de nouveaux trades", "warning")
+        return
 
     async with httpx.AsyncClient() as client:
         # Fetch prices
@@ -717,6 +776,53 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
+    """Vérifie les annonces macro importantes dans les prochaines 24h via Finnhub"""
+    try:
+        from datetime import datetime as dt, timedelta
+        now = dt.utcnow()
+        date_from = now.strftime("%Y-%m-%d")
+        date_to = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+        
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"https://finnhub.io/api/v1/calendar/economic",
+                params={"from": date_from, "to": date_to, "token": finnhub_key},
+                timeout=10
+            )
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+        
+        # Filtrer les événements à fort impact USD
+        high_impact_keywords = ["FOMC", "Fed", "CPI", "NFP", "Nonfarm", "GDP", "PCE", "Interest Rate"]
+        upcoming = []
+        
+        for event in data.get("economicCalendar", []):
+            if event.get("country") != "US":
+                continue
+            event_name = event.get("event", "")
+            if not any(kw.lower() in event_name.lower() for kw in high_impact_keywords):
+                continue
+            
+            # Calculer le temps restant
+            try:
+                event_time = dt.strptime(event.get("time", "")[:16], "%Y-%m-%d %H:%M")
+                hours_left = (event_time - now).total_seconds() / 3600
+                if -1 <= hours_left <= 48:  # Entre -1h (vient de passer) et 48h
+                    upcoming.append({
+                        "event": event_name,
+                        "time": event.get("time", ""),
+                        "hours_left": round(hours_left, 1),
+                        "impact": "HIGH"
+                    })
+            except:
+                continue
+        
+        return {"events": upcoming}
+    except Exception as e:
+        return {}
+
 async def check_positions_loop(user_id: int):
     """Boucle rapide 15s - suivi SL/TP/Trailing des positions ouvertes"""
     try:
@@ -728,6 +834,7 @@ async def check_positions_loop(user_id: int):
                 break
             try:
                 await update_open_positions(user_id)
+                await auto_reset_macro_filter(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -735,6 +842,30 @@ async def check_positions_loop(user_id: int):
             await asyncio.sleep(15)
     except asyncio.CancelledError:
         raise
+
+async def auto_reset_macro_filter(user_id: int):
+    """Désactive le filtre macro 1h après une annonce"""
+    conn = get_db()
+    user = conn.execute("SELECT finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
+    cfg = conn.execute("SELECT filter_macro FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    
+    if not cfg or not cfg["filter_macro"]:
+        return
+    finnhub_key = user["finnhub_key"] if user else None
+    if not finnhub_key:
+        return
+    
+    macro_data = await check_macro_calendar(user_id, finnhub_key)
+    events = macro_data.get("events", [])
+    # Si aucune annonce dans les prochaines 2h, désactiver le filtre
+    critical = [e for e in events if e["hours_left"] <= 2 and e["hours_left"] >= -1]
+    if not critical:
+        conn2 = get_db()
+        conn2.execute("UPDATE bot_config SET filter_macro=0 WHERE user_id=?", (user_id,))
+        conn2.commit()
+        conn2.close()
+        add_bot_log(user_id, "✅ Filtre macro désactivé automatiquement — fenêtre macro passée", "success")
 
 async def update_open_positions(user_id: int):
     """Met a jour SL/TP/Trailing sur les positions ouvertes"""
@@ -1009,6 +1140,32 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 15s", "success")
     return {"message": "Bot démarré"}
 
+@app.put("/api/config/finnhub")
+def save_finnhub_key(req: dict, user_id: int = Depends(get_current_user)):
+    key = req.get("finnhub_key", "").strip()
+    conn = get_db()
+    conn.execute("UPDATE users SET finnhub_key=? WHERE id=?", (key, user_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, "🔑 Clé Finnhub sauvegardée — calendrier macro actif", "success")
+    return {"message": "Clé Finnhub sauvegardée"}
+
+@app.put("/api/config/filters")
+def update_filters(req: dict, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    updates = []
+    values = []
+    for field in ["filter_hours", "filter_weekend", "filter_macro"]:
+        if field in req:
+            updates.append(f"{field}=?")
+            values.append(1 if req[field] else 0)
+    if updates:
+        values.append(user_id)
+        conn.execute(f"UPDATE bot_config SET {','.join(updates)} WHERE user_id=?", values)
+        conn.commit()
+    conn.close()
+    return {"message": "Filtres mis à jour"}
+
 @app.put("/api/config/ai-continuous")
 def toggle_ai_continuous(req: dict, user_id: int = Depends(get_current_user)):
     value = 1 if req.get("enabled") else 0
@@ -1243,6 +1400,59 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/stats/daily")
+def get_daily_stats(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    # Stats par jour - trades gagnants et perdants
+    rows = conn.execute("""
+        SELECT 
+            date(closed_at) as day,
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as total_wins_usdc,
+            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as total_losses_usdc,
+            SUM(pnl) as net_pnl,
+            close_reason
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+        GROUP BY date(closed_at)
+        ORDER BY day DESC
+        LIMIT 30
+    """, (user_id,)).fetchall()
+    
+    # Detail wins
+    wins = conn.execute("""
+        SELECT coin, action, pnl, pnl_pct, entry_price, current_price, 
+               close_reason, closed_at, leverage
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED' AND pnl > 0
+        ORDER BY closed_at DESC
+    """, (user_id,)).fetchall()
+    
+    # Detail losses
+    losses = conn.execute("""
+        SELECT coin, action, pnl, pnl_pct, entry_price, current_price,
+               close_reason, closed_at, leverage
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED' AND pnl <= 0
+        ORDER BY closed_at DESC
+    """, (user_id,)).fetchall()
+    
+    conn.close()
+    return {
+        "daily": [dict(r) for r in rows],
+        "wins": [dict(r) for r in wins],
+        "losses": [dict(r) for r in losses],
+        "summary": {
+            "total_wins": len(wins),
+            "total_losses": len(losses),
+            "total_wins_usdc": round(sum(r["pnl"] for r in wins), 2),
+            "total_losses_usdc": round(sum(r["pnl"] for r in losses), 2),
+            "win_rate": round(len(wins) / (len(wins) + len(losses)) * 100, 1) if (wins or losses) else 0
+        }
+    }
+
 @app.get("/api/bot/logs")
 def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = False):
     if persistent:
@@ -1264,6 +1474,17 @@ def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = Fa
 @app.post("/api/cleanup")
 def cleanup_signals(user_id: int = Depends(get_current_user)):
     conn = get_db()
+    # Recuperer les coins actifs
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    active_coins = json.loads(config["active_coins"]) if config else []
+    # Supprimer les signaux des actifs desactives
+    if active_coins:
+        placeholders = ",".join("?" * len(active_coins))
+        conn.execute(f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
+            [user_id] + active_coins)
+        inactive_deleted = conn.execute("SELECT changes()").fetchone()[0]
+    else:
+        inactive_deleted = 0
     # Supprimer les doublons — garder seulement le signal le plus récent par coin+action
     conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
