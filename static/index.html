@@ -258,64 +258,42 @@ function App() {
     setToken(""); setEmail("");
   };
 
-  const loadData = useCallback(async (full=false) => {
+  const loadData = useCallback(async () => {
     if (!token) return;
     try {
-      // Chargement léger : seulement les données qui changent souvent
-      const [pap, botLogsRes, pos] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, pap, botLogsRes] = await Promise.all([
+        apiCall("/api/config","GET",null,token),
+        apiCall("/api/signals?limit=50","GET",null,token),
+        apiCall("/api/prices","GET",null,token),
+        apiCall("/api/stats","GET",null,token),
+        apiCall("/api/positions","GET",null,token),
         apiCall("/api/paper/portfolio","GET",null,token),
         apiCall("/api/bot/logs","GET",null,token),
-        apiCall("/api/positions","GET",null,token),
       ]);
-      // Chargement complet uniquement au démarrage ou sur demande
-      let cfg, sigs, prc, st;
-      if(full || !config) {
-        [cfg, sigs, prc, st] = await Promise.all([
-          apiCall("/api/config","GET",null,token),
-          apiCall("/api/signals?limit=50","GET",null,token),
-          apiCall("/api/prices","GET",null,token),
-          apiCall("/api/stats","GET",null,token),
-        ]);
-        if(cfg) setConfig(cfg);
-        if(sigs) setSignals(sigs?.signals||[]);
-        if(prc) setPrices(prc?.prices||{});
-        if(st) setStats(st);
-      }
-      // Fusionner cfg pour les setters suivants
-      const cfgData = cfg || config;
+      setConfig(cfg);
       setPaper(pap);
-      setAiContinuous(cfgData?.ai_continuous === 1);
-      setFilterHours(cfgData?.filter_hours !== 0);
-      if(cfgData?.finnhub_key_preview) setFinnhubKey(cfgData.finnhub_key_preview);
-      else if(!cfg?.has_finnhub_key) setFinnhubKey("");
+      setAiContinuous(cfg?.ai_continuous === 1);
+      setFilterHours(cfg?.filter_hours !== 0);
+      if(cfg?.finnhub_key_preview) setFinnhubKey(cfg.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend !== 0);
       setFilterMacro(cfg?.filter_macro === 1);
-      setBotLogs(botLogsRes?.logs || []);
-      setSignals(sigs);
-      setPrices(prc);
+      setBotLogs(botLogsRes?.logs||[]);
+      setSignals(sigs?.signals||[]);
+      setPrices(prc?.prices||{});
       setStats(st);
-      setPositions(pos);
-      setLiveW(cfg.wallet||"");
-      setActiveCoins(cfg.active_coins||ALL_COINS);
-    } catch(e) {
-      if (e.message.includes("Session")) { logout(); }
-    }
-  },[token]);
+      setPositions(pos?.positions||[]);
+      setActiveCoins(cfg?.active_coins||ALL_COINS);
+      setIsRunning(!!cfg?.is_running);
+    } catch(e) { console.error(e); }
+  }, [token]);
 
   useEffect(() => {
-    if (token) {
-      loadData(true);
-      // Suspendre polling si onglet/app en arrière-plan
-      const startPoll = () => {
-        if(pollRef.current) clearInterval(pollRef.current);
-        pollRef.current = setInterval(()=>{ if(!document.hidden) loadData(false); }, 15000);
-      };
-      startPoll();
-      document.addEventListener('visibilitychange', ()=>{
-        if(!document.hidden) loadData(false); // Recharger immédiatement au retour
-      });
+    if(token) {
+      loadData();
+      const id = setInterval(()=>{ if(!document.hidden) loadData(); }, 30000);
+      document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) loadData(); });
+      return () => clearInterval(id);
     }
-    return () => clearInterval(pollRef.current);
   }, [token, loadData]);
 
   useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
