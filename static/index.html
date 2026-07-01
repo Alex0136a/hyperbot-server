@@ -274,7 +274,9 @@ function App() {
       setPaper(pap);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
-      if(!cfg?.has_finnhub_key) setFinnhubKey(""); // Ne pas écraser si déjà définie
+      // Afficher preview clé Finnhub si déjà définie
+      if(cfg?.finnhub_key_preview) setFinnhubKey(cfg.finnhub_key_preview);
+      else if(!cfg?.has_finnhub_key) setFinnhubKey("");
       setFilterWeekend(cfg?.filter_weekend !== 0);
       setFilterMacro(cfg?.filter_macro === 1);
       setBotLogs(botLogsRes?.logs || []);
