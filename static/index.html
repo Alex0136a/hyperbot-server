@@ -258,24 +258,35 @@ function App() {
     setToken(""); setEmail("");
   };
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (full=false) => {
     if (!token) return;
     try {
-      const [cfg, sigs, prc, st, pos, pap, botLogsRes] = await Promise.all([
-        apiCall("/api/config","GET",null,token),
-        apiCall("/api/signals?limit=50","GET",null,token),
-        apiCall("/api/prices","GET",null,token),
-        apiCall("/api/stats","GET",null,token),
-        apiCall("/api/positions","GET",null,token),
+      // Chargement léger : seulement les données qui changent souvent
+      const [pap, botLogsRes, pos] = await Promise.all([
         apiCall("/api/paper/portfolio","GET",null,token),
         apiCall("/api/bot/logs","GET",null,token),
+        apiCall("/api/positions","GET",null,token),
       ]);
-      setConfig(cfg);
+      // Chargement complet uniquement au démarrage ou sur demande
+      let cfg, sigs, prc, st;
+      if(full || !config) {
+        [cfg, sigs, prc, st] = await Promise.all([
+          apiCall("/api/config","GET",null,token),
+          apiCall("/api/signals?limit=50","GET",null,token),
+          apiCall("/api/prices","GET",null,token),
+          apiCall("/api/stats","GET",null,token),
+        ]);
+        if(cfg) setConfig(cfg);
+        if(sigs) setSignals(sigs?.signals||[]);
+        if(prc) setPrices(prc?.prices||{});
+        if(st) setStats(st);
+      }
+      // Fusionner cfg pour les setters suivants
+      const cfgData = cfg || config;
       setPaper(pap);
-      setAiContinuous(cfg?.ai_continuous === 1);
-      setFilterHours(cfg?.filter_hours !== 0);
-      // Afficher preview clé Finnhub si déjà définie
-      if(cfg?.finnhub_key_preview) setFinnhubKey(cfg.finnhub_key_preview);
+      setAiContinuous(cfgData?.ai_continuous === 1);
+      setFilterHours(cfgData?.filter_hours !== 0);
+      if(cfgData?.finnhub_key_preview) setFinnhubKey(cfgData.finnhub_key_preview);
       else if(!cfg?.has_finnhub_key) setFinnhubKey("");
       setFilterWeekend(cfg?.filter_weekend !== 0);
       setFilterMacro(cfg?.filter_macro === 1);
@@ -293,8 +304,8 @@ function App() {
 
   useEffect(() => {
     if (token) {
-      loadData();
-      pollRef.current = setInterval(loadData, 15000);
+      loadData(true);
+      pollRef.current = setInterval(()=>loadData(false), 15000);
     }
     return () => clearInterval(pollRef.current);
   }, [token, loadData]);
