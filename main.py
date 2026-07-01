@@ -110,6 +110,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN position_pct REAL DEFAULT 8.0")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE users ADD COLUMN finnhub_key TEXT")
         conn.commit()
     except: pass
@@ -167,6 +171,7 @@ def init_db():
             is_running INTEGER DEFAULT 0,
             trading_mode TEXT DEFAULT 'paper',
             max_position_usdc REAL DEFAULT 50.0,
+            position_pct REAL DEFAULT 8.0,
             max_open_trades INTEGER DEFAULT 5,
             last_scan TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -659,7 +664,13 @@ async def scan_markets(user_id: int):
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
-                size = cfg["max_position_usdc"] or 50.0
+                # Taille en % du capital disponible
+                position_pct = cfg["position_pct"] if cfg and "position_pct" in cfg.keys() else 8.0
+                portfolio_now = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                capital = portfolio_now["balance"] if portfolio_now else 1000.0
+                size = round(capital * position_pct / 100, 2)
+                size = max(10.0, min(size, capital * 0.5))  # min 10 USDC, max 50% du capital
+                add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({position_pct}% de {round(capital,2)} USDC)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                 if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
@@ -1036,6 +1047,7 @@ class UpdateConfigRequest(BaseModel):
     trading_mode: Optional[str] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
+    position_pct: Optional[float] = None
 
 # ── ROUTES AUTH ──────────────────────────────────────────────
 @app.post("/api/register")
@@ -1094,6 +1106,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
         "max_position_usdc": config["max_position_usdc"] or 50.0,
+        "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 8.0,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
         "ai_continuous": config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0,
@@ -1124,6 +1137,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
     if req.max_open_trades is not None:
         conn.execute("UPDATE bot_config SET max_open_trades=? WHERE user_id=?",
                     (req.max_open_trades, user_id))
+    if req.position_pct is not None:
+        pct = max(1.0, min(50.0, req.position_pct))
+        conn.execute("UPDATE bot_config SET position_pct=? WHERE user_id=?",
+                    (pct, user_id))
     conn.commit()
     conn.close()
     return {"message": "Configuration mise à jour"}
