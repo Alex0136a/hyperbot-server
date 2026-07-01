@@ -348,9 +348,9 @@ Confirmer ?`
   };
 
   if (!token) return <LoginPage onLogin={(t,e)=>{setToken(t);setEmail(e);}}/>;
-  if (!config) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:"#60a5fa"}}>Chargement...</div>;
+  const cfg = config || {is_running:false, trading_mode:"paper", active_coins:[], has_api_key:false};
 
-  const isRunning = config.is_running;
+  const isRunning = cfg.is_running;
   const TABS = [
     {id:"dashboard",label:"📊 Tableau de bord"},
     {id:"signaux",label:`⚡ Signaux (${stats.total||0})`},
