@@ -128,6 +128,7 @@ def init_db():
             password_hash TEXT NOT NULL,
             wallet TEXT DEFAULT '',
             api_key TEXT DEFAULT '',
+            finnhub_key TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -418,6 +419,11 @@ async def scan_markets(user_id: int):
     active_coins = json.loads(config["active_coins"])
     api_key = user["api_key"]
 
+    # === LECTURE FILTRES ===
+    filter_hours = config["filter_hours"] if config and "filter_hours" in config.keys() else 1
+    filter_weekend = config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1
+    filter_macro = config["filter_macro"] if config and "filter_macro" in config.keys() else 0
+
     # === CALENDRIER MACRO FINNHUB ===
     finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if finnhub_key and not filter_macro:
@@ -443,10 +449,6 @@ async def scan_markets(user_id: int):
     now_utc = dt.utcnow()
     hour_utc = now_utc.hour
     weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
-
-    filter_hours = config["filter_hours"] if config and "filter_hours" in config.keys() else 1
-    filter_weekend = config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1
-    filter_macro = config["filter_macro"] if config and "filter_macro" in config.keys() else 0
 
     if filter_hours and 21 <= hour_utc < 23:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
@@ -1147,14 +1149,20 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     return {"message": "Bot démarré"}
 
 @app.put("/api/config/finnhub")
-def save_finnhub_key(req: dict, user_id: int = Depends(get_current_user)):
+async def save_finnhub_key(req: dict, user_id: int = Depends(get_current_user)):
     key = req.get("finnhub_key", "").strip()
+    if not key:
+        return {"message": "Clé vide ignorée"}
     conn = get_db()
     conn.execute("UPDATE users SET finnhub_key=? WHERE id=?", (key, user_id))
     conn.commit()
+    # Vérifier que c'est bien sauvegardé
+    saved = conn.execute("SELECT finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
     conn.close()
-    add_bot_log(user_id, "🔑 Clé Finnhub sauvegardée — calendrier macro actif", "success")
-    return {"message": "Clé Finnhub sauvegardée"}
+    if saved and saved["finnhub_key"] == key:
+        add_bot_log(user_id, f"🔑 Clé Finnhub sauvegardée ({key[:8]}...) — calendrier macro actif", "success")
+        return {"message": "Clé Finnhub sauvegardée", "saved": True}
+    return {"message": "Erreur sauvegarde", "saved": False}
 
 @app.put("/api/config/filters")
 def update_filters(req: dict, user_id: int = Depends(get_current_user)):
