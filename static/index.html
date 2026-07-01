@@ -620,9 +620,8 @@ Confirmer ?`
               style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}
             />
             <button onClick={()=>apiCall("/api/config/finnhub","PUT",{finnhub_key:finnhubKey},token).then(()=>loadData())}
-              style={{width:"100%",background:"linear-gradient(135deg,#b45309,#d97706)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}
-              disabled={!finnhubKey}>
-              🗓️ {finnhubKey ? "Sauvegarder clé Finnhub" : "Entrez votre clé Finnhub"}
+              style={{width:"100%",background:"linear-gradient(135deg,#b45309,#d97706)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+              🗓️ Sauvegarder clé Finnhub
             </button>
           </div>
 
