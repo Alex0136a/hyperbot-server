@@ -97,7 +97,7 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        coins_json = '["BTC","ETH","HYPE"]'
+        coins_json = '["HYPE","SOL","INJ"]'
         conn.execute("UPDATE bot_config SET active_coins=?", (coins_json,))
         conn.commit()
     except: pass
@@ -146,7 +146,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS bot_config (
             user_id INTEGER PRIMARY KEY,
-            active_coins TEXT DEFAULT '["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG"]',
+            active_coins TEXT DEFAULT '["HYPE","SOL","INJ"]',
             is_running INTEGER DEFAULT 0,
             trading_mode TEXT DEFAULT 'paper',
             max_position_usdc REAL DEFAULT 50.0,
@@ -718,7 +718,7 @@ async def scan_markets(user_id: int):
         conn.close()
 
 async def check_positions_loop(user_id: int):
-    """Boucle rapide 60s - suivi SL/TP/Trailing des positions ouvertes"""
+    """Boucle rapide 15s - suivi SL/TP/Trailing des positions ouvertes"""
     try:
         while True:
             conn = get_db()
@@ -732,7 +732,7 @@ async def check_positions_loop(user_id: int):
                 raise
             except Exception as e:
                 add_bot_log(user_id, f"⚠️ Erreur suivi positions: {e}", "error")
-            await asyncio.sleep(60)
+            await asyncio.sleep(15)
     except asyncio.CancelledError:
         raise
 
@@ -990,7 +990,7 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     # Lancer boucle scan IA (3min) et boucle suivi positions (60s)
     scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
     positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
-    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 60s", "success")
+    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 15s", "success")
     return {"message": "Bot démarré"}
 
 @app.put("/api/config/ai-continuous")
