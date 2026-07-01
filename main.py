@@ -419,7 +419,7 @@ async def scan_markets(user_id: int):
     api_key = user["api_key"]
 
     # === CALENDRIER MACRO FINNHUB ===
-    finnhub_key = user.get("finnhub_key") if user else None
+    finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if finnhub_key and not filter_macro:
         macro_data = await check_macro_calendar(user_id, finnhub_key)
         for event in macro_data.get("events", []):
@@ -444,9 +444,9 @@ async def scan_markets(user_id: int):
     hour_utc = now_utc.hour
     weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
 
-    filter_hours = config["filter_hours"] if "filter_hours" in config.keys() else 1
-    filter_weekend = config["filter_weekend"] if "filter_weekend" in config.keys() else 1
-    filter_macro = config["filter_macro"] if "filter_macro" in config.keys() else 0
+    filter_hours = config["filter_hours"] if config and "filter_hours" in config.keys() else 1
+    filter_weekend = config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1
+    filter_macro = config["filter_macro"] if config and "filter_macro" in config.keys() else 0
 
     if filter_hours and 21 <= hour_utc < 23:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
@@ -567,7 +567,7 @@ async def scan_markets(user_id: int):
                 "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'",
                 (user_id, coin)
             ).fetchone()
-            ai_continuous = config["ai_continuous"] if "ai_continuous" in config.keys() else 0
+            ai_continuous = config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0
             conn_check.close()
 
             if coin_already_open and not ai_continuous:
@@ -852,7 +852,7 @@ async def auto_reset_macro_filter(user_id: int):
     
     if not cfg or not cfg["filter_macro"]:
         return
-    finnhub_key = user["finnhub_key"] if user else None
+    finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if not finnhub_key:
         return
     
@@ -1094,10 +1094,10 @@ def get_config(user_id: int = Depends(get_current_user)):
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
-        "ai_continuous": config["ai_continuous"] if "ai_continuous" in config.keys() else 0,
-        "filter_hours": config["filter_hours"] if "filter_hours" in config.keys() else 1,
-        "filter_weekend": config["filter_weekend"] if "filter_weekend" in config.keys() else 1,
-        "filter_macro": config["filter_macro"] if "filter_macro" in config.keys() else 0,
+        "ai_continuous": config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0,
+        "filter_hours": config["filter_hours"] if config and "filter_hours" in config.keys() else 1,
+        "filter_weekend": config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1,
+        "filter_macro": config["filter_macro"] if config and "filter_macro" in config.keys() else 0,
     }
 
 @app.put("/api/config")
