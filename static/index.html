@@ -290,8 +290,7 @@ function App() {
   useEffect(() => {
     if(token) {
       loadData();
-      const id = setInterval(()=>{ if(!document.hidden) loadData(); }, 30000);
-      document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) loadData(); });
+      const id = setInterval(loadData, 30000);
       return () => clearInterval(id);
     }
   }, [token, loadData]);
