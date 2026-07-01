@@ -305,7 +305,15 @@ function App() {
   useEffect(() => {
     if (token) {
       loadData(true);
-      pollRef.current = setInterval(()=>loadData(false), 15000);
+      // Suspendre polling si onglet/app en arrière-plan
+      const startPoll = () => {
+        if(pollRef.current) clearInterval(pollRef.current);
+        pollRef.current = setInterval(()=>{ if(!document.hidden) loadData(false); }, 15000);
+      };
+      startPoll();
+      document.addEventListener('visibilitychange', ()=>{
+        if(!document.hidden) loadData(false); // Recharger immédiatement au retour
+      });
     }
     return () => clearInterval(pollRef.current);
   }, [token, loadData]);
