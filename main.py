@@ -1079,19 +1079,25 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
 @app.get("/api/config")
 def get_config(user_id: int = Depends(get_current_user)):
     conn = get_db()
-    user = conn.execute("SELECT email, wallet, api_key FROM users WHERE id=?", (user_id,)).fetchone()
+    user = conn.execute("SELECT email, wallet, api_key, finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
     config = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return {
         "email": user["email"],
         "wallet": user["wallet"],
         "has_api_key": bool(user["api_key"]),
+        "has_finnhub_key": bool(user["finnhub_key"]),
+        "finnhub_key_preview": ("****" + user["finnhub_key"][-4:]) if user["finnhub_key"] else "",
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
+        "ai_continuous": config["ai_continuous"] if "ai_continuous" in config.keys() else 0,
+        "filter_hours": config["filter_hours"] if "filter_hours" in config.keys() else 1,
+        "filter_weekend": config["filter_weekend"] if "filter_weekend" in config.keys() else 1,
+        "filter_macro": config["filter_macro"] if "filter_macro" in config.keys() else 0,
     }
 
 @app.put("/api/config")
