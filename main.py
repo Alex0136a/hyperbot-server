@@ -775,7 +775,7 @@ async def scan_markets(user_id: int):
 
             # Mettre à jour prix seulement si changement significatif (> 0.05%)
             if not close_reason:
-                last_price = trade.get("current_price") or trade["entry_price"]
+                last_price = trade["current_price"] if trade["current_price"] else trade["entry_price"]
                 if last_price and abs(cur - last_price) / last_price > 0.0005:
                     conn.execute(
                         "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
