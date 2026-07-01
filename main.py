@@ -448,8 +448,8 @@ async def scan_markets(user_id: int):
     filter_weekend = config["filter_weekend"] if "filter_weekend" in config.keys() else 1
     filter_macro = config["filter_macro"] if "filter_macro" in config.keys() else 0
 
-    if filter_hours and 2 <= hour_utc < 6:
-        add_bot_log(user_id, f"🌙 Heures creuses ({hour_utc}h UTC) — pas de nouveaux trades", "info")
+    if filter_hours and 21 <= hour_utc < 23:
+        add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
         return
 
     if filter_weekend and weekday >= 5:
