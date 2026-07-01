@@ -40,6 +40,21 @@ def add_bot_log(user_id: int, message: str, level: str = "info"):
     if len(bot_logs_memory[user_id]) > 50:
         bot_logs_memory[user_id] = bot_logs_memory[user_id][:50]
     print(message)
+    # Sauvegarde persistante en DB (garder 500 derniers logs)
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO bot_activity_log (user_id, level, message) VALUES (?,?,?)",
+            (user_id, level, message)
+        )
+        # Nettoyer les vieux logs au-dela de 500
+        conn.execute("""DELETE FROM bot_activity_log WHERE user_id=? AND id NOT IN (
+            SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 500
+        )""", (user_id, user_id))
+        conn.commit()
+        conn.close()
+    except:
+        pass
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -148,6 +163,14 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             balance REAL DEFAULT 1000.0,
             initial_balance REAL DEFAULT 1000.0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS bot_activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            level TEXT DEFAULT 'info',
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
         CREATE TABLE IF NOT EXISTS paper_trades (
@@ -1180,7 +1203,19 @@ def reset_all(user_id: int = Depends(get_current_user)):
 
 # ── LOGS BOT ─────────────────────────────────────────────────
 @app.get("/api/bot/logs")
-def get_bot_logs(user_id: int = Depends(get_current_user)):
+def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = False):
+    if persistent:
+        # Logs persistants depuis la DB
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT level, message, created_at FROM bot_activity_log 
+               WHERE user_id=? ORDER BY id DESC LIMIT 200""",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        logs = [{"time": r["created_at"][11:19], "message": r["message"], "level": r["level"]} for r in rows]
+        return {"logs": logs}
+    # Logs en memoire (session courante)
     logs = bot_logs_memory.get(user_id, [])
     return {"logs": logs}
 
