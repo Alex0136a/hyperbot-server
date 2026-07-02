@@ -96,6 +96,10 @@ def init_db():
         conn.execute("ALTER TABLE paper_trades ADD COLUMN lowest_price REAL")
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN peak_pnl REAL DEFAULT 0")
+        conn.commit()
+    except: pass
     # Ne pas forcer les coins — conserver le dernier état connu
     try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
@@ -688,6 +692,15 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({position_pct}% de {round(capital,2)} USDC)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                # Logs de diagnostic
+                if not portfolio:
+                    add_bot_log(user_id, f"⚠️ {coin}: Pas de portefeuille trouvé", "warning")
+                elif open_count >= max_trades:
+                    add_bot_log(user_id, f"⛔ {coin}: Max trades atteint ({open_count}/{max_trades})", "warning")
+                elif portfolio["balance"] < size:
+                    add_bot_log(user_id, f"⛔ {coin}: Solde insuffisant ({round(portfolio['balance'],2)} < {size} USDC)", "warning")
+                elif coin_open:
+                    add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                 if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
                     entry_price = ai.get("entry") or price
                     conn.execute("""
@@ -783,17 +796,40 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                         (new_lowest, cur, trade["id"]))
 
-            # === QUICK PROFIT & MAX LOSS ===
+            # === TRAILING PROFIT & MAX LOSS ===
             cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
             max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.5
-            hl_fees = trade["size_usdc"] * 0.001  # ~0.1% frais Hyperliquid aller-retour
-            if not close_reason and pnl >= (quick_profit_target + hl_fees):
-                close_reason = "QUICK_PROFIT"
-                add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC — fermeture rapide !", "success")
-            elif not close_reason and pnl <= -max_loss_target:
-                close_reason = "MAX_LOSS"
-                add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
+            trail_trigger = quick_profit_target * 1.5  # Active le trailing à 1.5$ si QP = 1$
+            trail_gap = 0.5  # TSL = pic - 0.5$
+            hl_fees = trade["size_usdc"] * 0.001
+
+            # Mettre à jour le pic de PnL
+            peak_pnl = trade["peak_pnl"] if trade["peak_pnl"] else 0
+            if pnl > peak_pnl:
+                peak_pnl = pnl
+                conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+
+            if not close_reason:
+                if peak_pnl >= trail_trigger:
+                    # Trailing actif — TSL = pic - 0.5$
+                    trail_sl = peak_pnl - trail_gap
+                    if pnl <= trail_sl:
+                        # Si TSL descend sous Quick Profit → fermer au Quick Profit
+                        if trail_sl <= quick_profit_target:
+                            close_reason = "QUICK_PROFIT"
+                            add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
+                        else:
+                            close_reason = "TRAILING_PROFIT"
+                            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$) !", "success")
+                elif pnl > 0 and pnl <= quick_profit_target and peak_pnl > quick_profit_target:
+                    # Prix redescend sous +1$ après avoir dépassé +1$ — Quick Profit filet
+                    close_reason = "QUICK_PROFIT"
+                    add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
+                elif pnl <= -max_loss_target:
+                    # Max Loss
+                    close_reason = "MAX_LOSS"
+                    add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
 
             # Mettre à jour prix seulement si changement significatif (> 0.05%)
             if not close_reason:
