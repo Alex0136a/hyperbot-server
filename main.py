@@ -96,11 +96,7 @@ def init_db():
         conn.execute("ALTER TABLE paper_trades ADD COLUMN lowest_price REAL")
         conn.commit()
     except: pass
-    try:
-        coins_json = '["HYPE","SOL","INJ"]'
-        conn.execute("UPDATE bot_config SET active_coins=?", (coins_json,))
-        conn.commit()
-    except: pass
+    # Ne pas forcer les coins — conserver le dernier état connu
     try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
         conn.commit()
