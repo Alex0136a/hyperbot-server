@@ -122,6 +122,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_usd REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE users ADD COLUMN finnhub_key TEXT")
         conn.commit()
     except: pass
@@ -181,6 +185,7 @@ def init_db():
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.0,
+            max_loss_usd REAL DEFAULT 0.5,
             max_open_trades INTEGER DEFAULT 5,
             last_scan TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -782,13 +787,17 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                         (new_lowest, cur, trade["id"]))
 
-            # === QUICK PROFIT ===
-            cfg_qp = conn.execute("SELECT quick_profit_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            # === QUICK PROFIT & MAX LOSS ===
+            cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
+            max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.5
             hl_fees = trade["size_usdc"] * 0.001  # ~0.1% frais Hyperliquid aller-retour
             if not close_reason and pnl >= (quick_profit_target + hl_fees):
                 close_reason = "QUICK_PROFIT"
                 add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC — fermeture rapide !", "success")
+            elif not close_reason and pnl <= -max_loss_target:
+                close_reason = "MAX_LOSS"
+                add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
 
             # Mettre à jour prix seulement si changement significatif (> 0.05%)
             if not close_reason:
@@ -1079,6 +1088,7 @@ class UpdateConfigRequest(BaseModel):
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
     quick_profit_usd: Optional[float] = None
+    max_loss_usd: Optional[float] = None
 
 # ── ROUTES AUTH ──────────────────────────────────────────────
 @app.post("/api/register")
@@ -1139,6 +1149,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
+        "max_loss_usd": config["max_loss_usd"] if config and "max_loss_usd" in config.keys() else 0.5,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
         "ai_continuous": config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0,
@@ -1176,6 +1187,9 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
     if req.quick_profit_usd is not None:
         conn.execute("UPDATE bot_config SET quick_profit_usd=? WHERE user_id=?",
                     (req.quick_profit_usd, user_id))
+    if req.max_loss_usd is not None:
+        conn.execute("UPDATE bot_config SET max_loss_usd=? WHERE user_id=?",
+                    (req.max_loss_usd, user_id))
     conn.commit()
     conn.close()
     return {"message": "Configuration mise à jour"}
