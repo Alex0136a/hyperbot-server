@@ -41,6 +41,52 @@ const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
 // ── RAPPORT TXT ──────────────────────────────────────────────
+function generateBilan(bilan, paper) {
+  if(!bilan) return "Bilan non disponible";
+  const sep = "=".repeat(60), thin = "-".repeat(60);
+  const now = new Date();
+  let t = "";
+  t += `${sep}\n  HYPERBOT AI -- BILAN FINANCIER\n${sep}\n`;
+  t += `  Date     : ${now.toLocaleDateString("fr-FR")} à ${now.toLocaleTimeString("fr-FR")}\n`;
+  t += `${sep}\n\n`;
+  
+  t += `[ CAPITAL ]\n${thin}\n`;
+  t += `  Balance disponible : ${bilan.balance} USDC\n`;
+  t += `  Capital total      : ${bilan.total_capital} USDC\n`;
+  t += `  Capital initial    : ${bilan.initial_balance} USDC\n`;
+  t += `  Performance        : ${bilan.performance_pct>=0?"+":""}${bilan.performance_pct}%\n`;
+  t += `  PnL ouvert         : ${bilan.open_pnl>=0?"+":""}${bilan.open_pnl} USDC (${bilan.open_count} trades)\n\n`;
+  
+  t += `[ AUJOURD'HUI ]\n${thin}\n`;
+  t += `  Trades total : ${bilan.today.total}\n`;
+  t += `  Gains        : ${bilan.today.wins} trades | +${bilan.today.gains} USDC\n`;
+  t += `  Pertes       : ${bilan.today.losses} trades | ${bilan.today.pertes} USDC\n`;
+  t += `  Win rate     : ${bilan.today.win_rate}%\n`;
+  t += `  NET DU JOUR  : ${bilan.today.net>=0?"+":""}${bilan.today.net} USDC\n\n`;
+  
+  t += `[ TOTAL DEPUIS LE DÉBUT ]\n${thin}\n`;
+  t += `  Trades total : ${bilan.total.total}\n`;
+  t += `  Gains        : ${bilan.total.wins} trades | +${bilan.total.gains} USDC\n`;
+  t += `  Pertes       : ${bilan.total.losses} trades | ${bilan.total.pertes} USDC\n`;
+  t += `  Win rate     : ${bilan.total.win_rate}%\n`;
+  t += `  NET TOTAL    : ${bilan.total.net>=0?"+":""}${bilan.total.net} USDC\n\n`;
+  
+  t += `[ 7 DERNIERS JOURS ]\n${thin}\n`;
+  (bilan.daily||[]).forEach(d=>{
+    t += `  ${d.day} | ✅${d.wins} ❌${d.losses} | ${d.net>=0?"+":""}${Math.round(d.net*100)/100} USDC\n`;
+  });
+  
+  if(paper) {
+    t += `\n[ TRADES OUVERTS ]\n${thin}\n`;
+    (paper.open_trades||[]).forEach(tr=>{
+      t += `  ${tr.action} ${tr.coin} | Entrée: ${tr.entry_price} | PnL: ${tr.pnl>=0?"+":""}${tr.pnl} USDC\n`;
+    });
+  }
+  
+  t += `\n${sep}\n  HyperBot AI · Analyse Claude\n${sep}\n`;
+  return t;
+}
+
 function generateReport(signals, stats, prices, email, paper) {
   const now = new Date();
   const sep = "=".repeat(60), thin = "-".repeat(60);
@@ -987,6 +1033,13 @@ Confirmer ?`
               </div>
             ))}
           </div>
+          <button onClick={()=>{
+              const txt = `HYPERBOT AI -- PERFORMANCE\n${"=".repeat(60)}\nWin Rate: ${dailyStats?.summary?.win_rate}%\nTotal Gains: +${dailyStats?.summary?.total_wins_usdc} USDC\nTotal Pertes: ${dailyStats?.summary?.total_losses_usdc} USDC\nNet: ${(dailyStats?.summary?.total_wins_usdc||0)+(dailyStats?.summary?.total_losses_usdc||0)} USDC\n\nDETAIL PAR JOUR:\n${(dailyStats?.daily||[]).map(d=>`${d.day} | ✅${d.wins} ❌${d.losses} | Net: ${Math.round(d.net_pnl*100)/100} USDC`).join("\n")}`;
+              downloadTxt(txt, `performance-${new Date().toISOString().slice(0,10)}.txt`);
+            }}
+            style={{width:"100%",marginTop:12,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+            ⬇️ Télécharger Performance
+          </button>
           </>)}
         </div>
       )}
@@ -1080,10 +1133,16 @@ Confirmer ?`
             ))}
           </div>
 
-          <button onClick={()=>apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r))}
-            style={{width:"100%",marginTop:12,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"10px",color:"#475569",fontSize:11,cursor:"pointer"}}>
-            🔄 Actualiser
-          </button>
+          <div style={{display:"flex",gap:8,marginTop:12}}>
+            <button onClick={()=>apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r))}
+              style={{flex:1,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"10px",color:"#475569",fontSize:11,cursor:"pointer"}}>
+              🔄 Actualiser
+            </button>
+            <button onClick={()=>downloadTxt(generateBilan(bilan,paper),`bilan-${new Date().toISOString().slice(0,10)}.txt`)}
+              style={{flex:1,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+              ⬇️ Télécharger Bilan
+            </button>
+          </div>
           </>)}
         </div>
       )}
