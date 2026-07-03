@@ -977,8 +977,65 @@ async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
 ws_prices = {}
 ws_connected = False
 
+async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
+    """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket"""
+    try:
+        pnl_direction = 1 if trade["action"] == "LONG" else -1
+        price_diff = (cur - trade["entry_price"]) / trade["entry_price"]
+        pnl = price_diff * trade["size_usdc"] * trade["leverage"] * pnl_direction
+
+        # Récupérer config
+        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
+        max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
+        trail_trigger = quick_profit_target * 1.5
+        trail_gap = 0.5
+        hl_fees = trade["size_usdc"] * 0.001
+
+        # Mettre à jour peak_pnl
+        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
+        if pnl > peak_pnl:
+            peak_pnl = pnl
+            conn.execute("UPDATE paper_trades SET peak_pnl=?, current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                (peak_pnl, cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        else:
+            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+
+        close_reason = None
+
+        if peak_pnl >= trail_trigger:
+            trail_sl = peak_pnl - trail_gap
+            if pnl <= trail_sl:
+                close_reason = "TRAILING_PROFIT" if trail_sl > quick_profit_target else "QUICK_PROFIT"
+                add_bot_log(user_id, f"🎯 {trade['coin']}: {'Trailing' if close_reason=='TRAILING_PROFIT' else 'Quick'} Profit +{round(pnl,2)}$ (pic: +{round(peak_pnl,2)}$) ⚡ WS", "success")
+        elif pnl > 0 and pnl <= quick_profit_target and peak_pnl > quick_profit_target:
+            close_reason = "QUICK_PROFIT"
+            add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)}$ ⚡ WS", "success")
+        elif pnl <= -max_loss_target:
+            close_reason = "MAX_LOSS"
+            add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)}$ ⚡ WS", "warning")
+
+        if close_reason:
+            tp1_hit = trade["tp1_hit"] or 0
+            remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
+            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                closed_at=?, close_reason=? WHERE id=?""",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
+            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                (remaining, pnl, user_id))
+            conn.commit()
+            update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
+            return True
+        conn.commit()
+        return False
+    except Exception as e:
+        print(f"WS trade error {trade.get('coin','?')}: {e}")
+        return False
+
 async def connect_hyperliquid_ws():
-    """Connexion WebSocket Hyperliquid pour prix en temps réel"""
+    """Connexion WebSocket Hyperliquid — prix temps réel + gestion trades"""
     global ws_prices, ws_connected
     import websockets
     import json as json_mod
@@ -987,7 +1044,7 @@ async def connect_hyperliquid_ws():
         try:
             async with websockets.connect(uri, ping_interval=20) as ws:
                 ws_connected = True
-                # Subscribe aux prix de tous les coins
+                print("🔌 WebSocket Hyperliquid connecté !")
                 await ws.send(json_mod.dumps({
                     "method": "subscribe",
                     "subscription": {"type": "allMids"}
@@ -997,9 +1054,29 @@ async def connect_hyperliquid_ws():
                     if data.get("channel") == "allMids" and "data" in data:
                         mids = data["data"].get("mids", {})
                         ws_prices.update({k: float(v) for k, v in mids.items()})
+                        
+                        # Traiter les trades ouverts pour chaque coin mis à jour
+                        conn = get_db()
+                        try:
+                            open_trades = conn.execute(
+                                "SELECT pt.*, bc.user_id FROM paper_trades pt "
+                                "JOIN bot_config bc ON pt.user_id = bc.user_id "
+                                "WHERE pt.status='OPEN' AND bc.is_running=1"
+                            ).fetchall()
+                            for trade in open_trades:
+                                trade = dict(trade)
+                                coin = trade["coin"]
+                                if coin in mids:
+                                    cur = float(mids[coin])
+                                    await process_trade_on_price(trade["user_id"], trade, cur, conn)
+                        except Exception as e:
+                            print(f"WS trades error: {e}")
+                        finally:
+                            conn.close()
         except Exception as e:
             ws_connected = False
-            await asyncio.sleep(5)  # Reconnexion après 5s
+            print(f"🔌 WebSocket déconnecté: {e} — reconnexion dans 5s")
+            await asyncio.sleep(5)
 
 async def get_current_price(coin: str, client=None) -> float:
     """Retourne le prix temps réel depuis WS ou fallback REST"""
