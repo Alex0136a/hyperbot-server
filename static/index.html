@@ -267,20 +267,17 @@ function App() {
   const loadData = useCallback(async () => {
     if (!token) return;
     try {
-      // Chargement prioritaire - positions et portfolio (le plus important)
-      const [pap, botLogsRes] = await Promise.all([
-        apiCall("/api/paper/portfolio","GET",null,token),
-        apiCall("/api/bot/logs","GET",null,token),
-      ]);
+      // 1. PRIORITÉ ABSOLUE — trades ouverts et PnL
+      const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
-      setBotLogs(botLogsRes?.logs||[]);
-      // Chargement secondaire - reste des données
-      const [cfg, sigs, prc, st, pos] = await Promise.all([
+      // 2. Données secondaires en parallèle
+      const [cfg, sigs, prc, st, pos, botLogsRes] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
+        apiCall("/api/bot/logs","GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -288,6 +285,7 @@ function App() {
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend !== 0);
       setFilterMacro(cfg?.filter_macro === 1);
+      setBotLogs(botLogsRes?.logs||[]);
       setSignals(sigs?.signals||[]);
       setPrices(prc?.prices||{});
       setStats(st);
