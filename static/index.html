@@ -279,6 +279,8 @@ function App() {
   const [aiContinuous, setAiContinuous] = useState(false);
   const [filterHours, setFilterHours] = useState(true);
   const [finnhubKey, setFinnhubKey] = useState("");
+  const [hlApiKey, setHlApiKey] = useState("");
+  const [hlWallet, setHlWallet] = useState("");
   const [filterWeekend, setFilterWeekend] = useState(true);
   const [filterMacro, setFilterMacro] = useState(false);
   const [dailyStats, setDailyStats] = useState(null);
@@ -660,6 +662,38 @@ Confirmer ?`
             <button onClick={saveConfig}
               style={{width:"100%",background:saved?"#052e16":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:saved?"1px solid #34d399":"none",borderRadius:8,padding:"11px",color:saved?"#34d399":"#fff",fontWeight:700,fontSize:12}}>
               {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
+            </button>
+          </div>
+
+          {/* HYPERLIQUID CONFIG */}
+          <div style={{background:"#0f1629",border:"1px solid #7c3aed",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#a78bfa",marginBottom:4}}>⚡ Configuration Hyperliquid</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:12}}>Wallet et clé API pour le mode LIVE (optionnel en Paper Trading)</div>
+            
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🔗 Wallet Address</div>
+              <input type="text" placeholder="0x..." value={hlWallet}
+                onChange={e=>setHlWallet(e.target.value)}
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box"}}/>
+            </div>
+
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🔑 Clé API Privée (Mode LIVE uniquement)</div>
+              <input type="password"
+                placeholder={config?.has_hl_api_key ? "✅ Clé active — saisir pour changer" : "Clé privée Hyperliquid..."}
+                value={hlApiKey} onChange={e=>setHlApiKey(e.target.value)}
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}/>
+              <div style={{fontSize:9,color:"#334155"}}>⚠️ Ne partagez jamais votre clé privée — stockée de façon sécurisée sur votre serveur</div>
+            </div>
+
+            <button onClick={()=>{
+              const payload = {};
+              if(hlWallet) payload.hl_wallet = hlWallet;
+              if(hlApiKey && hlApiKey !== "****") payload.hl_api_key = hlApiKey;
+              if(Object.keys(payload).length > 0)
+                apiCall("/api/config/hyperliquid","PUT",payload,token).then(loadData);
+            }} style={{width:"100%",background:"linear-gradient(135deg,#6d28d9,#7c3aed)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+              ⚡ Sauvegarder config Hyperliquid
             </button>
           </div>
 
