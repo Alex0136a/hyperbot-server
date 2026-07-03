@@ -110,6 +110,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("UPDATE bot_config SET max_loss_usd=0.75 WHERE max_loss_usd=0.5 OR max_loss_usd IS NULL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN filter_hours INTEGER DEFAULT 1")
         conn.commit()
     except: pass
@@ -185,7 +189,7 @@ def init_db():
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.0,
-            max_loss_usd REAL DEFAULT 0.5,
+            max_loss_usd REAL DEFAULT 0.75,
             max_open_trades INTEGER DEFAULT 5,
             last_scan TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -799,7 +803,7 @@ async def scan_markets(user_id: int):
             # === TRAILING PROFIT & MAX LOSS ===
             cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-            max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.5
+            max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
             trail_trigger = quick_profit_target * 1.5  # Active le trailing à 1.5$ si QP = 1$
             trail_gap = 0.5  # TSL = pic - 0.5$
             hl_fees = trade["size_usdc"] * 0.001
@@ -1181,7 +1185,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
-        "max_loss_usd": config["max_loss_usd"] if config and "max_loss_usd" in config.keys() else 0.5,
+        "max_loss_usd": config["max_loss_usd"] if config and "max_loss_usd" in config.keys() else 0.75,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
         "ai_continuous": config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0,
