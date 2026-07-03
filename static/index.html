@@ -236,6 +236,7 @@ function App() {
   const [filterWeekend, setFilterWeekend] = useState(true);
   const [filterMacro, setFilterMacro] = useState(false);
   const [dailyStats, setDailyStats] = useState(null);
+  const [bilan, setBilan] = useState(null);
   const [botLogs, setBotLogs] = useState([]);
   const [persistentLogs, setPersistentLogs] = useState(false);
   const [paperSize, setPaperSize] = useState(50);
@@ -369,6 +370,7 @@ Confirmer ?`
     {id:"paper",label:`🎮 Paper Trading`},
     {id:"rapport",label:"📄 Rapport"},
     {id:"stats",label:"📊 Performance"},
+    {id:"bilan",label:"💰 Bilan"},
   ];
 
   return (
@@ -412,7 +414,7 @@ Confirmer ?`
       {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
         {TABS.map(t=>(
-          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r)); if(t.id==="rapport") loadData();}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r)); if(t.id==="rapport") loadData(); if(t.id==="bilan") apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r));}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
             {t.label}
           </button>
         ))}
@@ -985,6 +987,103 @@ Confirmer ?`
               </div>
             ))}
           </div>
+          </>)}
+        </div>
+      )}
+
+      {/* BILAN */}
+      {tab==="bilan" && (
+        <div style={{padding:14}}>
+          {!bilan ? <div style={{color:"#475569",fontSize:12,textAlign:"center",padding:40}}>
+            <button onClick={()=>apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r))}
+              style={{background:"#1e2d4a",border:"1px solid #3b82f6",borderRadius:8,padding:"10px 20px",color:"#60a5fa",cursor:"pointer"}}>
+              📊 Charger le bilan
+            </button>
+          </div> : (<>
+
+          {/* BALANCE */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>💼 CAPITAL</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:"#60a5fa"}}>{bilan.balance} $</div>
+                <div style={{fontSize:9,color:"#334155"}}>DISPONIBLE</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:"#e2e8f0"}}>{bilan.total_capital} $</div>
+                <div style={{fontSize:9,color:"#334155"}}>TOTAL</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:800,color:bilan.performance_pct>=0?"#34d399":"#f87171"}}>
+                  {bilan.performance_pct>=0?"+":""}{bilan.performance_pct}%
+                </div>
+                <div style={{fontSize:9,color:"#334155"}}>PERFORMANCE</div>
+              </div>
+            </div>
+          </div>
+
+          {/* AUJOURD'HUI */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>📅 AUJOURD'HUI</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              <div style={{background:"#052e16",borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:800,color:"#34d399"}}>+{bilan.today.gains} $</div>
+                <div style={{fontSize:9,color:"#34d399"}}>{bilan.today.wins} GAINS</div>
+              </div>
+              <div style={{background:"#2d0a0a",borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:800,color:"#f87171"}}>{bilan.today.pertes} $</div>
+                <div style={{fontSize:9,color:"#f87171"}}>{bilan.today.losses} PERTES</div>
+              </div>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderTop:"1px solid #0f1629"}}>
+              <span style={{fontSize:11,color:"#64748b"}}>{bilan.today.total} trades · Win rate {bilan.today.win_rate}%</span>
+              <span style={{fontSize:13,fontWeight:800,color:bilan.today.net>=0?"#34d399":"#f87171"}}>
+                {bilan.today.net>=0?"+":""}{bilan.today.net} $ NET
+              </span>
+            </div>
+          </div>
+
+          {/* TOTAL DEPUIS DEBUT */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>🏆 TOTAL DEPUIS LE DÉBUT</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              <div style={{background:"#052e16",borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:800,color:"#34d399"}}>+{bilan.total.gains} $</div>
+                <div style={{fontSize:9,color:"#34d399"}}>{bilan.total.wins} GAINS</div>
+              </div>
+              <div style={{background:"#2d0a0a",borderRadius:8,padding:10,textAlign:"center"}}>
+                <div style={{fontSize:16,fontWeight:800,color:"#f87171"}}>{bilan.total.pertes} $</div>
+                <div style={{fontSize:9,color:"#f87171"}}>{bilan.total.losses} PERTES</div>
+              </div>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderTop:"1px solid #0f1629"}}>
+              <span style={{fontSize:11,color:"#64748b"}}>{bilan.total.total} trades · Win rate {bilan.total.win_rate}%</span>
+              <span style={{fontSize:13,fontWeight:800,color:bilan.total.net>=0?"#34d399":"#f87171"}}>
+                {bilan.total.net>=0?"+":""}{bilan.total.net} $ NET
+              </span>
+            </div>
+          </div>
+
+          {/* PAR JOUR */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>📆 7 DERNIERS JOURS</div>
+            {bilan.daily.map((d,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0f1629",fontSize:11}}>
+                <span style={{color:"#64748b"}}>{d.day}</span>
+                <span style={{color:"#34d399"}}>✅ {d.wins}</span>
+                <span style={{color:"#f87171"}}>❌ {d.losses}</span>
+                <span style={{color:"#64748b"}}>{d.total} trades</span>
+                <span style={{fontWeight:700,color:d.net>=0?"#34d399":"#f87171"}}>
+                  {d.net>=0?"+":""}{Math.round(d.net*100)/100} $
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <button onClick={()=>apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r))}
+            style={{width:"100%",marginTop:12,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"10px",color:"#475569",fontSize:11,cursor:"pointer"}}>
+            🔄 Actualiser
+          </button>
           </>)}
         </div>
       )}
