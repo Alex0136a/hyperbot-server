@@ -126,6 +126,17 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS coin_confidence (
+            user_id INTEGER,
+            coin TEXT,
+            action TEXT,
+            consecutive_losses INTEGER DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (user_id, coin, action)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_usd REAL DEFAULT 0.5")
         conn.commit()
     except: pass
@@ -613,8 +624,9 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
                 continue
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
-            if action_ia == "WAIT" or confidence_ia < 62:
-                add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < 62%) — ignoré", "info")
+            required_conf = get_required_confidence(user_id, coin, action_ia)
+            if action_ia == "WAIT" or confidence_ia < required_conf:
+                add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
 
             rsi_now = tech.get("rsi") or 50
@@ -867,6 +879,43 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 62) -> int:
+    """Retourne la confiance requise selon les pertes consécutives"""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
+        (user_id, coin, action)
+    ).fetchone()
+    conn.close()
+    losses = row["consecutive_losses"] if row else 0
+    # +5% par perte consécutive, max 90%
+    required = min(base_confidence + (losses * 5), 90)
+    return required
+
+def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
+    """Met à jour le compteur de pertes consécutives"""
+    conn = get_db()
+    if won:
+        # Victoire → reset compteur
+        conn.execute("""INSERT OR REPLACE INTO coin_confidence 
+            (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,0,?)""",
+            (user_id, coin, action, datetime.utcnow().isoformat()))
+        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 62% (gain)", "info")
+    else:
+        # Défaite → incrémenter
+        current = conn.execute(
+            "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
+            (user_id, coin, action)
+        ).fetchone()
+        losses = (current["consecutive_losses"] + 1) if current else 1
+        new_conf = min(62 + (losses * 5), 90)
+        conn.execute("""INSERT OR REPLACE INTO coin_confidence 
+            (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,?,?)""",
+            (user_id, coin, action, losses, datetime.utcnow().isoformat()))
+        add_bot_log(user_id, f"📈 {coin} {action}: Confiance requise → {new_conf}% ({losses} pertes consécutives)", "warning")
+    conn.commit()
+    conn.close()
+
 async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
     """Vérifie les annonces macro importantes dans les prochaines 24h via Finnhub"""
     try:
@@ -1064,8 +1113,11 @@ async def update_open_positions(user_id: int):
             remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
             conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                 (remaining, pnl, user_id))
-            emoji = "🎯" if close_reason in ("TP1","TP2") else "🏁"
-            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL total: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+            emoji = "🎯" if close_reason in ("TP1","TP2","TRAILING_PROFIT","QUICK_PROFIT") else "🏁"
+            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+            # Mettre à jour confiance dynamique
+            won = pnl > 0
+            update_coin_confidence(user_id, trade["coin"], trade["action"], won)
         conn.commit()
     conn.close()
 
