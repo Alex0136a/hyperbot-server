@@ -243,9 +243,15 @@ function App() {
   const [liveK, setLiveK] = useState("");
   const [activeCoins, setActiveCoins] = useState(ALL_COINS);
   const [saved, setSaved] = useState(false);
+  const [savedField, setSavedField] = useState("");
   const [loading, setLoading] = useState(false);
   const logEnd = useRef(null);
   const pollRef = useRef(null);
+
+  const flashSave = (field) => {
+    setSavedField(field);
+    setTimeout(()=>setSavedField(""), 1500);
+  };
 
   const addLog = useCallback((msg, type="info") => {
     setLogs(p=>[...p.slice(-199),{msg,type,time:new Date().toLocaleTimeString("fr-FR")}]);
@@ -261,23 +267,27 @@ function App() {
   const loadData = useCallback(async () => {
     if (!token) return;
     try {
-      const [cfg, sigs, prc, st, pos, pap, botLogsRes] = await Promise.all([
+      // Chargement prioritaire - positions et portfolio (le plus important)
+      const [pap, botLogsRes] = await Promise.all([
+        apiCall("/api/paper/portfolio","GET",null,token),
+        apiCall("/api/bot/logs","GET",null,token),
+      ]);
+      setPaper(pap);
+      setBotLogs(botLogsRes?.logs||[]);
+      // Chargement secondaire - reste des données
+      const [cfg, sigs, prc, st, pos] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
-        apiCall("/api/paper/portfolio","GET",null,token),
-        apiCall("/api/bot/logs","GET",null,token),
       ]);
       setConfig(cfg);
-      setPaper(pap);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend !== 0);
       setFilterMacro(cfg?.filter_macro === 1);
-      setBotLogs(botLogsRes?.logs||[]);
       setSignals(sigs?.signals||[]);
       setPrices(prc?.prices||{});
       setStats(st);
@@ -792,8 +802,8 @@ Confirmer ?`
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                   <input type="number" defaultValue={config?.position_pct||8} min="1" max="50"
-                    onBlur={e=>apiCall("/api/config","PUT",{position_pct:Number(e.target.value)},token).then(loadData)}
-                    style={{flex:1,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                    onBlur={e=>{apiCall("/api/config","PUT",{position_pct:Number(e.target.value)},token).then(()=>{loadData();flashSave("pct");});}}
+                    style={{flex:1,background:savedField==="pct"?"#0a1a0a":"#0a0e1a",border:savedField==="pct"?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:savedField==="pct"?"#34d399":"#e2e8f0",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
                   <span style={{color:"#60a5fa",fontWeight:700,fontSize:14}}>%</span>
                 </div>
                 <div style={{fontSize:9,color:"#334155",marginTop:4}}>≈ {Math.round((config?.position_pct||5)*10)} USDC sur 1000 USDC · Adaptatif</div>
@@ -802,8 +812,8 @@ Confirmer ?`
                 <div style={{fontSize:10,color:"#f59e0b",marginBottom:6,fontWeight:700,letterSpacing:1}}>⚡ QUICK PROFIT (USDC)</div>
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                   <input type="number" min="0.5" max="10" step="0.5" defaultValue={config?.quick_profit_usd||1}
-                    onBlur={e=>apiCall("/api/config","PUT",{quick_profit_usd:Number(e.target.value)},token).then(loadData)}
-                    style={{flex:1,background:"#0a0e1a",border:"1px solid #f59e0b",borderRadius:6,padding:"8px 10px",color:"#f59e0b",fontFamily:"inherit",fontSize:12}}/>
+                    onBlur={e=>{apiCall("/api/config","PUT",{quick_profit_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("qp");});}}
+                    style={{flex:1,background:savedField==="qp"?"#1a2e0a":"#0a0e1a",border:savedField==="qp"?"1px solid #34d399":"1px solid #f59e0b",borderRadius:6,padding:"8px 10px",color:savedField==="qp"?"#34d399":"#f59e0b",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
                   <span style={{color:"#f59e0b",fontWeight:700,fontSize:14}}>$</span>
                 </div>
                 <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique dès ce profit atteint (frais inclus)</div>
@@ -812,8 +822,8 @@ Confirmer ?`
                 <div style={{fontSize:10,color:"#f87171",marginBottom:6,fontWeight:700,letterSpacing:1}}>🛡️ MAX LOSS (USDC)</div>
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                   <input type="number" min="0.25" max="5" step="0.25" defaultValue={config?.max_loss_usd||0.5}
-                    onBlur={e=>apiCall("/api/config","PUT",{max_loss_usd:Number(e.target.value)},token).then(loadData)}
-                    style={{flex:1,background:"#0a0e1a",border:"1px solid #f87171",borderRadius:6,padding:"8px 10px",color:"#f87171",fontFamily:"inherit",fontSize:12}}/>
+                    onBlur={e=>{apiCall("/api/config","PUT",{max_loss_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("ml");});}}
+                    style={{flex:1,background:savedField==="ml"?"#1a0a0a":"#0a0e1a",border:savedField==="ml"?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"8px 10px",color:savedField==="ml"?"#34d399":"#f87171",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
                   <span style={{color:"#f87171",fontWeight:700,fontSize:14}}>$</span>
                 </div>
                 <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique si perte dépasse ce montant</div>
