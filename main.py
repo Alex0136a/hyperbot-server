@@ -1797,6 +1797,22 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         ORDER BY day DESC LIMIT 7
     """, (user_id,)).fetchall()
     
+    # Stats par actif
+    by_coin = conn.execute("""
+        SELECT coin,
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as net,
+            AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_gain,
+            AVG(CASE WHEN pnl <= 0 THEN pnl ELSE NULL END) as avg_loss,
+            SUM(CAST((julianday(closed_at) - julianday(opened_at)) * 24 * 60 AS INTEGER)) as total_minutes
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+        GROUP BY coin
+        ORDER BY net DESC
+    """, (user_id,)).fetchall()
+    
     conn.close()
     
     balance = portfolio["balance"] if portfolio else 1000
@@ -1830,7 +1846,18 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             "net": round(total_stats["net"] or 0, 2),
             "win_rate": round((total_stats["wins"] or 0) / max(total_stats["total"] or 1, 1) * 100, 1)
         },
-        "daily": [dict(r) for r in daily]
+        "daily": [dict(r) for r in daily],
+        "by_coin": [{
+            "coin": r["coin"],
+            "total": r["total"],
+            "wins": r["wins"],
+            "losses": r["losses"],
+            "net": round(r["net"] or 0, 2),
+            "avg_gain": round(r["avg_gain"] or 0, 2),
+            "avg_loss": round(r["avg_loss"] or 0, 2),
+            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
+            "total_minutes": int(r["total_minutes"] or 0)
+        } for r in by_coin]
     }
 
 @app.get("/api/stats/daily")
