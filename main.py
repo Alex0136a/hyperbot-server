@@ -110,6 +110,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("UPDATE bot_config SET filter_weekend=0")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("UPDATE bot_config SET max_loss_usd=0.75 WHERE max_loss_usd=0.5 OR max_loss_usd IS NULL")
         conn.commit()
     except: pass
@@ -153,7 +157,7 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_weekend INTEGER DEFAULT 1")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_weekend INTEGER DEFAULT 0")
         conn.commit()
     except: pass
     try:
