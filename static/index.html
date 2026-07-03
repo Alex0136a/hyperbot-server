@@ -412,7 +412,7 @@ Confirmer ?`
       {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
         {TABS.map(t=>(
-          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r));}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r)); if(t.id==="rapport") loadData();}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
             {t.label}
           </button>
         ))}
@@ -1039,7 +1039,21 @@ Confirmer ?`
                 style={{flex:1,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"11px",color:"#fff",fontWeight:700,fontSize:12}}>
                 ⬇️ Telecharger .txt
               </button>
-              <button onClick={()=>navigator.clipboard.writeText(generateReport(signals||[],stats||{},prices||{},email||"",paper)).then(()=>alert("Copié dans le presse-papier !"))}
+              <button onClick={()=>{
+                const txt = generateReport(signals||[],stats||{},prices||{},email||"",paper);
+                if(!txt || txt.length < 10) { alert("Rapport vide - rechargez la page"); return; }
+                navigator.clipboard.writeText(txt)
+                  .then(()=>alert("✅ Copié ! (" + txt.length + " caractères)"))
+                  .catch(()=>{
+                    const ta = document.createElement("textarea");
+                    ta.value = txt;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(ta);
+                    alert("✅ Copié via fallback !");
+                  });
+              }}
                 style={{flex:1,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"11px",color:"#94a3b8",fontWeight:700,fontSize:12}}>
                 📋 Copier pour Claude
               </button>
