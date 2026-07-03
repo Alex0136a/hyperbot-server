@@ -805,7 +805,7 @@ async def scan_markets(user_id: int):
             hl_fees = trade["size_usdc"] * 0.001
 
             # Mettre à jour le pic de PnL
-            peak_pnl = trade["peak_pnl"] if trade["peak_pnl"] else 0
+            peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
             if pnl > peak_pnl:
                 peak_pnl = pnl
                 conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
