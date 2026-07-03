@@ -41,7 +41,7 @@ const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
 // ── RAPPORT TXT ──────────────────────────────────────────────
-function generateReport(signals, stats, prices, email) {
+function generateReport(signals, stats, prices, email, paper) {
   const now = new Date();
   const sep = "=".repeat(60), thin = "-".repeat(60);
   const active = signals.filter(s=>s.action!=="WAIT");
@@ -298,7 +298,7 @@ function App() {
   useEffect(() => {
     if(token) {
       loadData();
-      const id = setInterval(loadData, 15000);
+      const id = setInterval(loadData, 5000);
       return () => clearInterval(id);
     }
   }, [token, loadData]);
@@ -829,7 +829,7 @@ Confirmer ?`
               <div>
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
                 <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
-                  onBlur={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
+                  onChange={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
                   style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
               </div>
             </div>
@@ -1035,11 +1035,11 @@ Confirmer ?`
               }
             </div>
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>downloadTxt(generateReport(signals,stats,prices,email),`hyperbot-${new Date().toISOString().slice(0,10)}.txt`)}
+              <button onClick={()=>downloadTxt(generateReport(signals||[],stats||{},prices||{},email||"",paper),`hyperbot-${new Date().toISOString().slice(0,10)}.txt`)}
                 style={{flex:1,background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"11px",color:"#fff",fontWeight:700,fontSize:12}}>
                 ⬇️ Telecharger .txt
               </button>
-              <button onClick={()=>navigator.clipboard.writeText(generateReport(signals,stats,prices,email)).then(()=>alert("Copie dans le presse-papier !"))}
+              <button onClick={()=>navigator.clipboard.writeText(generateReport(signals||[],stats||{},prices||{},email||"",paper)).then(()=>alert("Copié dans le presse-papier !"))}
                 style={{flex:1,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"11px",color:"#94a3b8",fontWeight:700,fontSize:12}}>
                 📋 Copier pour Claude
               </button>
