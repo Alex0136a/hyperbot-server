@@ -1204,9 +1204,12 @@ async def lifespan(app: FastAPI):
     conn.close()
     for row in running_users:
         user_id = row["user_id"]
-        task = asyncio.create_task(run_bot_loop(user_id))
-        scanning_tasks[user_id] = task
+        scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
+        positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
         print(f"Bot auto-redemarre pour user {user_id}")
+    # Démarrer WebSocket Hyperliquid automatiquement au démarrage du serveur
+    asyncio.create_task(connect_hyperliquid_ws())
+    print("🔌 WebSocket Hyperliquid démarré automatiquement")
     yield
 
 app = FastAPI(title="HyperBot AI", lifespan=lifespan)
