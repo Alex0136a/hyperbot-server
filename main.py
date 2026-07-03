@@ -145,6 +145,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE users ADD COLUMN hl_api_key TEXT DEFAULT ''")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN hl_wallet TEXT DEFAULT ''")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN filter_weekend INTEGER DEFAULT 1")
         conn.commit()
     except: pass
@@ -160,6 +168,8 @@ def init_db():
             wallet TEXT DEFAULT '',
             api_key TEXT DEFAULT '',
             finnhub_key TEXT DEFAULT '',
+            hl_api_key TEXT DEFAULT '',
+            hl_wallet TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -963,6 +973,44 @@ async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
     except Exception as e:
         return {}
 
+# Cache des prix en temps réel via WebSocket
+ws_prices = {}
+ws_connected = False
+
+async def connect_hyperliquid_ws():
+    """Connexion WebSocket Hyperliquid pour prix en temps réel"""
+    global ws_prices, ws_connected
+    import websockets
+    import json as json_mod
+    uri = "wss://api.hyperliquid.xyz/ws"
+    while True:
+        try:
+            async with websockets.connect(uri, ping_interval=20) as ws:
+                ws_connected = True
+                # Subscribe aux prix de tous les coins
+                await ws.send(json_mod.dumps({
+                    "method": "subscribe",
+                    "subscription": {"type": "allMids"}
+                }))
+                async for msg in ws:
+                    data = json_mod.loads(msg)
+                    if data.get("channel") == "allMids" and "data" in data:
+                        mids = data["data"].get("mids", {})
+                        ws_prices.update({k: float(v) for k, v in mids.items()})
+        except Exception as e:
+            ws_connected = False
+            await asyncio.sleep(5)  # Reconnexion après 5s
+
+async def get_current_price(coin: str, client=None) -> float:
+    """Retourne le prix temps réel depuis WS ou fallback REST"""
+    if ws_connected and coin in ws_prices:
+        return ws_prices[coin]
+    # Fallback REST si WS non connecté
+    if client:
+        prices = await fetch_all_metas(client)
+        return prices.get(coin, 0)
+    return 0
+
 async def check_positions_loop(user_id: int):
     """Boucle rapide 15s - suivi SL/TP/Trailing des positions ouvertes"""
     try:
@@ -1016,8 +1064,13 @@ async def update_open_positions(user_id: int):
     if not paper_trades:
         conn.close()
         return
-    async with httpx.AsyncClient() as client:
-        prices = await fetch_all_metas(client)
+    # Utiliser WebSocket si disponible, sinon REST
+    if ws_connected and ws_prices:
+        prices = ws_prices.copy()
+        client_ctx = None
+    else:
+        async with httpx.AsyncClient() as client:
+            prices = await fetch_all_metas(client)
     for trade in paper_trades:
         trade = dict(trade)
         cur = prices.get(trade["coin"])
@@ -1233,6 +1286,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "has_api_key": bool(user["api_key"]),
         "has_finnhub_key": bool(user["finnhub_key"]),
         "finnhub_key_preview": ("****" + user["finnhub_key"][-4:]) if user["finnhub_key"] else "",
+        "has_hl_api_key": bool(user["hl_api_key"]),
+        "hl_wallet": user["hl_wallet"] or "",
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
@@ -1303,6 +1358,18 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
     add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 15s", "success")
     return {"message": "Bot démarré"}
+
+@app.put("/api/config/hyperliquid")
+async def save_hl_config(req: dict, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    if req.get("hl_api_key"):
+        conn.execute("UPDATE users SET hl_api_key=? WHERE id=?", (req["hl_api_key"].strip(), user_id))
+    if req.get("hl_wallet"):
+        conn.execute("UPDATE users SET hl_wallet=? WHERE id=?", (req["hl_wallet"].strip(), user_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, "🔑 Configuration Hyperliquid sauvegardée", "success")
+    return {"message": "Configuration Hyperliquid sauvegardée"}
 
 @app.put("/api/config/finnhub")
 async def save_finnhub_key(req: dict, user_id: int = Depends(get_current_user)):
