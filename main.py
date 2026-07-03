@@ -1064,8 +1064,8 @@ async def update_open_positions(user_id: int):
                     if tp2 and trade["highest_price"] and trade["highest_price"] >= tp2:
                         close_reason = "TRAILING_SL_POST_TP2"
             else:
-                if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                    close_reason = "STOP_LOSS"
+                # SL technique désactivé - Max Loss gère
+                pass
                 conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
                     (new_highest, cur, trade["id"]))
         elif trade["action"] == "SHORT":
@@ -1099,8 +1099,8 @@ async def update_open_positions(user_id: int):
                     if tp2 and trade["lowest_price"] and trade["lowest_price"] <= tp2:
                         close_reason = "TRAILING_SL_POST_TP2"
             else:
-                if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                    close_reason = "STOP_LOSS"
+                # SL technique désactivé - Max Loss gère
+                pass
                 conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                     (new_lowest, cur, trade["id"]))
 
@@ -1546,9 +1546,7 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
         direction = 1 if trade["action"] == "LONG" else -1
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
         close_reason = None
-        if trade["stop_loss"]:
-            if trade["action"] == "LONG" and cur <= trade["stop_loss"]: close_reason = "STOP_LOSS"
-            elif trade["action"] == "SHORT" and cur >= trade["stop_loss"]: close_reason = "STOP_LOSS"
+        # SL technique désactivé - Max Loss gère la protection
         if trade["take_profit2"]:
             if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
             elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
