@@ -1222,6 +1222,33 @@ Confirmer ?`
               ⬇️ Télécharger Bilan
             </button>
           </div>
+
+          {/* PAR ACTIF */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginTop:12}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>🎯 PERFORMANCE PAR ACTIF</div>
+            {(bilan.by_coin||[]).map((coin,i)=>{
+              const h = Math.floor((coin.total_minutes||0)/60);
+              const m = (coin.total_minutes||0)%60;
+              const timeStr = h>0?`${h}h${String(m).padStart(2,"0")}`:`${m}min`;
+              return (
+                <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                    <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>{coin.coin}</span>
+                    <span style={{fontSize:12,fontWeight:800,color:coin.net>=0?"#34d399":"#f87171"}}>
+                      {coin.net>=0?"+":""}{coin.net}$
+                    </span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#475569"}}>
+                    <span>✅{coin.wins} (+{coin.avg_gain}$) ❌{coin.losses} ({coin.avg_loss}$)</span>
+                    <span style={{color:coin.win_rate>=50?"#34d399":"#f87171"}}>{coin.win_rate}%</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:2}}>
+                    ⏱️ {timeStr} de trading · {coin.total} trades
+                  </div>
+                </div>
+              );
+            })}
+          </div>
           </>)}
         </div>
       )}
