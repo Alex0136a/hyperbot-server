@@ -1277,7 +1277,7 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
 @app.get("/api/config")
 def get_config(user_id: int = Depends(get_current_user)):
     conn = get_db()
-    user = conn.execute("SELECT email, wallet, api_key, finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
+    user = conn.execute("SELECT email, wallet, api_key, finnhub_key, hl_api_key, hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
     config = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return {
@@ -1286,8 +1286,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "has_api_key": bool(user["api_key"]),
         "has_finnhub_key": bool(user["finnhub_key"]),
         "finnhub_key_preview": ("****" + user["finnhub_key"][-4:]) if user["finnhub_key"] else "",
-        "has_hl_api_key": bool(user["hl_api_key"]),
-        "hl_wallet": user["hl_wallet"] or "",
+        "has_hl_api_key": bool(user["hl_api_key"]) if "hl_api_key" in user.keys() else False,
+        "hl_wallet": user["hl_wallet"] if "hl_wallet" in user.keys() else "",
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
