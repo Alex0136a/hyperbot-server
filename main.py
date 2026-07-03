@@ -769,8 +769,9 @@ async def scan_markets(user_id: int):
                         close_reason = "TRAILING_SL"
                 else:
                     # SL normal avant TP1
-                    if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                        close_reason = "STOP_LOSS"
+                    # SL technique désactivé — Max Loss gère la protection
+                # if trade["stop_loss"] and cur <= trade["stop_loss"]:
+                #     close_reason = "STOP_LOSS"
                     conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
                         (new_highest, cur, trade["id"]))
 
@@ -795,8 +796,9 @@ async def scan_markets(user_id: int):
                     if cur >= effective_sl:
                         close_reason = "TRAILING_SL"
                 else:
-                    if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                        close_reason = "STOP_LOSS"
+                    # SL technique désactivé — Max Loss gère la protection
+                # if trade["stop_loss"] and cur >= trade["stop_loss"]:
+                #     close_reason = "STOP_LOSS"
                     conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
                         (new_lowest, cur, trade["id"]))
 
