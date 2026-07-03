@@ -1527,11 +1527,20 @@ def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current
 @app.post("/api/paper/reset")
 def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
     conn = get_db()
+    # Reset portfolio
     conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
+    # Supprimer tous les trades
     conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
+    # Supprimer tous les signaux
+    conn.execute("DELETE FROM signals WHERE user_id=?", (user_id,))
+    # Supprimer tous les logs persistants
+    conn.execute("DELETE FROM bot_activity_log WHERE user_id=?", (user_id,))
+    # Reset confiance dynamique
+    conn.execute("DELETE FROM coin_confidence WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
-    return {"message": "Portefeuille réinitialisé à 1000 USDC"}
+    add_bot_log(user_id, "🔄 Reset complet effectué — Capital: 1000 USDC | Historique effacé", "success")
+    return {"message": "Reset complet effectué — Capital réinitialisé à 1000 USDC"}
 
 @app.put("/api/paper/update")
 async def update_paper_trades(user_id: int = Depends(get_current_user)):
