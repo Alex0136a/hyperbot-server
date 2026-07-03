@@ -923,7 +923,7 @@ async def check_positions_loop(user_id: int):
                 raise
             except Exception as e:
                 add_bot_log(user_id, f"⚠️ Erreur suivi positions: {e}", "error")
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
     except asyncio.CancelledError:
         raise
 
