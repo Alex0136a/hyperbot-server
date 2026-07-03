@@ -285,6 +285,7 @@ function App() {
   const [filterMacro, setFilterMacro] = useState(false);
   const [dailyStats, setDailyStats] = useState(null);
   const [bilan, setBilan] = useState(null);
+  const [clock, setClock] = useState({utc:"", local:"", market:""});
   const [botLogs, setBotLogs] = useState([]);
   const [persistentLogs, setPersistentLogs] = useState(false);
   const [paperSize, setPaperSize] = useState(50);
@@ -332,7 +333,7 @@ function App() {
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
-      setFilterWeekend(cfg?.filter_weekend !== 0);
+      setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
       setBotLogs(botLogsRes?.logs||[]);
       setSignals(sigs?.signals||[]);
@@ -353,6 +354,32 @@ function App() {
   }, [token, loadData]);
 
   useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
+
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      const utcH = now.getUTCHours();
+      const utcM = String(now.getUTCMinutes()).padStart(2,"0");
+      const utcS = String(now.getUTCSeconds()).padStart(2,"0");
+      const utcStr = `${String(utcH).padStart(2,"0")}:${utcM}:${utcS}`;
+      // GMT-4 toute l'année (AST fixe)
+      const localH = (utcH - 4 + 24) % 24;
+      const localStr = `${String(localH).padStart(2,"0")}:${utcM}:${utcS}`;
+      // Statut marché
+      const day = now.getUTCDay(); // 0=dim, 6=sam
+      const isWeekend = day === 0 || day === 6;
+      const isQuiet = utcH >= 21 && utcH < 23;
+      let market = "🟢 MARCHÉ OUVERT";
+      let marketColor = "#34d399";
+      if(filterMacro) { market = "🔴 PAUSE MACRO"; marketColor = "#f87171"; }
+      else if(isWeekend) { market = "🟢 WEEK-END CRYPTO"; marketColor = "#34d399"; }
+      else if(isQuiet) { market = "🌙 SESSION CREUSE"; marketColor = "#94a3b8"; }
+      setClock({utc: utcStr, local: localStr, market, marketColor});
+    };
+    updateClock();
+    const id = setInterval(updateClock, 1000);
+    return () => clearInterval(id);
+  }, [filterMacro]);
 
   const startBot = async () => {
     setLoading(true);
@@ -457,6 +484,24 @@ Confirmer ?`
             <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
           </div>
         ))}
+      </div>
+
+      {/* CADRAN HORLOGE */}
+      <div style={{background:"#0a0e1a",borderTop:"1px solid #0f1629",padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",gap:20,alignItems:"center"}}>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:9,color:"#334155",letterSpacing:1}}>UTC</div>
+            <div style={{fontSize:13,fontWeight:800,color:"#60a5fa",fontFamily:"monospace"}}>{clock.utc}</div>
+          </div>
+          <div style={{width:1,height:28,background:"#1e2d4a"}}/>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:9,color:"#334155",letterSpacing:1}}>GMT-4</div>
+            <div style={{fontSize:13,fontWeight:800,color:"#e2e8f0",fontFamily:"monospace"}}>{clock.local}</div>
+          </div>
+        </div>
+        <div style={{background:clock.marketColor+"22",border:`1px solid ${clock.marketColor}`,borderRadius:20,padding:"4px 12px"}}>
+          <span style={{fontSize:11,fontWeight:700,color:clock.marketColor}}>{clock.market}</span>
+        </div>
       </div>
 
       {/* TABS */}
@@ -734,8 +779,8 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>📅 Week-end (Sam/Dim)</div>
-                <div style={{fontSize:10,color:"#334155"}}>Suspend les trades le week-end (volumes faibles)</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>📅 Pause Week-end (Forex uniquement)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Crypto trade 24h/24 7j/7 — désactivé par défaut</div>
               </div>
               <button onClick={()=>{
                 const v=!filterWeekend; setFilterWeekend(v);
