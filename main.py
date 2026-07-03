@@ -1585,6 +1585,94 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/bilan")
+def get_bilan(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    # Balance actuelle et initiale
+    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    
+    # Stats aujourd'hui (UTC)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today_stats = conn.execute("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gains,
+            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
+            SUM(pnl) as net
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED' AND date(closed_at)=?
+    """, (user_id, today)).fetchone()
+    
+    # Stats totales depuis le début
+    total_stats = conn.execute("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gains,
+            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
+            SUM(pnl) as net
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+    """, (user_id,)).fetchone()
+    
+    # Trades ouverts PnL
+    open_pnl = conn.execute("""
+        SELECT SUM(pnl) as open_pnl, COUNT(*) as open_count, SUM(size_usdc) as open_margin
+        FROM paper_trades WHERE user_id=? AND status='OPEN'
+    """, (user_id,)).fetchone()
+    
+    # Stats par jour (7 derniers)
+    daily = conn.execute("""
+        SELECT date(closed_at) as day,
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as net
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+        GROUP BY date(closed_at)
+        ORDER BY day DESC LIMIT 7
+    """, (user_id,)).fetchall()
+    
+    conn.close()
+    
+    balance = portfolio["balance"] if portfolio else 1000
+    initial = portfolio["initial_balance"] if portfolio else 1000
+    open_margin = open_pnl["open_margin"] or 0
+    open_pnl_val = open_pnl["open_pnl"] or 0
+    total_capital = balance + open_margin + open_pnl_val
+    
+    return {
+        "balance": round(balance, 2),
+        "initial_balance": round(initial, 2),
+        "total_capital": round(total_capital, 2),
+        "performance_pct": round((total_capital - initial) / initial * 100, 2),
+        "open_pnl": round(open_pnl_val, 2),
+        "open_count": open_pnl["open_count"] or 0,
+        "today": {
+            "total": today_stats["total"] or 0,
+            "wins": today_stats["wins"] or 0,
+            "losses": today_stats["losses"] or 0,
+            "gains": round(today_stats["gains"] or 0, 2),
+            "pertes": round(today_stats["pertes"] or 0, 2),
+            "net": round(today_stats["net"] or 0, 2),
+            "win_rate": round((today_stats["wins"] or 0) / max(today_stats["total"] or 1, 1) * 100, 1)
+        },
+        "total": {
+            "total": total_stats["total"] or 0,
+            "wins": total_stats["wins"] or 0,
+            "losses": total_stats["losses"] or 0,
+            "gains": round(total_stats["gains"] or 0, 2),
+            "pertes": round(total_stats["pertes"] or 0, 2),
+            "net": round(total_stats["net"] or 0, 2),
+            "win_rate": round((total_stats["wins"] or 0) / max(total_stats["total"] or 1, 1) * 100, 1)
+        },
+        "daily": [dict(r) for r in daily]
+    }
+
 @app.get("/api/stats/daily")
 def get_daily_stats(user_id: int = Depends(get_current_user)):
     conn = get_db()
