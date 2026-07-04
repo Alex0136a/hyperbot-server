@@ -55,7 +55,16 @@ function generateBilan(bilan, paper) {
   t += `  Capital total      : ${bilan.total_capital} USDC\n`;
   t += `  Capital initial    : ${bilan.initial_balance} USDC\n`;
   t += `  Performance        : ${bilan.performance_pct>=0?"+":""}${bilan.performance_pct}%\n`;
-  t += `  PnL ouvert         : ${bilan.open_pnl>=0?"+":""}${bilan.open_pnl} USDC (${bilan.open_count} trades)\n\n`;
+  t += `  PnL ouvert         : ${bilan.open_pnl>=0?"+":""}${bilan.open_pnl} USDC (${bilan.open_count} trades)\n`;
+  if(bilan.reset_at) {
+    const start = new Date(bilan.reset_at+"Z");
+    const diff = Math.floor((new Date() - start) / 1000);
+    const h = Math.floor(diff/3600);
+    const m = Math.floor((diff%3600)/60);
+    const ratePerH = h > 0 ? (bilan.total?.net / (h + m/60)).toFixed(2) : "N/A";
+    t += `  Durée trading      : ${h}h${String(m).padStart(2,"0")} | Rendement: ${ratePerH} USDC/h\n`;
+  }
+  t += `\n`;
   
   t += `[ AUJOURD'HUI ]\n${thin}\n`;
   t += `  Trades total : ${bilan.today.total}\n`;
@@ -1135,7 +1144,21 @@ Confirmer ?`
 
           {/* BALANCE */}
           <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
-            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>💼 CAPITAL</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{fontSize:11,color:"#475569",letterSpacing:1}}>💼 CAPITAL</div>
+              {bilan.reset_at && (() => {
+                const start = new Date(bilan.reset_at+"Z");
+                const now = new Date();
+                const diff = Math.floor((now - start) / 1000);
+                const h = Math.floor(diff/3600);
+                const m = Math.floor((diff%3600)/60);
+                const ratePerH = h > 0 ? (bilan.total?.net / (h + m/60)).toFixed(2) : "...";
+                return <div style={{fontSize:10,color:"#475569"}}>
+                  ⏱️ <span style={{color:"#60a5fa",fontWeight:700}}>{h}h{String(m).padStart(2,"0")}</span> de trading · 
+                  <span style={{color:"#34d399",fontWeight:700}}> {ratePerH}$/h</span>
+                </div>;
+              })()}
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
               <div style={{textAlign:"center"}}>
                 <div style={{fontSize:18,fontWeight:800,color:"#60a5fa"}}>{bilan.balance} $</div>
