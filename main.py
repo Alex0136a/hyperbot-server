@@ -81,6 +81,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE paper_portfolio ADD COLUMN reset_at TEXT")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN tp1_hit INTEGER DEFAULT 0")
         conn.commit()
     except: pass
@@ -228,6 +232,7 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             balance REAL DEFAULT 1000.0,
             initial_balance REAL DEFAULT 1000.0,
+            reset_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
         CREATE TABLE IF NOT EXISTS bot_activity_log (
@@ -1679,7 +1684,8 @@ def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current
 def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
     conn = get_db()
     # Reset portfolio
-    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
+    conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0, reset_at=? WHERE user_id=?", 
+        (datetime.utcnow().isoformat(), user_id))
     # Supprimer tous les trades
     conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
     # Supprimer tous les signaux
@@ -1749,7 +1755,7 @@ def reset_all(user_id: int = Depends(get_current_user)):
 def get_bilan(user_id: int = Depends(get_current_user)):
     conn = get_db()
     # Balance actuelle et initiale
-    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    portfolio = conn.execute("SELECT balance, initial_balance, reset_at FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
     
     # Stats aujourd'hui (UTC)
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -1828,6 +1834,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         "performance_pct": round((total_capital - initial) / initial * 100, 2),
         "open_pnl": round(open_pnl_val, 2),
         "open_count": open_pnl["open_count"] or 0,
+        "reset_at": portfolio["reset_at"] if portfolio and portfolio["reset_at"] else None,
         "today": {
             "total": today_stats["total"] or 0,
             "wins": today_stats["wins"] or 0,
