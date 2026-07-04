@@ -122,6 +122,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("UPDATE bot_config SET quick_profit_usd=1.1 WHERE quick_profit_usd=1.0 OR quick_profit_usd IS NULL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN filter_hours INTEGER DEFAULT 1")
         conn.commit()
     except: pass
@@ -130,7 +134,7 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN quick_profit_usd REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN quick_profit_usd REAL DEFAULT 1.1")
         conn.commit()
     except: pass
     try:
@@ -217,7 +221,7 @@ def init_db():
             trading_mode TEXT DEFAULT 'paper',
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
-            quick_profit_usd REAL DEFAULT 1.0,
+            quick_profit_usd REAL DEFAULT 1.1,
             max_loss_usd REAL DEFAULT 0.75,
             max_open_trades INTEGER DEFAULT 5,
             last_scan TEXT,
@@ -859,8 +863,9 @@ async def scan_markets(user_id: int):
                         else:
                             close_reason = "TRAILING_PROFIT"
                             add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$) !", "success")
-                elif peak_pnl > quick_profit_target and pnl < peak_pnl * 0.85:
-                    # Prix a reculé de plus de 15% depuis le pic au-dessus de 1$ → Quick Profit filet
+                elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
+                    # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
+                    # Le WebSocket étant temps réel, la précision est au centime
                     close_reason = "QUICK_PROFIT"
                     add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
                 elif pnl <= -max_loss_target:
