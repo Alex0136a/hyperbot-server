@@ -85,6 +85,22 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS trading_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_date TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            closing_phase INTEGER DEFAULT 0,
+            total_trades INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            net_pnl REAL DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN tp1_hit INTEGER DEFAULT 0")
         conn.commit()
     except: pass
@@ -478,6 +494,12 @@ async def scan_markets(user_id: int):
 
     # Reset auto filtre macro si annonce passée
     await auto_reset_macro_filter(user_id)
+    
+    # Gestion cycle de vie session
+    await check_session_lifecycle(user_id)
+    if await is_session_closing(user_id):
+        add_bot_log(user_id, "🔒 Session en clôture — nouveaux trades bloqués", "info")
+        return
 
     # === LECTURE FILTRES ===
     filter_hours = config["filter_hours"] if config and "filter_hours" in config.keys() else 1
@@ -1064,6 +1086,96 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     except Exception as e:
         print(f"WS trade error {trade.get('coin','?')}: {e}")
         return False
+
+async def check_session_lifecycle(user_id: int):
+    """Gère le cycle de vie des sessions de trading (minuit UTC)"""
+    conn = get_db()
+    now = datetime.utcnow()
+    today = now.strftime("%Y-%m-%d")
+    
+    # Vérifier si une session existe pour aujourd'hui
+    session = conn.execute(
+        "SELECT * FROM trading_sessions WHERE user_id=? AND session_date=?",
+        (user_id, today)
+    ).fetchone()
+    
+    # Créer session du jour si elle n'existe pas
+    if not session:
+        conn.execute("""INSERT INTO trading_sessions 
+            (user_id, session_date, started_at, closing_phase) 
+            VALUES (?,?,?,0)""",
+            (user_id, today, now.isoformat()))
+        conn.commit()
+        add_bot_log(user_id, f"📅 Nouvelle session démarrée: {today}", "success")
+    
+    # Vérifier si on est en phase de clôture (après 23h45 UTC)
+    session = conn.execute(
+        "SELECT * FROM trading_sessions WHERE user_id=? AND session_date=?",
+        (user_id, today)
+    ).fetchone()
+    
+    if session and not session["closing_phase"]:
+        # Déclencher phase clôture à 23h45
+        if now.hour == 23 and now.minute >= 45:
+            conn.execute(
+                "UPDATE trading_sessions SET closing_phase=1 WHERE user_id=? AND session_date=?",
+                (user_id, today))
+            conn.commit()
+            add_bot_log(user_id, "🔒 Session en clôture — plus de nouveaux trades jusqu'à minuit", "warning")
+    
+    # À minuit : générer rapport et attendre fin des trades
+    yesterday = (now - __import__('datetime').timedelta(days=1)).strftime("%Y-%m-%d")
+    prev_session = conn.execute(
+        "SELECT * FROM trading_sessions WHERE user_id=? AND session_date=? AND closing_phase=1 AND ended_at IS NULL",
+        (user_id, yesterday)
+    ).fetchone()
+    
+    if prev_session:
+        # Vérifier si tous les trades sont fermés
+        open_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'",
+            (user_id,)
+        ).fetchone()[0]
+        
+        if open_count == 0:
+            # Calculer stats de la session précédente
+            stats = conn.execute("""
+                SELECT COUNT(*) as total,
+                    SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                    SUM(pnl) as net
+                FROM paper_trades
+                WHERE user_id=? AND status='CLOSED' 
+                AND date(opened_at)=?
+            """, (user_id, yesterday)).fetchone()
+            
+            conn.execute("""UPDATE trading_sessions 
+                SET ended_at=?, total_trades=?, wins=?, losses=?, net_pnl=?
+                WHERE user_id=? AND session_date=?""",
+                (now.isoformat(), stats["total"] or 0, stats["wins"] or 0,
+                 stats["losses"] or 0, stats["net"] or 0, user_id, yesterday))
+            conn.commit()
+            add_bot_log(user_id, 
+                f"✅ Session {yesterday} clôturée | {stats['total']} trades | NET: {round(stats['net'] or 0, 2)}$ | Win rate: {round((stats['wins'] or 0)/max(stats['total'] or 1,1)*100,1)}%",
+                "success")
+    
+    conn.close()
+    return session
+
+async def is_session_closing(user_id: int) -> bool:
+    """Vérifie si la session est en phase de clôture"""
+    conn = get_db()
+    now = datetime.utcnow()
+    today = now.strftime("%Y-%m-%d")
+    session = conn.execute(
+        "SELECT closing_phase FROM trading_sessions WHERE user_id=? AND session_date=?",
+        (user_id, today)
+    ).fetchone()
+    conn.close()
+    if session and session["closing_phase"]:
+        return True
+    # Aussi bloquer si entre 23h45 et minuit
+    return now.hour == 23 and now.minute >= 45
 
 async def connect_hyperliquid_ws():
     """Connexion WebSocket Hyperliquid — prix temps réel + gestion trades"""
@@ -1773,6 +1885,42 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/sessions")
+def get_sessions(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    sessions = conn.execute("""
+        SELECT ts.*, 
+            (SELECT COUNT(DISTINCT coin) FROM paper_trades pt 
+             WHERE pt.user_id=ts.user_id AND date(pt.opened_at)=ts.session_date) as coins_count,
+            (SELECT COUNT(*) FROM paper_trades pt 
+             WHERE pt.user_id=ts.user_id AND date(pt.opened_at)=ts.session_date AND pt.status='OPEN') as pending_trades
+        FROM trading_sessions ts
+        WHERE ts.user_id=?
+        ORDER BY ts.session_date DESC LIMIT 30
+    """, (user_id,)).fetchall()
+    
+    # Stats par actif pour chaque session
+    result = []
+    for s in sessions:
+        s = dict(s)
+        by_coin = conn.execute("""
+            SELECT coin,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as net,
+                SUM(CASE WHEN pnl>0 THEN pnl ELSE 0 END) as gains,
+                SUM(CASE WHEN pnl<=0 THEN pnl ELSE 0 END) as pertes
+            FROM paper_trades
+            WHERE user_id=? AND status='CLOSED' AND date(closed_at)=?
+            GROUP BY coin ORDER BY net DESC
+        """, (user_id, s["session_date"])).fetchall()
+        s["by_coin"] = [dict(r) for r in by_coin]
+        result.append(s)
+    
+    conn.close()
+    return {"sessions": result}
+
 @app.get("/api/bilan")
 def get_bilan(user_id: int = Depends(get_current_user)):
     conn = get_db()
