@@ -41,6 +41,15 @@ const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const LOGCOL = { system:"#60a5fa", info:"#94a3b8", error:"#f87171", warn:"#fbbf24", ai:"#c084fc", long:"#34d399", short:"#f87171", dim:"#475569" };
 
 // ── RAPPORT TXT ──────────────────────────────────────────────
+function generateSessionCSV(session) {
+  let csv = "Actif,Trades,Gains,Pertes,Win Rate,Net USDC,Total Gains,Total Pertes\n";
+  (session.by_coin||[]).forEach(c => {
+    csv += `${c.coin},${c.total},${c.wins},${c.losses},${Math.round(c.wins/Math.max(c.total,1)*100)}%,${Math.round((c.net||0)*100)/100},${Math.round((c.gains||0)*100)/100},${Math.round((c.pertes||0)*100)/100}\n`;
+  });
+  csv += `\nTOTAL,${session.total_trades},${session.wins},${session.losses},${Math.round(session.wins/Math.max(session.total_trades,1)*100)}%,${Math.round((session.net_pnl||0)*100)/100},,\n`;
+  return csv;
+}
+
 function generateBilan(bilan, paper) {
   if(!bilan) return "Bilan non disponible";
   const sep = "=".repeat(60), thin = "-".repeat(60);
@@ -294,6 +303,7 @@ function App() {
   const [filterMacro, setFilterMacro] = useState(false);
   const [dailyStats, setDailyStats] = useState(null);
   const [bilan, setBilan] = useState(null);
+  const [sessions, setSessions] = useState([]);
   const [clock, setClock] = useState({utc:"", local:"", market:""});
   const [botLogs, setBotLogs] = useState([]);
   const [persistentLogs, setPersistentLogs] = useState(false);
@@ -455,6 +465,7 @@ Confirmer ?`
     {id:"rapport",label:"📄 Rapport"},
     {id:"stats",label:"📊 Performance"},
     {id:"bilan",label:"💰 Bilan"},
+    {id:"sessions",label:"📅 Sessions"},
   ];
 
   return (
@@ -508,15 +519,20 @@ Confirmer ?`
             <div style={{fontSize:13,fontWeight:800,color:"#e2e8f0",fontFamily:"monospace"}}>{clock.local}</div>
           </div>
         </div>
-        <div style={{background:clock.marketColor+"22",border:`1px solid ${clock.marketColor}`,borderRadius:20,padding:"4px 12px"}}>
-          <span style={{fontSize:11,fontWeight:700,color:clock.marketColor}}>{clock.market}</span>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
+          <div style={{background:clock.marketColor+"22",border:`1px solid ${clock.marketColor}`,borderRadius:20,padding:"4px 12px"}}>
+            <span style={{fontSize:11,fontWeight:700,color:clock.marketColor}}>{clock.market}</span>
+          </div>
+          {config?.reset_at && <div style={{fontSize:9,color:"#334155"}}>
+            Bot démarré le {new Date(config.reset_at+"Z").toLocaleDateString("fr-FR")} à {new Date(config.reset_at+"Z").toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}
+          </div>}
         </div>
       </div>
 
       {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #1e2d4a",background:"#0f1629",overflowX:"auto"}}>
         {TABS.map(t=>(
-          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r)); if(t.id==="rapport") loadData(); if(t.id==="bilan") apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r));}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
+          <button key={t.id} onClick={()=>{setTab(t.id); if(t.id==="stats") apiCall("/api/stats/daily","GET",null,token).then(r=>setDailyStats(r)); if(t.id==="rapport") loadData(); if(t.id==="bilan") apiCall("/api/bilan","GET",null,token).then(r=>setBilan(r)); if(t.id==="sessions") apiCall("/api/sessions","GET",null,token).then(r=>setSessions(r?.sessions||[]));}} style={{padding:"10px 14px",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",color:tab===t.id?"#60a5fa":"#64748b",fontSize:11,fontWeight:tab===t.id?700:400,whiteSpace:"nowrap"}}>
             {t.label}
           </button>
         ))}
@@ -1129,6 +1145,89 @@ Confirmer ?`
             ⬇️ Télécharger Performance
           </button>
           </>)}
+        </div>
+      )}
+
+      {/* SESSIONS */}
+      {tab==="sessions" && (
+        <div style={{padding:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa"}}>📅 Sessions de Trading</div>
+            <button onClick={()=>apiCall("/api/sessions","GET",null,token).then(r=>setSessions(r?.sessions||[]))}
+              style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#475569",fontSize:10,cursor:"pointer"}}>
+              🔄 Actualiser
+            </button>
+          </div>
+
+          {sessions.length===0 ? <div style={{color:"#475569",textAlign:"center",padding:40}}>Aucune session disponible</div> :
+          sessions.map((s,i)=>(
+            <div key={i} style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:14,marginBottom:12}}>
+              {/* Header session */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div>
+                  <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>📅 {s.session_date}</span>
+                  {s.closing_phase && !s.ended_at && <span style={{marginLeft:8,fontSize:9,color:"#f59e0b",border:"1px solid #f59e0b",borderRadius:10,padding:"2px 6px"}}>EN CLÔTURE</span>}
+                  {s.ended_at && <span style={{marginLeft:8,fontSize:9,color:"#34d399",border:"1px solid #34d399",borderRadius:10,padding:"2px 6px"}}>✅ CLÔTURÉE</span>}
+                  {s.pending_trades>0 && <span style={{marginLeft:8,fontSize:9,color:"#f59e0b",border:"1px solid #f59e0b",borderRadius:10,padding:"2px 6px"}}>⏳ {s.pending_trades} en cours</span>}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={{fontSize:13,fontWeight:800,color:s.net_pnl>=0?"#34d399":"#f87171"}}>
+                    {s.net_pnl>=0?"+":""}{Math.round((s.net_pnl||0)*100)/100} $
+                  </span>
+                  <button onClick={()=>{
+                    const csv = generateSessionCSV(s);
+                    const b = new Blob([csv],{type:"text/csv;charset=utf-8"});
+                    const u = URL.createObjectURL(b);
+                    const a = document.createElement("a");
+                    a.href=u; a.download=`session-${s.session_date}.csv`;
+                    a.click(); URL.revokeObjectURL(u);
+                  }} style={{background:"#052e16",border:"1px solid #34d399",borderRadius:6,padding:"4px 10px",color:"#34d399",fontSize:9,cursor:"pointer",fontWeight:700}}>
+                    ⬇️ CSV
+                  </button>
+                </div>
+              </div>
+
+              {/* Stats globales */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6,marginBottom:10}}>
+                <div style={{textAlign:"center",background:"#0f1629",borderRadius:6,padding:6}}>
+                  <div style={{fontSize:14,fontWeight:700,color:"#e2e8f0"}}>{s.total_trades}</div>
+                  <div style={{fontSize:9,color:"#475569"}}>TRADES</div>
+                </div>
+                <div style={{textAlign:"center",background:"#052e16",borderRadius:6,padding:6}}>
+                  <div style={{fontSize:14,fontWeight:700,color:"#34d399"}}>{s.wins}</div>
+                  <div style={{fontSize:9,color:"#34d399"}}>GAINS</div>
+                </div>
+                <div style={{textAlign:"center",background:"#2d0a0a",borderRadius:6,padding:6}}>
+                  <div style={{fontSize:14,fontWeight:700,color:"#f87171"}}>{s.losses}</div>
+                  <div style={{fontSize:9,color:"#f87171"}}>PERTES</div>
+                </div>
+                <div style={{textAlign:"center",background:"#0a0e1a",borderRadius:6,padding:6}}>
+                  <div style={{fontSize:14,fontWeight:700,color:"#60a5fa"}}>{Math.round(s.wins/Math.max(s.total_trades,1)*100)}%</div>
+                  <div style={{fontSize:9,color:"#475569"}}>WIN RATE</div>
+                </div>
+              </div>
+
+              {/* Par actif */}
+              {(s.by_coin||[]).length > 0 && (
+                <div style={{borderTop:"1px solid #0f1629",paddingTop:8}}>
+                  <div style={{fontSize:9,color:"#475569",marginBottom:6,letterSpacing:1}}>PAR ACTIF</div>
+                  {s.by_coin.map((coin,j)=>(
+                    <div key={j} style={{display:"flex",justifyContent:"space-between",fontSize:10,padding:"4px 0",borderBottom:"1px solid #0a0e1a"}}>
+                      <span style={{color:"#e2e8f0",fontWeight:700,width:50}}>{coin.coin}</span>
+                      <span style={{color:"#475569"}}>{coin.total} trades</span>
+                      <span style={{color:"#34d399"}}>✅{coin.wins}</span>
+                      <span style={{color:"#f87171"}}>❌{coin.losses}</span>
+                      <span style={{color:coin.wins/Math.max(coin.total,1)>=0.5?"#34d399":"#f87171"}}>{Math.round(coin.wins/Math.max(coin.total,1)*100)}%</span>
+                      <span style={{fontWeight:700,color:(coin.net||0)>=0?"#34d399":"#f87171"}}>
+                        {(coin.net||0)>=0?"+":""}{Math.round((coin.net||0)*100)/100}$
+                      </span>
+                      {coin.still_open>0 && <span style={{color:"#f59e0b",fontSize:9}}>⏳{coin.still_open}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
