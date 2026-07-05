@@ -96,6 +96,7 @@ def init_db():
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0,
             net_pnl REAL DEFAULT 0,
+            capital_start REAL DEFAULT 1000.0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )""")
         conn.commit()
@@ -1218,10 +1219,12 @@ async def check_session_lifecycle(user_id: int):
     
     # Créer session du jour si elle n'existe pas
     if not session:
+        portfolio_now = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+        capital_start = portfolio_now["balance"] if portfolio_now else 1000.0
         conn.execute("""INSERT INTO trading_sessions 
-            (user_id, session_date, started_at, closing_phase) 
-            VALUES (?,?,?,0)""",
-            (user_id, today, now.isoformat()))
+            (user_id, session_date, started_at, closing_phase, capital_start) 
+            VALUES (?,?,?,0,?)""",
+            (user_id, today, now.isoformat(), capital_start))
         conn.commit()
         add_bot_log(user_id, f"📅 Nouvelle session démarrée: {today}", "success")
     
