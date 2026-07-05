@@ -422,32 +422,54 @@ async def fetch_positions(client, address):
     return data.get("assetPositions", []) if data else []
 
 # ── ANALYSE IA ───────────────────────────────────────────────
+def cache_market_data(coin: str, tech: dict, price: float):
+    """Sauvegarde les indicateurs calculés dans le cache mémoire"""
+    from datetime import datetime as dt
+    market_data_cache[coin] = {
+        "price": round(price, 6),
+        "rsi": round(tech.get("rsi", 0), 2),
+        "macd_bull": tech.get("macd_bull", False),
+        "macd_bear": tech.get("macd_bear", False),
+        "ema20": round(tech.get("ema20", 0), 4),
+        "ema50": round(tech.get("ema50", 0), 4),
+        "ema200": round(tech.get("ema200", 0), 4),
+        "bb_upper": round(tech.get("bb_upper", 0), 4),
+        "bb_lower": round(tech.get("bb_lower", 0), 4),
+        "bb_mid": round(tech.get("bb_mid", 0), 4),
+        "atr": round(tech.get("atr", 0), 4),
+        "vwap": round(tech.get("vwap", 0), 4),
+        "volume_trend": tech.get("volume_trend", "N/A"),
+        "btc_trend": tech.get("btc_trend", "neutral"),
+        "btc_change": round(tech.get("btc_change", 0), 2),
+        "updated_at": dt.utcnow().strftime("%H:%M:%S")
+    }
+
+def get_compact_prompt(coin: str, tech: dict, price: float) -> str:
+    """Génère un prompt compact depuis le cache — moins de tokens"""
+    d = market_data_cache.get(coin, {})
+    if not d:
+        cache_market_data(coin, tech, price)
+        d = market_data_cache[coin]
+    
+    # Déterminer position relative au BB
+    bb_pos = "MIDDLE"
+    if d["price"] > d["bb_upper"]: bb_pos = "ABOVE_UPPER"
+    elif d["price"] < d["bb_lower"]: bb_pos = "BELOW_LOWER"
+    elif d["price"] > d["bb_mid"]: bb_pos = "UPPER_HALF"
+    else: bb_pos = "LOWER_HALF"
+    
+    # Alignement EMA
+    ema_align = "BULL" if d["ema20"] > d["ema50"] > d["ema200"] else                 "BEAR" if d["ema20"] < d["ema50"] < d["ema200"] else "MIXED"
+    
+    return f"""Crypto scalp analyst. Analyze {coin}/USDC.
+DATA: price={d['price']} rsi={d['rsi']} macd={'BULL' if d['macd_bull'] else 'BEAR' if d['macd_bear'] else 'NEUTRAL'} ema={ema_align} bb={bb_pos} vol={d['volume_trend']} vwap={d['vwap']} atr={d['atr']} btc={d['btc_trend']}({d['btc_change']}%)
+RULES: RSI<25=LONG RSI>75=SHORT RSI25-45=LONG_BIAS RSI55-75=SHORT_BIAS min_RR=2 leverage=2-5 size=5-15%
+Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 phrases FR","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
+
 async def analyze_with_ai(client, coin, tech, ob, price, api_key):
-    prompt = f"""You are an elite quantitative trading analyst for crypto perpetual futures on Hyperliquid.
-You think like a professional trader: you ACCEPT risk, you ANTICIPATE moves, not react to fear.
-Analyze {coin}/USDC and provide a decisive trading decision.
-
-PRICE: ${price}
-RSI: {tech.get('rsi','N/A')} | MACD Bull: {tech.get('macd_bull','N/A')} | Bear: {tech.get('macd_bear','N/A')}
-EMA20: {tech.get('ema20','N/A')} | EMA50: {tech.get('ema50','N/A')} | EMA200: {tech.get('ema200','N/A')}
-BB Upper: {tech.get('bb_upper','N/A')} | Lower: {tech.get('bb_lower','N/A')}
-ATR: {tech.get('atr','N/A')} | VWAP: {tech.get('vwap','N/A')}
-Volume: {tech.get('volume_trend','N/A')}
-BTC MARKET TREND: {tech.get('btc_trend','neutral')} ({tech.get('btc_change',0):.1f}% sur 4h)
-
-TRADER PHILOSOPHY:
-- RSI < 25: extreme oversold = HIGH probability LONG opportunity (anticipate bounce)
-- RSI > 75: extreme overbought = HIGH probability SHORT opportunity (anticipate correction)
-- RSI 25-45: oversold zone = LONG bias if any bullish confluence
-- RSI 55-75: overbought zone = SHORT bias if any bearish confluence
-- If BTC trend is bullish: favor LONG, SHORT only with very strong signals
-- If BTC trend is bearish: favor SHORT, LONG only with very strong signals
-- If BTC trend is neutral: look for reversals, both directions valid
-- Risk management is handled by SL/TP — your job is to find the BEST ENTRY
-
-CONSTRAINTS: Leverage x2-x5, position 5-15% portfolio, min R/R 2:1
-Respond ONLY with JSON (no markdown):
-{{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 sentences in French","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
+    # Cacher les données et utiliser prompt compact — 60-70% moins de tokens
+    cache_market_data(coin, tech, price)
+    prompt = get_compact_prompt(coin, tech, price)
 
     try:
         r = await client.post(
@@ -591,6 +613,19 @@ async def scan_markets(user_id: int):
 
             price = prices[coin]
             candles_raw = await fetch_candles(client, coin)
+            
+            # Pré-filtre RSI pour les coins opportunistes — économise les crédits IA
+            if is_opportunist and candles_raw:
+                closes = [float(c[4]) for c in candles_raw[-15:] if len(c) > 4]
+                if len(closes) >= 14:
+                    gains = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
+                    losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
+                    avg_gain = sum(gains[-14:])/14
+                    avg_loss = sum(losses[-14:])/14
+                    rsi_quick = 100-(100/(1+avg_gain/max(avg_loss,0.0001)))
+                    # Appeler l'IA seulement si RSI en zone extrême (<30 ou >70)
+                    if 30 <= rsi_quick <= 70:
+                        continue  # Zone neutre — pas d'opportunité
             if not candles_raw or len(candles_raw) < 50:
                 continue
 
@@ -680,6 +715,7 @@ async def scan_markets(user_id: int):
             if coin_already_open and ai_continuous:
                 add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
                 continue
+            cache_market_data(coin, tech, price)  # Mettre à jour le cache
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
             # Pour les coins opportunistes, seuil minimum 75%
@@ -1030,6 +1066,9 @@ async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
 # Cache des prix en temps réel via WebSocket
 ws_prices = {}
 ws_connected = False
+
+# Cache des données de marché structurées (indicateurs pré-calculés)
+market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket"""
@@ -2007,6 +2046,11 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/market-data")
+def get_market_data():
+    """Retourne les données de marché pré-calculées depuis le cache"""
+    return {"data": market_data_cache, "coins": len(market_data_cache)}
+
 @app.get("/api/sessions")
 def get_sessions(user_id: int = Depends(get_current_user)):
     conn = get_db()
