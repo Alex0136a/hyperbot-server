@@ -616,7 +616,8 @@ async def scan_markets(user_id: int):
             
             # Pré-filtre RSI pour les coins opportunistes — économise les crédits IA
             if is_opportunist and candles_raw:
-                closes = [float(c[4]) for c in candles_raw[-15:] if len(c) > 4]
+                # candles_raw est une liste de dicts {h, l, c, o, v}
+                closes = [float(cd["c"]) for cd in candles_raw[-15:] if "c" in cd]
                 if len(closes) >= 14:
                     gains = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
                     losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
