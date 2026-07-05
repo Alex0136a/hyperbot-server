@@ -1171,9 +1171,14 @@ Confirmer ?`
                   {s.pending_trades>0 && <span style={{marginLeft:8,fontSize:9,color:"#f59e0b",border:"1px solid #f59e0b",borderRadius:10,padding:"2px 6px"}}>⏳ {s.pending_trades} en cours</span>}
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                  <span style={{fontSize:13,fontWeight:800,color:s.net_pnl>=0?"#34d399":"#f87171"}}>
-                    {s.net_pnl>=0?"+":""}{Math.round((s.net_pnl||0)*100)/100} $
-                  </span>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:13,fontWeight:800,color:s.net_pnl>=0?"#34d399":"#f87171"}}>
+                      {s.net_pnl>=0?"+":""}{Math.round((s.net_pnl||0)*100)/100} $
+                    </div>
+                    <div style={{fontSize:10,fontWeight:700,color:s.net_pnl>=0?"#34d399":"#f87171"}}>
+                      {s.net_pnl>=0?"+":""}{Math.round((s.net_pnl||0)/Math.max(s.capital_start||1000,1)*10000)/100} %
+                    </div>
+                  </div>
                   <button onClick={()=>{
                     const csv = generateSessionCSV(s);
                     const b = new Blob([csv],{type:"text/csv;charset=utf-8"});
