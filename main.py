@@ -554,7 +554,15 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
 
         # Analyze each coin
-        for coin in active_coins:
+        # Coins opportunistes (75%+) = tous les 30 coins disponibles
+        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
+        opportunist_coins = [c for c in all_available_coins if c not in active_coins]
+        
+        # Scanner d'abord les coins actifs, puis les opportunistes
+        coins_to_scan = active_coins + opportunist_coins
+
+        for coin in coins_to_scan:
+            is_opportunist = coin not in active_coins
             if coin not in prices:
                 continue
 
@@ -636,6 +644,9 @@ async def scan_markets(user_id: int):
             if coin_already_open and not ai_continuous:
                 add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte - analyse IA skippée", "info")
                 continue
+            
+            # Skip les coins opportunistes si confiance pas encore connue
+            # (on les analyse quand même mais on filtre après)
 
             ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
             if not ai:
@@ -648,7 +659,13 @@ async def scan_markets(user_id: int):
                 continue
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
-            if action_ia == "WAIT" or confidence_ia < required_conf:
+            # Pour les coins opportunistes, seuil minimum 75%
+            opportunist_threshold = 75
+            if is_opportunist:
+                if action_ia == "WAIT" or confidence_ia < opportunist_threshold:
+                    continue  # Skip silencieux pour les opportunistes
+                add_bot_log(user_id, f"🎯 {coin}: Trade opportuniste ({confidence_ia}%) hors sélection !", "success")
+            elif action_ia == "WAIT" or confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
 
