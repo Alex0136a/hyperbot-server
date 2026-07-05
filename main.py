@@ -1087,6 +1087,123 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
         print(f"WS trade error {trade.get('coin','?')}: {e}")
         return False
 
+async def startup_cleanup(user_id: int):
+    """Nettoyage complet au démarrage — orphelins, doublons, sessions historiques"""
+    conn = get_db()
+    cleaned = []
+
+    # 1. Reconstruire les sessions historiques depuis les trades existants
+    dates = conn.execute("""
+        SELECT DISTINCT date(opened_at) as day FROM paper_trades 
+        WHERE user_id=? AND opened_at IS NOT NULL
+        ORDER BY day
+    """, (user_id,)).fetchall()
+    
+    for row in dates:
+        day = row["day"]
+        if not day:
+            continue
+        existing = conn.execute(
+            "SELECT id FROM trading_sessions WHERE user_id=? AND session_date=?",
+            (user_id, day)
+        ).fetchone()
+        if not existing:
+            # Calculer stats de cette journée
+            stats = conn.execute("""
+                SELECT COUNT(*) as total,
+                    SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END) as net
+                FROM paper_trades WHERE user_id=? AND date(opened_at)=?
+            """, (user_id, day)).fetchone()
+            
+            # Vérifier si des trades sont encore ouverts
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND date(opened_at)=? AND status='OPEN'",
+                (user_id, day)
+            ).fetchone()[0]
+            
+            ended_at = datetime.utcnow().isoformat() if open_count == 0 else None
+            conn.execute("""INSERT INTO trading_sessions 
+                (user_id, session_date, started_at, ended_at, closing_phase, total_trades, wins, losses, net_pnl)
+                VALUES (?,?,?,?,1,?,?,?,?)""",
+                (user_id, day, day+"T00:00:00", ended_at,
+                 stats["total"] or 0, stats["wins"] or 0, 
+                 stats["losses"] or 0, stats["net"] or 0))
+            cleaned.append(f"📅 Session {day} reconstruite ({stats['total']} trades)")
+    
+    # 2. Supprimer les signaux en double (garder le plus récent par coin+action+jour)
+    result = conn.execute("""
+        DELETE FROM signals WHERE id NOT IN (
+            SELECT MAX(id) FROM signals
+            WHERE user_id=?
+            GROUP BY coin, action, date(created_at)
+        ) AND user_id=?
+    """, (user_id, user_id))
+    dup_count = conn.execute("SELECT changes()").fetchone()[0]
+    if dup_count > 0:
+        cleaned.append(f"🗑️ {dup_count} signaux en double supprimés")
+
+    # 3. Supprimer les signaux des actifs désactivés
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    if config:
+        import json as json_mod
+        active_coins = json_mod.loads(config["active_coins"])
+        placeholders = ",".join("?" * len(active_coins))
+        result = conn.execute(
+            f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
+            [user_id] + active_coins
+        )
+        inactive_count = conn.execute("SELECT changes()").fetchone()[0]
+        if inactive_count > 0:
+            cleaned.append(f"🗑️ {inactive_count} signaux d'actifs désactivés supprimés")
+
+    # 4. Supprimer les signaux de plus de 7 jours
+    result = conn.execute("""
+        DELETE FROM signals WHERE user_id=? 
+        AND created_at < datetime('now', '-7 days')
+    """, (user_id,))
+    old_count = conn.execute("SELECT changes()").fetchone()[0]
+    if old_count > 0:
+        cleaned.append(f"🗑️ {old_count} signaux anciens (>7j) supprimés")
+
+    # 5. Nettoyer les trades orphelins (ouverts depuis plus de 48h sans mise à jour)
+    orphan_trades = conn.execute("""
+        SELECT id, coin, action, pnl FROM paper_trades 
+        WHERE user_id=? AND status='OPEN'
+        AND opened_at < datetime('now', '-48 hours')
+    """, (user_id,)).fetchall()
+    
+    for trade in orphan_trades:
+        trade = dict(trade)
+        pnl = trade["pnl"] or 0
+        conn.execute("""UPDATE paper_trades SET status='CLOSED', 
+            close_reason='ORPHAN_CLEANUP', closed_at=?
+            WHERE id=?""", (datetime.utcnow().isoformat(), trade["id"]))
+        conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
+            (pnl, user_id))
+        cleaned.append(f"🧹 Trade orphelin fermé: {trade['action']} {trade['coin']} (PnL: {round(pnl,2)}$)")
+
+    # 6. Nettoyer les logs persistants > 500 entrées
+    conn.execute("""DELETE FROM bot_activity_log WHERE user_id=? AND id NOT IN (
+        SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 500
+    )""", (user_id, user_id))
+    
+    # 7. Nettoyer la confiance dynamique des coins qui n'ont pas eu de perte depuis 24h
+    conn.execute("""DELETE FROM coin_confidence 
+        WHERE user_id=? AND updated_at < datetime('now', '-24 hours')
+        AND consecutive_losses = 0""", (user_id,))
+
+    conn.commit()
+    conn.close()
+
+    if cleaned:
+        add_bot_log(user_id, f"🧹 Nettoyage démarrage: {len(cleaned)} actions", "info")
+        for msg in cleaned:
+            add_bot_log(user_id, msg, "info")
+    else:
+        add_bot_log(user_id, "✅ Nettoyage démarrage: rien à nettoyer", "info")
+
 async def check_session_lifecycle(user_id: int):
     """Gère le cycle de vie des sessions de trading (minuit UTC)"""
     conn = get_db()
@@ -1426,6 +1543,7 @@ async def lifespan(app: FastAPI):
         user_id = row["user_id"]
         scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
         positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
+        asyncio.create_task(startup_cleanup(user_id))
         print(f"Bot auto-redemarre pour user {user_id}")
     # Démarrer WebSocket Hyperliquid automatiquement au démarrage du serveur
     asyncio.create_task(connect_hyperliquid_ws())
@@ -1579,7 +1697,8 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     # Lancer boucle scan IA (3min) et boucle suivi positions (60s)
     scanning_tasks[user_id] = asyncio.create_task(run_bot_loop(user_id))
     positions_tasks[user_id] = asyncio.create_task(check_positions_loop(user_id))
-    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 15s", "success")
+    asyncio.create_task(startup_cleanup(user_id))
+    add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 5s | WS: temps réel", "success")
     return {"message": "Bot démarré"}
 
 @app.put("/api/config/hyperliquid")
