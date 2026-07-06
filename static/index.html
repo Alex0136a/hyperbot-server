@@ -1382,9 +1382,14 @@ Confirmer ?`
                 <span style={{color:"#34d399"}}>✅ {d.wins}</span>
                 <span style={{color:"#f87171"}}>❌ {d.losses}</span>
                 <span style={{color:"#64748b"}}>{d.total} trades</span>
-                <span style={{fontWeight:700,color:d.net>=0?"#34d399":"#f87171"}}>
-                  {d.net>=0?"+":""}{Math.round(d.net*100)/100} $
-                </span>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontWeight:700,color:d.net>=0?"#34d399":"#f87171"}}>
+                    {d.net>=0?"+":""}{Math.round(d.net*100)/100} $
+                  </div>
+                  <div style={{fontSize:9,color:d.net>=0?"#34d399":"#f87171"}}>
+                    {d.net>=0?"+":""}{Math.round(d.net/Math.max(d.capital_start||bilan.initial_balance||1000,1)*10000)/100} %
+                  </div>
+                </div>
               </div>
             ))}
           </div>
