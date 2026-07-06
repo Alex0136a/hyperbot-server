@@ -2252,16 +2252,18 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         FROM paper_trades WHERE user_id=? AND status='OPEN'
     """, (user_id,)).fetchone()
     
-    # Stats par jour (7 derniers)
+    # Stats par jour (7 derniers) avec capital_start depuis sessions
     daily = conn.execute("""
-        SELECT date(closed_at) as day,
+        SELECT date(pt.opened_at) as day,
             COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(pnl) as net
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED'
-        GROUP BY date(closed_at)
+            SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pt.pnl) as net,
+            COALESCE(ts.capital_start, 1000) as capital_start
+        FROM paper_trades pt
+        LEFT JOIN trading_sessions ts ON ts.user_id=pt.user_id AND ts.session_date=date(pt.opened_at)
+        WHERE pt.user_id=? AND pt.status='CLOSED'
+        GROUP BY date(pt.opened_at)
         ORDER BY day DESC LIMIT 7
     """, (user_id,)).fetchall()
     
