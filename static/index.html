@@ -365,7 +365,7 @@ function App() {
       setStats(st);
       setPositions(pos?.positions||[]);
       setActiveCoins(cfg?.active_coins||ALL_COINS);
-      setIsRunning(!!cfg?.is_running);
+      setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
   }, [token]);
 
@@ -458,7 +458,6 @@ Confirmer ?`
   if (!token) return <LoginPage onLogin={(t,e)=>{setToken(t);setEmail(e);}}/>;
   if(!config) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0e1a",color:"#60a5fa",fontSize:14}}>Chargement...</div>;
 
-  const isRunning = config.is_running;
   const TABS = [
     {id:"dashboard",label:"📊 Tableau de bord"},
     {id:"signaux",label:`⚡ Signaux (${stats.total||0})`},
