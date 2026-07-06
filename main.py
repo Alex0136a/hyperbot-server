@@ -2268,6 +2268,27 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.delete("/api/sessions/cleanup")
+def cleanup_sessions(user_id: int = Depends(get_current_user)):
+    """Supprime toutes les sessions invalides et reconstruit"""
+    conn = get_db()
+    # Supprimer sessions avec dates invalides
+    conn.execute("""DELETE FROM trading_sessions 
+        WHERE user_id=? AND (length(session_date) != 10 
+        OR session_date NOT LIKE '____-__-__')""", (user_id,))
+    deleted = conn.execute("SELECT changes()").fetchone()[0]
+    # Corriger session_date dans les trades
+    conn.execute("""UPDATE paper_trades 
+        SET session_date = CASE
+            WHEN opened_at LIKE '____-__-__%' THEN substr(opened_at, 1, 10)
+            WHEN closed_at LIKE '____-__-__%' THEN substr(closed_at, 1, 10)
+            ELSE strftime('%Y-%m-%d', 'now')
+        END
+        WHERE user_id=? AND (session_date IS NULL OR length(session_date) != 10)""", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"message": f"{deleted} sessions invalides supprimées — rechargez Sessions"}
+
 @app.get("/api/market-data")
 def get_market_data():
     """Retourne les données de marché pré-calculées depuis le cache"""
