@@ -298,6 +298,8 @@ function App() {
   const [filterHours, setFilterHours] = useState(true);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
+  const [sendgridKey, setSendgridKey] = useState("");
+  const [alertEmail, setAlertEmail] = useState("");
   const [hlWallet, setHlWallet] = useState("");
   const [filterWeekend, setFilterWeekend] = useState(true);
   const [filterMacro, setFilterMacro] = useState(false);
@@ -354,6 +356,8 @@ function App() {
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
+      if(cfg?.alert_email) setAlertEmail(cfg.alert_email);
+      if(cfg?.hl_wallet) setHlWallet(cfg.hl_wallet);
       setBotLogs(botLogsRes?.logs||[]);
       setSignals(sigs?.signals||[]);
       setPrices(prc?.prices||{});
@@ -519,11 +523,25 @@ Confirmer ?`
             <div style={{fontSize:13,fontWeight:800,color:"#e2e8f0",fontFamily:"monospace"}}>{clock.local}</div>
           </div>
         </div>
-        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-          <div style={{background:clock.marketColor+"22",border:`1px solid ${clock.marketColor}`,borderRadius:20,padding:"4px 12px"}}>
-            <span style={{fontSize:11,fontWeight:700,color:clock.marketColor}}>{clock.market}</span>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <div style={{display:"flex",alignItems:"center",gap:4,background:config?.ws_connected?"#052e1644":"#2d0a0a44",border:`1px solid ${config?.ws_connected?"#34d399":"#f87171"}`,borderRadius:20,padding:"3px 10px"}}>
+              <div style={{width:6,height:6,borderRadius:"50%",background:config?.ws_connected?"#34d399":"#f87171",boxShadow:config?.ws_connected?"0 0 6px #34d399":"0 0 6px #f87171"}}/>
+              <span style={{fontSize:9,fontWeight:700,color:config?.ws_connected?"#34d399":"#f87171"}}>
+                WS {config?.ws_connected?"ACTIF":"INACTIF"}
+              </span>
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <div style={{display:"flex",alignItems:"center",gap:4,background:config?.ws_connected?"#05280e":"#2d0a0a",border:`1px solid ${config?.ws_connected?"#34d399":"#f87171"}`,borderRadius:20,padding:"3px 8px"}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:config?.ws_connected?"#34d399":"#f87171"}}/>
+                <span style={{fontSize:9,fontWeight:700,color:config?.ws_connected?"#34d399":"#f87171"}}>WS</span>
+              </div>
+              <div style={{background:clock.marketColor+"22",border:`1px solid ${clock.marketColor}`,borderRadius:20,padding:"3px 10px"}}>
+                <span style={{fontSize:9,fontWeight:700,color:clock.marketColor}}>{clock.market}</span>
+              </div>
+            </div>
           </div>
-          {config?.reset_at && <div style={{fontSize:9,color:"#334155"}}>
+          {config?.reset_at && <div style={{fontSize:9,color:"#334155",textAlign:"right"}}>
             Bot démarré le {new Date(config.reset_at+"Z").toLocaleDateString("fr-FR")} à {new Date(config.reset_at+"Z").toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}
           </div>}
         </div>
@@ -732,6 +750,38 @@ Confirmer ?`
             <button onClick={saveConfig}
               style={{width:"100%",background:saved?"#052e16":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:saved?"1px solid #34d399":"none",borderRadius:8,padding:"11px",color:saved?"#34d399":"#fff",fontWeight:700,fontSize:12}}>
               {saved?"✅ Sauvegardé !":"💾 Sauvegarder"}
+            </button>
+          </div>
+
+          {/* SENDGRID ALERTS */}
+          <div style={{background:"#0f1629",border:"1px solid #0891b2",borderRadius:10,padding:16,marginBottom:14}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#22d3ee",marginBottom:4}}>📧 Alertes Email (SendGrid)</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:12}}>Recevez des alertes en cas de problème critique (WebSocket, erreurs majeures)</div>
+            
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🔑 Clé API SendGrid</div>
+              <input type="password"
+                placeholder={config?.has_sendgrid_key ? "✅ Clé active — saisir pour changer" : "SG.xxxxx..."}
+                value={sendgridKey} onChange={e=>setSendgridKey(e.target.value)}
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #0891b2",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}/>
+            </div>
+
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>📬 Email de destination</div>
+              <input type="email" placeholder="votre@email.com" value={alertEmail}
+                onChange={e=>setAlertEmail(e.target.value)}
+                style={{width:"100%",background:"#0a0e1a",border:"1px solid #0891b2",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}/>
+              <div style={{fontSize:9,color:"#334155"}}>Un email de test sera envoyé à la sauvegarde</div>
+            </div>
+
+            <button onClick={()=>{
+              const payload = {};
+              if(sendgridKey && sendgridKey !== "****") payload.sendgrid_key = sendgridKey;
+              if(alertEmail) payload.alert_email = alertEmail;
+              if(Object.keys(payload).length > 0)
+                apiCall("/api/config/sendgrid","PUT",payload,token).then(loadData);
+            }} style={{width:"100%",background:"linear-gradient(135deg,#0891b2,#0e7490)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
+              📧 Sauvegarder & Tester
             </button>
           </div>
 
