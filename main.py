@@ -2268,7 +2268,7 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
-@app.delete("/api/sessions/cleanup")
+@app.post("/api/sessions/cleanup")
 def cleanup_sessions(user_id: int = Depends(get_current_user)):
     """Supprime toutes les sessions invalides et reconstruit"""
     conn = get_db()
