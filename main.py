@@ -2268,6 +2268,16 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
+@app.get("/api/sessions/debug")
+def debug_sessions(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    sessions = conn.execute(
+        "SELECT session_date, length(session_date) as len, total_trades FROM trading_sessions WHERE user_id=? ORDER BY session_date DESC",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    return {"sessions": [dict(s) for s in sessions]}
+
 @app.post("/api/sessions/cleanup")
 def cleanup_sessions(user_id: int = Depends(get_current_user)):
     """Supprime toutes les sessions invalides et reconstruit"""
