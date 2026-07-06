@@ -87,6 +87,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE trading_sessions ADD COLUMN capital_start REAL DEFAULT 1000.0")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS trading_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
