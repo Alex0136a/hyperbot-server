@@ -127,6 +127,10 @@ def init_db():
         conn.execute("ALTER TABLE paper_trades ADD COLUMN peak_pnl REAL DEFAULT 0")
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN session_date TEXT")
+        conn.commit()
+    except: pass
     # Ne pas forcer les coins — conserver le dernier état connu
     try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
@@ -297,6 +301,7 @@ def init_db():
             status TEXT DEFAULT 'OPEN',
             signal_id INTEGER,
             opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            session_date TEXT,
             closed_at TEXT,
             close_reason TEXT,
             tp1_hit INTEGER DEFAULT 0,
@@ -837,12 +842,13 @@ async def scan_markets(user_id: int):
                     entry_price = ai.get("entry") or price
                     conn.execute("""
                         INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
-                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at, session_date)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (user_id, coin, ai["action"], entry_price, price, size,
                            ai.get("leverage") or 1, ai.get("stopLoss"),
                            ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
-                           datetime.utcnow().isoformat()))
+                           datetime.utcnow().isoformat(),
+                           datetime.utcnow().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
                     add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
 
@@ -1725,7 +1731,7 @@ async def update_open_positions(user_id: int):
             
             # Mettre à jour les stats de la session du jour en temps réel
             try:
-                trade_date = trade.get("opened_at", "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
+                trade_date = trade.get("session_date") or trade.get("opened_at", "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
                 session_stats = conn.execute("""
                     SELECT COUNT(*) as total,
                         SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
@@ -1733,7 +1739,7 @@ async def update_open_positions(user_id: int):
                         SUM(pnl) as net
                     FROM paper_trades 
                     WHERE user_id=? AND status='CLOSED' 
-                    AND COALESCE(date(opened_at), date(closed_at))=?
+                    AND COALESCE(session_date, date(opened_at), date(closed_at))=?
                 """, (user_id, trade_date)).fetchone()
                 if session_stats:
                     conn.execute("""UPDATE trading_sessions 
@@ -2340,7 +2346,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
     
     # Stats par jour (7 derniers) avec capital_start depuis sessions
     daily = conn.execute("""
-        SELECT COALESCE(date(pt.opened_at), date(pt.closed_at)) as day,
+        SELECT COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at)) as day,
             COUNT(*) as total,
             SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
             SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
@@ -2348,9 +2354,9 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             COALESCE(ts.capital_start, 1000) as capital_start
         FROM paper_trades pt
         LEFT JOIN trading_sessions ts ON ts.user_id=pt.user_id 
-            AND ts.session_date=COALESCE(date(pt.opened_at), date(pt.closed_at))
+            AND ts.session_date=COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at))
         WHERE pt.user_id=? AND pt.status='CLOSED'
-        GROUP BY COALESCE(date(pt.opened_at), date(pt.closed_at))
+        GROUP BY COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at))
         ORDER BY day DESC LIMIT 7
     """, (user_id,)).fetchall()
     
