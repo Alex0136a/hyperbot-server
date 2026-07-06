@@ -2289,18 +2289,23 @@ def debug_sessions():
            ORDER BY closed_at DESC LIMIT 20"""
     ).fetchall()
     conn.close()
-    # Calculer le vrai PnL depuis le portfolio
-    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio").fetchone()
-    total_closed_pnl = conn.execute("SELECT SUM(pnl) as total FROM paper_trades WHERE status='CLOSED'").fetchone()
-    
+    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio LIMIT 1").fetchone()
+    total_pnl = conn.execute("SELECT SUM(pnl) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
     conn.close()
+    
+    bal = portfolio["balance"] if portfolio else 0
+    ini = portfolio["initial_balance"] if portfolio else 1000
+    pnl = round(total_pnl["total"] or 0, 2)
+    
     return {
         "sessions_table": [dict(s) for s in sessions],
         "trades_by_date": [dict(t) for t in trades],
-        "orphan_trades": [dict(t) for t in orphans],
-        "portfolio": dict(portfolio) if portfolio else {},
-        "total_closed_pnl": round(total_closed_pnl["total"] or 0, 2),
-        "balance_vs_pnl_diff": round((portfolio["balance"] - portfolio["initial_balance"]) - (total_closed_pnl["total"] or 0), 2) if portfolio else 0
+        "balance": bal,
+        "initial_balance": ini,
+        "real_gain": round(bal - ini, 2),
+        "sum_pnl_closed": pnl,
+        "unexplained": round((bal - ini) - pnl, 2),
+        "total_closed_trades": total_pnl["cnt"]
     }
 
 @app.post("/api/sessions/cleanup")
