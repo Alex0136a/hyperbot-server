@@ -1226,15 +1226,19 @@ async def startup_cleanup(user_id: int):
         )""", (user_id,))
     conn.commit()
     
-    # 1c. Corriger les trades avec opened_at invalide
+    # 1c. Corriger session_date NULL dans les trades existants
+    today_fix = datetime.utcnow().strftime("%Y-%m-%d")
+    # Mettre session_date = date propre basée sur opened_at ou closed_at
     conn.execute("""UPDATE paper_trades 
-        SET opened_at = substr(opened_at, 1, 26)
-        WHERE user_id=? AND length(opened_at) > 26""", (user_id,))
-    # Corriger opened_at NULL en utilisant closed_at
-    conn.execute("""UPDATE paper_trades 
-        SET opened_at = closed_at
-        WHERE user_id=? AND (opened_at IS NULL OR opened_at = '')
-        AND closed_at IS NOT NULL""", (user_id,))
+        SET session_date = CASE
+            WHEN opened_at LIKE '____-__-__T%' OR opened_at LIKE '____-__-__ %' 
+                THEN substr(opened_at, 1, 10)
+            WHEN closed_at LIKE '____-__-__T%' OR closed_at LIKE '____-__-__ %'
+                THEN substr(closed_at, 1, 10)
+            ELSE ?
+        END
+        WHERE user_id=? AND (session_date IS NULL OR session_date = '' 
+            OR length(session_date) != 10)""", (today_fix, user_id))
     conn.commit()
 
     # 2. Supprimer les signaux en double (garder le plus récent par coin+action+jour)
