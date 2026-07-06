@@ -2388,7 +2388,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
             SUM(pnl) as net
         FROM paper_trades
-        WHERE user_id=? AND status='CLOSED' AND date(closed_at)=?
+        WHERE user_id=? AND status='CLOSED' AND COALESCE(session_date, date(opened_at), date(closed_at))=?
     """, (user_id, today)).fetchone()
     
     # Stats totales depuis le début
