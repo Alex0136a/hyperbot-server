@@ -837,11 +837,12 @@ async def scan_markets(user_id: int):
                     entry_price = ai.get("entry") or price
                     conn.execute("""
                         INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
-                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (user_id, coin, ai["action"], entry_price, price, size,
                            ai.get("leverage") or 1, ai.get("stopLoss"),
-                           ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id))
+                           ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
+                           datetime.utcnow().isoformat()))
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
                     add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
 
@@ -2306,16 +2307,17 @@ def get_bilan(user_id: int = Depends(get_current_user)):
     
     # Stats par jour (7 derniers) avec capital_start depuis sessions
     daily = conn.execute("""
-        SELECT date(pt.opened_at) as day,
+        SELECT COALESCE(date(pt.opened_at), date(pt.closed_at)) as day,
             COUNT(*) as total,
             SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
             SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
             SUM(pt.pnl) as net,
             COALESCE(ts.capital_start, 1000) as capital_start
         FROM paper_trades pt
-        LEFT JOIN trading_sessions ts ON ts.user_id=pt.user_id AND ts.session_date=date(pt.opened_at)
+        LEFT JOIN trading_sessions ts ON ts.user_id=pt.user_id 
+            AND ts.session_date=COALESCE(date(pt.opened_at), date(pt.closed_at))
         WHERE pt.user_id=? AND pt.status='CLOSED'
-        GROUP BY date(pt.opened_at)
+        GROUP BY COALESCE(date(pt.opened_at), date(pt.closed_at))
         ORDER BY day DESC LIMIT 7
     """, (user_id,)).fetchall()
     
