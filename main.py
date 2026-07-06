@@ -2388,7 +2388,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
             SUM(pnl) as net
         FROM paper_trades
-        WHERE user_id=? AND status='CLOSED' AND COALESCE(session_date, date(opened_at), date(closed_at))=?
+        WHERE user_id=? AND status='CLOSED' AND date(closed_at)=?
     """, (user_id, today)).fetchone()
     
     # Stats totales depuis le début
@@ -2410,19 +2410,17 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         FROM paper_trades WHERE user_id=? AND status='OPEN'
     """, (user_id,)).fetchone()
     
-    # Stats par jour (7 derniers) avec capital_start depuis sessions
+    # Stats par jour (7 derniers) basé sur date de FERMETURE = performance cash du jour
     daily = conn.execute("""
-        SELECT COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at)) as day,
+        SELECT date(pt.closed_at) as day,
             COUNT(*) as total,
             SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
             SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
             SUM(pt.pnl) as net,
-            COALESCE(ts.capital_start, 1000) as capital_start
+            1000 as capital_start
         FROM paper_trades pt
-        LEFT JOIN trading_sessions ts ON ts.user_id=pt.user_id 
-            AND ts.session_date=COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at))
-        WHERE pt.user_id=? AND pt.status='CLOSED'
-        GROUP BY COALESCE(pt.session_date, date(pt.opened_at), date(pt.closed_at))
+        WHERE pt.user_id=? AND pt.status='CLOSED' AND pt.closed_at IS NOT NULL
+        GROUP BY date(pt.closed_at)
         ORDER BY day DESC LIMIT 7
     """, (user_id,)).fetchall()
     
