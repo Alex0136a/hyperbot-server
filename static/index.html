@@ -1203,10 +1203,18 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
             <div style={{fontSize:13,fontWeight:700,color:"#60a5fa"}}>📅 Sessions de Trading</div>
-            <button onClick={()=>apiCall("/api/sessions","GET",null,token).then(r=>setSessions(r?.sessions||[]))}
-              style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#475569",fontSize:10,cursor:"pointer"}}>
-              🔄 Actualiser
-            </button>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>{
+                apiCall("/api/sessions/cleanup","DELETE",null,token).then(()=>
+                  apiCall("/api/sessions","GET",null,token).then(r=>setSessions(r?.sessions||[])));
+              }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:6,padding:"5px 10px",color:"#f87171",fontSize:9,cursor:"pointer",fontWeight:700}}>
+                🧹 Nettoyer
+              </button>
+              <button onClick={()=>apiCall("/api/sessions","GET",null,token).then(r=>setSessions(r?.sessions||[]))}
+                style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#475569",fontSize:10,cursor:"pointer"}}>
+                🔄 Actualiser
+              </button>
+            </div>
           </div>
 
           {sessions.length===0 ? <div style={{color:"#475569",textAlign:"center",padding:40}}>Aucune session disponible</div> :
@@ -1274,7 +1282,7 @@ Confirmer ?`
                       <span style={{color:"#475569"}}>{coin.total} trades</span>
                       <span style={{color:"#34d399"}}>✅{coin.wins}</span>
                       <span style={{color:"#f87171"}}>❌{coin.losses}</span>
-                      <span style={{color:coin.wins/Math.max(coin.total,1)>=0.5?"#34d399":"#f87171"}}>{Math.round(coin.wins/Math.max(coin.total,1)*100)}%</span>
+
                       <span style={{fontWeight:700,color:(coin.net||0)>=0?"#34d399":"#f87171"}}>
                         {(coin.net||0)>=0?"+":""}{Math.round((coin.net||0)*100)/100}$
                       </span>
