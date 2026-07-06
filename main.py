@@ -2289,10 +2289,18 @@ def debug_sessions():
            ORDER BY closed_at DESC LIMIT 20"""
     ).fetchall()
     conn.close()
+    # Calculer le vrai PnL depuis le portfolio
+    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio").fetchone()
+    total_closed_pnl = conn.execute("SELECT SUM(pnl) as total FROM paper_trades WHERE status='CLOSED'").fetchone()
+    
+    conn.close()
     return {
         "sessions_table": [dict(s) for s in sessions],
         "trades_by_date": [dict(t) for t in trades],
-        "orphan_trades": [dict(t) for t in orphans]
+        "orphan_trades": [dict(t) for t in orphans],
+        "portfolio": dict(portfolio) if portfolio else {},
+        "total_closed_pnl": round(total_closed_pnl["total"] or 0, 2),
+        "balance_vs_pnl_diff": round((portfolio["balance"] - portfolio["initial_balance"]) - (total_closed_pnl["total"] or 0), 2) if portfolio else 0
     }
 
 @app.post("/api/sessions/cleanup")
