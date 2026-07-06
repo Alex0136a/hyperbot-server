@@ -645,8 +645,8 @@ async def scan_markets(user_id: int):
                     avg_gain = sum(gains[-14:])/14
                     avg_loss = sum(losses[-14:])/14
                     rsi_quick = 100-(100/(1+avg_gain/max(avg_loss,0.0001)))
-                    # Appeler l'IA seulement si RSI en zone extrême (<30 ou >70)
-                    if 30 <= rsi_quick <= 70:
+                    # Appeler l'IA seulement si RSI en zone extrême (<35 ou >65)
+                    if 35 <= rsi_quick <= 65:
                         continue  # Zone neutre — pas d'opportunité
             if not candles_raw or len(candles_raw) < 50:
                 continue
