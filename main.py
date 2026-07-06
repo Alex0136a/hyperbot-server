@@ -57,8 +57,10 @@ def add_bot_log(user_id: int, message: str, level: str = "info"):
         pass
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")  # Permet lectures/écritures simultanées
+    conn.execute("PRAGMA busy_timeout=5000") # Attendre 5s si DB occupée
     return conn
 
 def init_db():
@@ -1392,7 +1394,7 @@ async def get_current_price(coin: str, client=None) -> float:
     return 0
 
 async def check_positions_loop(user_id: int):
-    """Boucle rapide 15s - suivi SL/TP/Trailing des positions ouvertes"""
+    """Boucle backup 5s - mise à jour prix si WebSocket déconnecté"""
     try:
         while True:
             conn = get_db()
@@ -1401,11 +1403,16 @@ async def check_positions_loop(user_id: int):
             if not config or not config["is_running"]:
                 break
             try:
-                await update_open_positions(user_id)
+                # Seulement si WebSocket déconnecté — sinon WS gère en temps réel
+                if not ws_connected:
+                    await update_open_positions(user_id)
+                else:
+                    # Juste mettre à jour l'affichage des prix (lecture seule)
+                    await update_prices_display(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                add_bot_log(user_id, f"⚠️ Erreur suivi positions: {e}", "error")
+                pass  # Silencieux en mode backup
             await asyncio.sleep(5)
     except asyncio.CancelledError:
         raise
@@ -1433,6 +1440,30 @@ async def auto_reset_macro_filter(user_id: int):
         conn2.commit()
         conn2.close()
         add_bot_log(user_id, "✅ Filtre macro désactivé automatiquement — fenêtre macro passée", "success")
+
+async def update_prices_display(user_id: int):
+    """Met à jour seulement le prix affiché — pas de fermeture — évite les locks DB"""
+    if not ws_prices:
+        return
+    try:
+        conn = get_db()
+        trades = conn.execute(
+            "SELECT id, coin, action, entry_price, size_usdc, leverage FROM paper_trades WHERE user_id=? AND status='OPEN'",
+            (user_id,)
+        ).fetchall()
+        for trade in trades:
+            trade = dict(trade)
+            cur = ws_prices.get(trade["coin"])
+            if not cur:
+                continue
+            pnl_dir = 1 if trade["action"] == "LONG" else -1
+            pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * pnl_dir
+            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        conn.close()
+    except:
+        pass
 
 async def update_open_positions(user_id: int):
     """Met a jour SL/TP/Trailing sur les positions ouvertes"""
