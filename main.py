@@ -2348,6 +2348,15 @@ def cleanup_sessions(user_id: int = Depends(get_current_user)):
     conn.close()
     return {"message": f"{deleted} sessions invalides supprimées — rechargez Sessions"}
 
+@app.post("/api/ws/reconnect")
+async def reconnect_websocket(user_id: int = Depends(get_current_user)):
+    """Force la reconnexion du WebSocket Hyperliquid"""
+    global ws_connected
+    ws_connected = False  # Force la déconnexion
+    asyncio.create_task(connect_hyperliquid_ws())
+    add_bot_log(user_id, "🔌 Reconnexion WebSocket forcée manuellement", "info")
+    return {"message": "Reconnexion WebSocket lancée"}
+
 @app.get("/api/market-data")
 def get_market_data():
     """Retourne les données de marché pré-calculées depuis le cache"""
