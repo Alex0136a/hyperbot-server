@@ -2274,17 +2274,25 @@ def debug_sessions():
     sessions = conn.execute(
         "SELECT session_date, length(session_date) as len, total_trades, net_pnl FROM trading_sessions ORDER BY session_date DESC"
     ).fetchall()
-    # Aussi compter les trades par session_date
     trades = conn.execute(
         """SELECT COALESCE(session_date, substr(opened_at,1,10), substr(closed_at,1,10)) as day,
            COUNT(*) as total, SUM(pnl) as net
            FROM paper_trades WHERE status='CLOSED'
            GROUP BY day ORDER BY day DESC LIMIT 10"""
     ).fetchall()
+    # Trades sans session_date valide
+    orphans = conn.execute(
+        """SELECT id, coin, action, pnl, session_date, substr(opened_at,1,10) as open_day,
+           substr(closed_at,1,10) as close_day
+           FROM paper_trades WHERE status='CLOSED' 
+           AND (session_date IS NULL OR session_date='')
+           ORDER BY closed_at DESC LIMIT 20"""
+    ).fetchall()
     conn.close()
     return {
         "sessions_table": [dict(s) for s in sessions],
-        "trades_by_date": [dict(t) for t in trades]
+        "trades_by_date": [dict(t) for t in trades],
+        "orphan_trades": [dict(t) for t in orphans]
     }
 
 @app.post("/api/sessions/cleanup")
