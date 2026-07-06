@@ -1711,6 +1711,28 @@ async def update_open_positions(user_id: int):
             # Mettre à jour confiance dynamique
             won = pnl > 0
             update_coin_confidence(user_id, trade["coin"], trade["action"], won)
+            
+            # Mettre à jour les stats de la session du jour en temps réel
+            try:
+                trade_date = trade.get("opened_at", "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
+                session_stats = conn.execute("""
+                    SELECT COUNT(*) as total,
+                        SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                        SUM(pnl) as net
+                    FROM paper_trades 
+                    WHERE user_id=? AND status='CLOSED' 
+                    AND COALESCE(date(opened_at), date(closed_at))=?
+                """, (user_id, trade_date)).fetchone()
+                if session_stats:
+                    conn.execute("""UPDATE trading_sessions 
+                        SET total_trades=?, wins=?, losses=?, net_pnl=?
+                        WHERE user_id=? AND session_date=?""",
+                        (session_stats["total"] or 0, session_stats["wins"] or 0,
+                         session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
+                         user_id, trade_date))
+                    conn.commit()
+            except: pass
         conn.commit()
     conn.close()
 
