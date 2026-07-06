@@ -1160,6 +1160,10 @@ async def startup_cleanup(user_id: int):
         day = row["day"]
         if not day:
             continue
+        # Valider format date YYYY-MM-DD strictement
+        import re as re_mod
+        if not re_mod.match(r'^\d{4}-\d{2}-\d{2}$', str(day)):
+            continue
         existing = conn.execute(
             "SELECT id FROM trading_sessions WHERE user_id=? AND session_date=?",
             (user_id, day)
@@ -1279,6 +1283,23 @@ async def startup_cleanup(user_id: int):
 
     conn.commit()
     conn.close()
+
+    # Toujours recalculer les stats de la session du jour
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    today_stats = conn.execute("""
+        SELECT COUNT(*) as total,
+            SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END) as net
+        FROM paper_trades WHERE user_id=? AND status='CLOSED' AND date(opened_at)=?
+    """, (user_id, today_str)).fetchone()
+    if today_stats and today_stats["total"]:
+        conn.execute("""UPDATE trading_sessions SET total_trades=?, wins=?, losses=?, net_pnl=?
+            WHERE user_id=? AND session_date=?""",
+            (today_stats["total"], today_stats["wins"] or 0,
+             today_stats["losses"] or 0, today_stats["net"] or 0,
+             user_id, today_str))
+        conn.commit()
 
     if cleaned:
         add_bot_log(user_id, f"🧹 Nettoyage démarrage: {len(cleaned)} actions", "info")
