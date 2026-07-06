@@ -1383,6 +1383,11 @@ async def check_session_lifecycle(user_id: int):
             add_bot_log(user_id, 
                 f"✅ Session {yesterday} clôturée | {stats['total']} trades | NET: {round(stats['net'] or 0, 2)}$ | Win rate: {round((stats['wins'] or 0)/max(stats['total'] or 1,1)*100,1)}%",
                 "success")
+            
+            # Reset confiance dynamique à minuit pour nouvelle session
+            conn.execute("DELETE FROM coin_confidence WHERE user_id=?", (user_id,))
+            conn.commit()
+            add_bot_log(user_id, "🔄 Confiance dynamique remise à 62% pour tous les actifs — nouvelle session", "info")
     
     conn.close()
     return session
