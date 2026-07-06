@@ -1171,10 +1171,9 @@ async def startup_cleanup(user_id: int):
                     SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
                     SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
                     SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END) as net
-                FROM paper_trades WHERE user_id=? AND date(opened_at)=?
+                FROM paper_trades WHERE user_id=? AND status='CLOSED' AND date(opened_at)=?
             """, (user_id, day)).fetchone()
             
-            # Vérifier si des trades sont encore ouverts
             open_count = conn.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND date(opened_at)=? AND status='OPEN'",
                 (user_id, day)
@@ -1182,13 +1181,40 @@ async def startup_cleanup(user_id: int):
             
             ended_at = datetime.utcnow().isoformat() if open_count == 0 else None
             conn.execute("""INSERT INTO trading_sessions 
-                (user_id, session_date, started_at, ended_at, closing_phase, total_trades, wins, losses, net_pnl)
-                VALUES (?,?,?,?,1,?,?,?,?)""",
+                (user_id, session_date, started_at, ended_at, closing_phase, total_trades, wins, losses, net_pnl, capital_start)
+                VALUES (?,?,?,?,1,?,?,?,?,1000.0)""",
                 (user_id, day, day+"T00:00:00", ended_at,
                  stats["total"] or 0, stats["wins"] or 0, 
                  stats["losses"] or 0, stats["net"] or 0))
             cleaned.append(f"📅 Session {day} reconstruite ({stats['total']} trades)")
+        else:
+            # Mettre à jour les stats de la session existante si elles sont à 0
+            existing = dict(existing)
+            if existing.get("total_trades", 0) == 0:
+                stats = conn.execute("""
+                    SELECT COUNT(*) as total,
+                        SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                        SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END) as net
+                    FROM paper_trades WHERE user_id=? AND status='CLOSED' AND date(opened_at)=?
+                """, (user_id, day)).fetchone()
+                if stats and stats["total"]:
+                    conn.execute("""UPDATE trading_sessions SET 
+                        total_trades=?, wins=?, losses=?, net_pnl=?
+                        WHERE user_id=? AND session_date=?""",
+                        (stats["total"] or 0, stats["wins"] or 0,
+                         stats["losses"] or 0, stats["net"] or 0,
+                         user_id, day))
+                    cleaned.append(f"🔄 Session {day} mise à jour ({stats['total']} trades)")
     
+    # 1b. Nettoyer les sessions avec dates invalides (ex: 2026-07-060)
+    conn.execute("""DELETE FROM trading_sessions 
+        WHERE user_id=? AND (
+            length(session_date) != 10 
+            OR session_date NOT LIKE '____-__-__'
+        )""", (user_id,))
+    conn.commit()
+
     # 2. Supprimer les signaux en double (garder le plus récent par coin+action+jour)
     result = conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
