@@ -2269,14 +2269,23 @@ def reset_all(user_id: int = Depends(get_current_user)):
 
 # ── LOGS BOT ─────────────────────────────────────────────────
 @app.get("/api/sessions/debug")
-def debug_sessions(user_id: int = Depends(get_current_user)):
+def debug_sessions():
     conn = get_db()
     sessions = conn.execute(
-        "SELECT session_date, length(session_date) as len, total_trades FROM trading_sessions WHERE user_id=? ORDER BY session_date DESC",
-        (user_id,)
+        "SELECT session_date, length(session_date) as len, total_trades, net_pnl FROM trading_sessions ORDER BY session_date DESC"
+    ).fetchall()
+    # Aussi compter les trades par session_date
+    trades = conn.execute(
+        """SELECT COALESCE(session_date, substr(opened_at,1,10), substr(closed_at,1,10)) as day,
+           COUNT(*) as total, SUM(pnl) as net
+           FROM paper_trades WHERE status='CLOSED'
+           GROUP BY day ORDER BY day DESC LIMIT 10"""
     ).fetchall()
     conn.close()
-    return {"sessions": [dict(s) for s in sessions]}
+    return {
+        "sessions_table": [dict(s) for s in sessions],
+        "trades_by_date": [dict(t) for t in trades]
+    }
 
 @app.post("/api/sessions/cleanup")
 def cleanup_sessions(user_id: int = Depends(get_current_user)):
