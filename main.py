@@ -2274,9 +2274,23 @@ def cleanup_sessions(user_id: int = Depends(get_current_user)):
     conn = get_db()
     # Supprimer sessions avec dates invalides
     conn.execute("""DELETE FROM trading_sessions 
-        WHERE user_id=? AND (length(session_date) != 10 
-        OR session_date NOT LIKE '____-__-__')""", (user_id,))
+        WHERE user_id=? AND (
+            length(session_date) != 10 
+            OR session_date NOT LIKE '____-__-__'
+            OR CAST(substr(session_date,9,2) AS INTEGER) > 31
+            OR CAST(substr(session_date,6,2) AS INTEGER) > 12
+        )""", (user_id,))
     deleted = conn.execute("SELECT changes()").fetchone()[0]
+    # Aussi forcer correction des session_date dans les trades
+    conn.execute("""UPDATE paper_trades 
+        SET session_date = CASE
+            WHEN opened_at LIKE '____-__-__%' THEN substr(opened_at, 1, 10)
+            WHEN closed_at LIKE '____-__-__%' THEN substr(closed_at, 1, 10)
+            ELSE strftime('%Y-%m-%d', 'now')
+        END
+        WHERE user_id=? AND (session_date IS NULL OR length(session_date) != 10 
+            OR CAST(substr(session_date,9,2) AS INTEGER) > 31)""", (user_id,))
+    conn.commit()
     # Corriger session_date dans les trades
     conn.execute("""UPDATE paper_trades 
         SET session_date = CASE
