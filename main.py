@@ -2289,9 +2289,12 @@ def debug_sessions():
            ORDER BY closed_at DESC LIMIT 20"""
     ).fetchall()
     conn.close()
-    portfolio = conn.execute("SELECT balance, initial_balance FROM paper_portfolio LIMIT 1").fetchone()
-    total_pnl = conn.execute("SELECT SUM(pnl) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
     conn.close()
+    # Nouvelle connexion pour les stats portfolio
+    conn2 = get_db()
+    portfolio = conn2.execute("SELECT balance, initial_balance FROM paper_portfolio LIMIT 1").fetchone()
+    total_pnl = conn2.execute("SELECT SUM(pnl) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
+    conn2.close()
     
     bal = portfolio["balance"] if portfolio else 0
     ini = portfolio["initial_balance"] if portfolio else 1000
