@@ -184,6 +184,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE users ADD COLUMN sendgrid_key TEXT DEFAULT ''")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN alert_email TEXT DEFAULT ''")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE users ADD COLUMN hl_wallet TEXT DEFAULT ''")
         conn.commit()
     except: pass
@@ -205,6 +213,8 @@ def init_db():
             finnhub_key TEXT DEFAULT '',
             hl_api_key TEXT DEFAULT '',
             hl_wallet TEXT DEFAULT '',
+            sendgrid_key TEXT DEFAULT '',
+            alert_email TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -1251,6 +1261,55 @@ async def startup_cleanup(user_id: int):
     else:
         add_bot_log(user_id, "✅ Nettoyage démarrage: rien à nettoyer", "info")
 
+async def send_alert_email(user_id: int, subject: str, body: str):
+    """Envoie un email d'alerte via SendGrid"""
+    try:
+        conn = get_db()
+        user = conn.execute(
+            "SELECT email, sendgrid_key, alert_email FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        conn.close()
+        
+        if not user or not user["sendgrid_key"]:
+            return
+        
+        to_email = user["alert_email"] or user["email"]
+        sg_key = user["sendgrid_key"]
+        
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {sg_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "personalizations": [{"to": [{"email": to_email}]}],
+                    "from": {"email": "hyperbot@noreply.com", "name": "HyperBot AI"},
+                    "subject": f"🤖 HyperBot Alert: {subject}",
+                    "content": [{"type": "text/plain", "value": body}]
+                },
+                timeout=10
+            )
+            if r.status_code in (200, 202):
+                print(f"📧 Email envoyé à {to_email}: {subject}")
+            else:
+                print(f"📧 Erreur email: {r.status_code}")
+    except Exception as e:
+        print(f"📧 Erreur SendGrid: {e}")
+
+# Compteur d'alertes pour éviter le spam
+last_alerts = {}
+
+async def send_alert_if_needed(user_id: int, alert_key: str, subject: str, body: str, cooldown_minutes: int = 30):
+    """Envoie alerte seulement si pas envoyée récemment (anti-spam)"""
+    now = datetime.utcnow()
+    last = last_alerts.get(f"{user_id}_{alert_key}")
+    if last and (now - last).total_seconds() < cooldown_minutes * 60:
+        return  # Déjà alerté récemment
+    last_alerts[f"{user_id}_{alert_key}"] = now
+    await send_alert_email(user_id, subject, body)
+
 async def check_session_lifecycle(user_id: int):
     """Gère le cycle de vie des sessions de trading (minuit UTC)"""
     conn = get_db()
@@ -1385,6 +1444,19 @@ async def connect_hyperliquid_ws():
         except Exception as e:
             ws_connected = False
             print(f"🔌 WebSocket déconnecté: {e} — reconnexion dans 5s")
+            # Alerter tous les utilisateurs actifs
+            try:
+                conn = get_db()
+                active_users = conn.execute("SELECT user_id FROM bot_config WHERE is_running=1").fetchall()
+                conn.close()
+                for row in active_users:
+                    await send_alert_if_needed(
+                        row["user_id"], "ws_disconnected",
+                        "WebSocket Déconnecté",
+                        f"Le WebSocket Hyperliquid s'est déconnecté à {datetime.utcnow().strftime('%H:%M:%S')} UTC.\nReconnexion automatique dans 5 secondes.\nSi le problème persiste, vérifiez votre connexion Railway.",
+                        cooldown_minutes=30
+                    )
+            except: pass
             await asyncio.sleep(5)
 
 async def get_current_price(coin: str, client=None) -> float:
@@ -1696,7 +1768,7 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
 @app.get("/api/config")
 def get_config(user_id: int = Depends(get_current_user)):
     conn = get_db()
-    user = conn.execute("SELECT email, wallet, api_key, finnhub_key, hl_api_key, hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+    user = conn.execute("SELECT email, wallet, api_key, finnhub_key, hl_api_key, hl_wallet, sendgrid_key, alert_email FROM users WHERE id=?", (user_id,)).fetchone()
     config = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return {
@@ -1707,6 +1779,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "finnhub_key_preview": ("****" + user["finnhub_key"][-4:]) if user["finnhub_key"] else "",
         "has_hl_api_key": bool(user["hl_api_key"]) if "hl_api_key" in user.keys() else False,
         "hl_wallet": user["hl_wallet"] if "hl_wallet" in user.keys() else "",
+        "has_sendgrid_key": bool(user["sendgrid_key"]) if "sendgrid_key" in user.keys() else False,
+        "alert_email": user["alert_email"] if "alert_email" in user.keys() else "",
+        "ws_connected": ws_connected,
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
@@ -1778,6 +1853,21 @@ async def start_bot(background_tasks: BackgroundTasks, user_id: int = Depends(ge
     asyncio.create_task(startup_cleanup(user_id))
     add_bot_log(user_id, "▶️ Bot démarré — Scan IA: 3min | Suivi positions: 5s | WS: temps réel", "success")
     return {"message": "Bot démarré"}
+
+@app.put("/api/config/sendgrid")
+async def save_sendgrid_config(req: dict, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    if req.get("sendgrid_key"):
+        conn.execute("UPDATE users SET sendgrid_key=? WHERE id=?", (req["sendgrid_key"].strip(), user_id))
+    if req.get("alert_email"):
+        conn.execute("UPDATE users SET alert_email=? WHERE id=?", (req["alert_email"].strip(), user_id))
+    conn.commit()
+    conn.close()
+    # Test email
+    await send_alert_email(user_id, "Configuration OK", 
+        "HyperBot AI est configuré pour vous envoyer des alertes.\nVous recevrez des notifications en cas de problème critique.")
+    add_bot_log(user_id, "📧 Configuration SendGrid sauvegardée — email de test envoyé", "success")
+    return {"message": "Configuration SendGrid sauvegardée"}
 
 @app.put("/api/config/hyperliquid")
 async def save_hl_config(req: dict, user_id: int = Depends(get_current_user)):
