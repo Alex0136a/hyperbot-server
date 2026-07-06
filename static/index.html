@@ -1256,9 +1256,11 @@ Confirmer ?`
                   <div style={{fontSize:14,fontWeight:700,color:"#f87171"}}>{s.losses}</div>
                   <div style={{fontSize:9,color:"#f87171"}}>PERTES</div>
                 </div>
-                <div style={{textAlign:"center",background:"#0a0e1a",borderRadius:6,padding:6}}>
-                  <div style={{fontSize:14,fontWeight:700,color:"#60a5fa"}}>{Math.round(s.wins/Math.max(s.total_trades,1)*100)}%</div>
-                  <div style={{fontSize:9,color:"#475569"}}>WIN RATE</div>
+                <div style={{textAlign:"center",background:(s.net_pnl||0)>=0?"#052e16":"#2d0a0a",borderRadius:6,padding:6}}>
+                  <div style={{fontSize:14,fontWeight:700,color:(s.net_pnl||0)>=0?"#34d399":"#f87171"}}>
+                    {Math.round((s.net_pnl||0)/Math.max(s.capital_start||1000,1)*10000)/100}%
+                  </div>
+                  <div style={{fontSize:9,color:"#475569"}}>GAIN/CAP</div>
                 </div>
               </div>
 
