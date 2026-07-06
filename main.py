@@ -131,6 +131,10 @@ def init_db():
         conn.execute("ALTER TABLE paper_trades ADD COLUMN session_date TEXT")
         conn.commit()
     except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN tp1_pnl REAL DEFAULT 0")
+        conn.commit()
+    except: pass
     # Ne pas forcer les coins — conserver le dernier état connu
     try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN ai_continuous INTEGER DEFAULT 0")
@@ -884,15 +888,12 @@ async def scan_markets(user_id: int):
             if trade["action"] == "LONG":
                 # TP1 pas encore atteint
                 if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                    # TP1 atteint : fermer 50%, SL remonte a breakeven, activer trailing
-                    pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                                        # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
                     conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                        highest_price=?, current_price=? WHERE id=?""",
-                        (trade["entry_price"], new_highest, cur, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
+                        lowest_price=?, current_price=? WHERE id=?""",
+                        (trade["entry_price"], new_lowest, cur, trade["id"]))
                     conn.commit()
+                    add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
                     continue
                 # Trailing SL actif apres TP1
                 if tp1_hit:
@@ -983,6 +984,7 @@ async def scan_markets(user_id: int):
                     )
 
             if close_reason:
+                # PnL final = ce que le trade a généré en totalité
                 conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                     closed_at=?, close_reason=? WHERE id=?""",
                     (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
@@ -2293,7 +2295,7 @@ def debug_sessions():
     # Nouvelle connexion pour les stats portfolio
     conn2 = get_db()
     portfolio = conn2.execute("SELECT balance, initial_balance FROM paper_portfolio LIMIT 1").fetchone()
-    total_pnl = conn2.execute("SELECT SUM(pnl) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
+    total_pnl = conn2.execute("SELECT SUM(pnl + COALESCE(tp1_pnl,0)) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
     conn2.close()
     
     bal = portfolio["balance"] if portfolio else 0
@@ -2415,7 +2417,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
             SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gains,
             SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
-            SUM(pnl) as net
+            SUM(pnl + COALESCE(tp1_pnl,0)) as net
         FROM paper_trades
         WHERE user_id=? AND status='CLOSED'
     """, (user_id,)).fetchone()
