@@ -1356,7 +1356,7 @@ async def send_alert_email(user_id: int, subject: str, body: str):
                 },
                 json={
                     "personalizations": [{"to": [{"email": to_email}]}],
-                    "from": {"email": "hyperbot@noreply.com", "name": "HyperBot AI"},
+                    "from": {"email": "smeesxm@wanadoo.fr", "name": "HyperBot AI"},
                     "subject": f"🤖 HyperBot Alert: {subject}",
                     "content": [{"type": "text/plain", "value": body}]
                 },
