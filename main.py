@@ -722,6 +722,12 @@ async def scan_markets(user_id: int):
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
             has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5
 
+            # BTC/ETH : ces deux actifs tendent en continu — un pullback en pleine tendance
+            # (RSI modéré, ~40-60) mérite quand même une analyse IA si la structure EMA est claire
+            if coin in ("BTC", "ETH") and e20 and e50 and e200:
+                if (e20[-1] > e50[-1] > e200[-1]) or (e20[-1] < e50[-1] < e200[-1]):
+                    has_signal = True
+
             if not has_signal or not api_key:
                 continue
 
@@ -785,6 +791,21 @@ async def scan_markets(user_id: int):
 
             rsi_now = tech.get("rsi") or 50
             action = ai.get("action")
+
+            # === RÈGLE RENFORCÉE BTC/ETH — ces deux actifs suivent des tendances
+            # persistantes plutôt que des retournements fréquents (contrairement aux alts).
+            # On bloque tout trade à contre-tendance de leur PROPRE structure EMA,
+            # même si le filtre global BTC ±2%/8h considère la zone "neutre".
+            if coin in ("BTC", "ETH") and e20 and e50 and e200:
+                own_ema_align = "BULL" if e20[-1] > e50[-1] > e200[-1] else "BEAR" if e20[-1] < e50[-1] < e200[-1] else "MIXED"
+                if own_ema_align == "BULL" and action == "SHORT":
+                    add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — structure EMA haussière (20>50>200)", "warning")
+                    continue
+                if own_ema_align == "BEAR" and action == "LONG":
+                    add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — structure EMA baissière (20<50<200)", "warning")
+                    continue
+                if own_ema_align != "MIXED":
+                    add_bot_log(user_id, f"📈 {coin}: Structure EMA {own_ema_align} confirmée — trade dans le sens de tendance", "success")
 
             # === MODE TENDANCE HAUSSIERE (BTC +2%) ===
             if btc_trend == "bullish" and coin != "PAXG":
