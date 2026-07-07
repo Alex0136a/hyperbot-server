@@ -180,6 +180,17 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS ai_usage (
+            user_id INTEGER,
+            date TEXT,
+            calls INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_usd REAL DEFAULT 0.5")
         conn.commit()
     except: pass
@@ -469,6 +480,27 @@ def cache_market_data(coin: str, tech: dict, price: float):
         "updated_at": dt.utcnow().strftime("%H:%M:%S")
     }
 
+# Tarifs Claude Sonnet 4.6 (Anthropic API) — $ par million de tokens
+AI_PRICE_INPUT_PER_M = 3.0
+AI_PRICE_OUTPUT_PER_M = 15.0
+
+def record_ai_usage(user_id: int, input_tokens: int, output_tokens: int):
+    """Enregistre l'usage réel de l'API IA (tokens retournés par Anthropic) pour suivi de coût"""
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        conn = get_db()
+        conn.execute("""INSERT INTO ai_usage (user_id, date, calls, input_tokens, output_tokens)
+            VALUES (?,?,1,?,?)
+            ON CONFLICT(user_id, date) DO UPDATE SET
+                calls = calls + 1,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens""",
+            (user_id, today, input_tokens or 0, output_tokens or 0))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Erreur record_ai_usage: {e}")
+
 def get_compact_prompt(coin: str, tech: dict, price: float) -> str:
     """Génère un prompt compact depuis le cache — moins de tokens"""
     d = market_data_cache.get(coin, {})
@@ -491,7 +523,7 @@ DATA: price={d['price']} rsi={d['rsi']} macd={'BULL' if d['macd_bull'] else 'BEA
 RULES: RSI<25=LONG RSI>75=SHORT RSI25-45=LONG_BIAS RSI55-75=SHORT_BIAS min_RR=2 leverage=2-5 size=5-15%
 Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 phrases FR","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
 
-async def analyze_with_ai(client, coin, tech, ob, price, api_key):
+async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
     # Cacher les données et utiliser prompt compact — 60-70% moins de tokens
     cache_market_data(coin, tech, price)
     prompt = get_compact_prompt(coin, tech, price)
@@ -514,6 +546,8 @@ async def analyze_with_ai(client, coin, tech, ob, price, api_key):
         if "error" in data:
             print(f"Anthropic API erreur: {data['error']}")
             return None
+        usage = data.get("usage", {})
+        record_ai_usage(user_id, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
         text = "".join(b.get("text","") for b in data.get("content",[]))
         clean = text.replace("```json","").replace("```","").strip()
         return json.loads(clean)
@@ -594,12 +628,24 @@ async def scan_markets(user_id: int):
         return
 
     async with httpx.AsyncClient() as client:
-        # Fetch prices
-        prices = await fetch_all_metas(client)
+        # Liste complète des actifs disponibles (30) — scannés dans tous les cas
+        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
 
-        # Update prices en DB uniquement pour les coins actifs
+        # Prix : WebSocket temps réel en priorité (déjà en mémoire, gratuit), REST en fallback
+        if ws_connected and ws_prices:
+            prices = dict(ws_prices)
+            missing = [c for c in all_available_coins if c not in prices]
+            if missing:
+                rest_prices = await fetch_all_metas(client)
+                for c in missing:
+                    if c in rest_prices:
+                        prices[c] = rest_prices[c]
+        else:
+            prices = await fetch_all_metas(client)
+
+        # Update prices en DB pour tous les actifs scannés (pas seulement les 7 "actifs")
         conn = get_db()
-        for coin in active_coins:
+        for coin in all_available_coins:
             if coin in prices:
                 conn.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
                             (coin, prices[coin], datetime.utcnow().isoformat()))
@@ -623,12 +669,11 @@ async def scan_markets(user_id: int):
             else:
                 add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
 
-        # Analyze each coin
-        # Coins opportunistes (75%+) = tous les 30 coins disponibles
-        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
+        # Analyze each coin — tous les actifs sont traités à égalité (le pré-filtre technique
+        # décide seul qui mérite un appel IA, "active_coins" ne sert plus qu'à l'ordre de scan)
         opportunist_coins = [c for c in all_available_coins if c not in active_coins]
         
-        # Scanner d'abord les coins actifs, puis les opportunistes
+        # Scanner d'abord les coins actifs (priorité d'affichage), puis les autres
         coins_to_scan = active_coins + opportunist_coins
 
         for coin in coins_to_scan:
@@ -639,19 +684,6 @@ async def scan_markets(user_id: int):
             price = prices[coin]
             candles_raw = await fetch_candles(client, coin)
             
-            # Pré-filtre RSI pour les coins opportunistes — économise les crédits IA
-            if is_opportunist and candles_raw:
-                # candles_raw est une liste de dicts {h, l, c, o, v}
-                closes = [float(cd["c"]) for cd in candles_raw[-15:] if "c" in cd]
-                if len(closes) >= 14:
-                    gains = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
-                    losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
-                    avg_gain = sum(gains[-14:])/14
-                    avg_loss = sum(losses[-14:])/14
-                    rsi_quick = 100-(100/(1+avg_gain/max(avg_loss,0.0001)))
-                    # Appeler l'IA seulement si RSI en zone extrême (<35 ou >65)
-                    if 35 <= rsi_quick <= 65:
-                        continue  # Zone neutre — pas d'opportunité
             if not candles_raw or len(candles_raw) < 50:
                 continue
 
@@ -686,8 +718,9 @@ async def scan_markets(user_id: int):
                 "btc_change": btc_change,
             }
 
-            # Pre-filter
-            has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5 or True
+            # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
+            # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
+            has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5
 
             if not has_signal or not api_key:
                 continue
@@ -732,7 +765,7 @@ async def scan_markets(user_id: int):
             # Skip les coins opportunistes si confiance pas encore connue
             # (on les analyse quand même mais on filtre après)
 
-            ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
+            ai = await analyze_with_ai(client, user_id, coin, tech, None, price, api_key)
             if not ai:
                 add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
                 continue
@@ -744,15 +777,11 @@ async def scan_markets(user_id: int):
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
             add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
-            # Pour les coins opportunistes, seuil minimum 75%
-            opportunist_threshold = 75
-            if is_opportunist:
-                if action_ia == "WAIT" or confidence_ia < opportunist_threshold:
-                    continue  # Skip silencieux pour les opportunistes
-                add_bot_log(user_id, f"🎯 {coin}: Trade opportuniste ({confidence_ia}%) hors sélection !", "success")
-            elif action_ia == "WAIT" or confidence_ia < required_conf:
+            if action_ia == "WAIT" or confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
+            if is_opportunist:
+                add_bot_log(user_id, f"🎯 {coin}: Trade hors sélection ({confidence_ia}%) — actif ouvert dynamiquement !", "success")
 
             rsi_now = tech.get("rsi") or 50
             action = ai.get("action")
@@ -2110,6 +2139,35 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
+
+@app.get("/api/stats/ai-usage")
+def get_ai_usage(user_id: int = Depends(get_current_user)):
+    """Suivi du coût réel des appels IA — aujourd'hui et cumul total"""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = get_db()
+    today_row = conn.execute(
+        "SELECT calls, input_tokens, output_tokens FROM ai_usage WHERE user_id=? AND date=?",
+        (user_id, today)
+    ).fetchone()
+    total_row = conn.execute(
+        "SELECT SUM(calls) as calls, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens FROM ai_usage WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+
+    def to_cost(row):
+        if not row or not row["calls"]:
+            return {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        cost = (row["input_tokens"] or 0) / 1_000_000 * AI_PRICE_INPUT_PER_M + \
+               (row["output_tokens"] or 0) / 1_000_000 * AI_PRICE_OUTPUT_PER_M
+        return {
+            "calls": row["calls"] or 0,
+            "input_tokens": row["input_tokens"] or 0,
+            "output_tokens": row["output_tokens"] or 0,
+            "cost_usd": round(cost, 4)
+        }
+
+    return {"today": to_cost(today_row), "total": to_cost(total_row)}
 
 # ── PAPER TRADING ───────────────────────────────────────────
 class PaperTradeRequest(BaseModel):
