@@ -290,6 +290,7 @@ function App() {
   const [signals, setSignals] = useState([]);
   const [prices, setPrices] = useState({});
   const [stats, setStats] = useState({});
+  const [aiUsage, setAiUsage] = useState({today:{calls:0,cost_usd:0}, total:{calls:0,cost_usd:0}});
   const [positions, setPositions] = useState([]);
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
@@ -343,13 +344,14 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
         apiCall("/api/bot/logs","GET",null,token),
+        apiCall("/api/stats/ai-usage","GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -364,6 +366,7 @@ function App() {
       setPrices(prc?.prices||{});
       setStats(st);
       setPositions(pos?.positions||[]);
+      if(aiUse) setAiUsage(aiUse);
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
@@ -618,8 +621,10 @@ Confirmer ?`
                 {l:"Marchés actifs",v:`${activeCoins.length}/${ALL_COINS.length}`},
                 {l:"Clé API",v:config.has_api_key?"✅ Définie":"❌ Manquante"},
                 {l:"Wallet",v:config.wallet?`${config.wallet.slice(0,8)}...`:"Non défini"},
+                {l:"🤖 Appels IA (aujourd'hui)",v:`${aiUsage.today?.calls||0} appels — $${(aiUsage.today?.cost_usd||0).toFixed(3)}`},
+                {l:"🤖 Appels IA (total)",v:`${aiUsage.total?.calls||0} appels — $${(aiUsage.total?.cost_usd||0).toFixed(2)}`},
               ].map((x,i)=>(
-                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:i<5?"1px solid #0a0e1a":"none"}}>
+                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:i<7?"1px solid #0a0e1a":"none"}}>
                   <span style={{color:"#475569",fontSize:10}}>{x.l}</span>
                   <span style={{color:"#94a3b8",fontSize:10}}>{x.v}</span>
                 </div>
