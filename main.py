@@ -1381,6 +1381,19 @@ async def send_alert_if_needed(user_id: int, alert_key: str, subject: str, body:
     last_alerts[f"{user_id}_{alert_key}"] = now
     await send_alert_email(user_id, subject, body)
 
+async def notify_daily_summary(user_id: int, session_date: str, total: int, wins: int, losses: int, net_pnl: float):
+    """Envoie le résumé quotidien par email à la clôture de session (minuit UTC)"""
+    win_rate = round((wins or 0) / max(total or 1, 1) * 100, 1)
+    emoji = "📈" if (net_pnl or 0) >= 0 else "📉"
+    subject = f"{emoji} Résumé du {session_date} — NET: {round(net_pnl or 0, 2)}$"
+    body = (
+        f"Résumé de la session du {session_date}\n"
+        f"Trades: {total or 0} (Gagnants: {wins or 0} / Perdants: {losses or 0})\n"
+        f"Win rate: {win_rate}%\n"
+        f"NET PnL: {round(net_pnl or 0, 2)} USDC"
+    )
+    await send_alert_email(user_id, subject, body)
+
 async def check_session_lifecycle(user_id: int):
     """Gère le cycle de vie des sessions de trading (minuit UTC)"""
     conn = get_db()
@@ -1454,6 +1467,7 @@ async def check_session_lifecycle(user_id: int):
             add_bot_log(user_id, 
                 f"✅ Session {yesterday} clôturée | {stats['total']} trades | NET: {round(stats['net'] or 0, 2)}$ | Win rate: {round((stats['wins'] or 0)/max(stats['total'] or 1,1)*100,1)}%",
                 "success")
+            await notify_daily_summary(user_id, yesterday, stats["total"], stats["wins"], stats["losses"], stats["net"])
             
             # Reset confiance dynamique à minuit pour nouvelle session
             conn.execute("DELETE FROM coin_confidence WHERE user_id=?", (user_id,))
