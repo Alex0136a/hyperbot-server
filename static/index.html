@@ -640,11 +640,20 @@ Confirmer ?`
                 {l:"🤖 Appels IA (aujourd'hui)",v:`${aiUsage.today?.calls||0} appels — $${(aiUsage.today?.cost_usd||0).toFixed(3)}`},
                 {l:"🤖 Appels IA (total)",v:`${aiUsage.total?.calls||0} appels — $${(aiUsage.total?.cost_usd||0).toFixed(2)}`},
               ].map((x,i)=>(
-                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:i<7?"1px solid #0a0e1a":"none"}}>
+                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #0a0e1a"}}>
                   <span style={{color:"#475569",fontSize:10}}>{x.l}</span>
                   <span style={{color:"#94a3b8",fontSize:10}}>{x.v}</span>
                 </div>
               ))}
+              {config.pause_until && new Date(config.pause_until+"Z") > new Date() && (
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0"}}>
+                  <span style={{color:"#f87171",fontSize:10}}>⏸️ Pause auto (série de pertes)</span>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{color:"#f87171",fontSize:10}}>jusqu'à {new Date(config.pause_until+"Z").toLocaleTimeString("fr-FR")}</span>
+                    <button onClick={()=>apiCall("/api/config","PUT",{resume_now:true},token).then(loadData)} style={{background:"#052e16",border:"1px solid #34d399",borderRadius:4,padding:"2px 8px",color:"#34d399",fontSize:9,fontWeight:700,cursor:"pointer"}}>Reprendre</button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1080,6 +1089,23 @@ Confirmer ?`
                 </div>
               </div>
             )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
+              <div>
+                <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto sur série de pertes</div>
+                <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes d'affilée déclenchant la pause + durée de la pause</div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input type="number" min="2" max="10" value={config?.loss_streak_size||3}
+                  onChange={e=>apiCall("/api/config","PUT",{loss_streak_size:parseInt(e.target.value)||3},token).then(loadData)}
+                  style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
+                <span style={{fontSize:9,color:"#475569"}}>pertes ×</span>
+                <input type="number" min="0.5" max="24" step="0.5" value={config?.pause_hours||2}
+                  onChange={e=>apiCall("/api/config","PUT",{pause_hours:parseFloat(e.target.value)||2},token).then(loadData)}
+                  style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
+                <span style={{fontSize:9,color:"#475569"}}>h de pause</span>
+              </div>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
