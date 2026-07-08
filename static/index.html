@@ -304,6 +304,7 @@ function App() {
   const [stats, setStats] = useState({});
   const [aiUsage, setAiUsage] = useState({today:{calls:0,cost_usd:0}, total:{calls:0,cost_usd:0}});
   const [signalsHistory, setSignalsHistory] = useState([]);
+  const [pausedCoins, setPausedCoins] = useState([]);
   const [positions, setPositions] = useState([]);
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
@@ -357,7 +358,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -366,6 +367,7 @@ function App() {
         apiCall("/api/bot/logs","GET",null,token),
         apiCall("/api/stats/ai-usage","GET",null,token),
         apiCall("/api/signals/history?limit=50","GET",null,token),
+        apiCall("/api/coins/paused","GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -382,6 +384,7 @@ function App() {
       setPositions(pos?.positions||[]);
       if(aiUse) setAiUsage(aiUse);
       setSignalsHistory(sigsHist?.signals||[]);
+      setPausedCoins(pausedRes?.paused||[]);
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
@@ -645,12 +648,27 @@ Confirmer ?`
                   <span style={{color:"#94a3b8",fontSize:10}}>{x.v}</span>
                 </div>
               ))}
-              {config.pause_until && new Date(config.pause_until+"Z") > new Date() && (
+              {config.pause_until && new Date(config.pause_until+"Z") > new Date() ? (
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0"}}>
-                  <span style={{color:"#f87171",fontSize:10}}>⏸️ Pause auto (série de pertes)</span>
+                  <span style={{color:"#f87171",fontSize:10}}>⏸️ Pause générale (manuelle)</span>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
                     <span style={{color:"#f87171",fontSize:10}}>jusqu'à {new Date(config.pause_until+"Z").toLocaleTimeString("fr-FR")}</span>
                     <button onClick={()=>apiCall("/api/config","PUT",{resume_now:true},token).then(loadData)} style={{background:"#052e16",border:"1px solid #34d399",borderRadius:4,padding:"2px 8px",color:"#34d399",fontSize:9,fontWeight:700,cursor:"pointer"}}>Reprendre</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0"}}>
+                  <span style={{color:"#475569",fontSize:10}}>Pause générale du bot</span>
+                  <button onClick={()=>apiCall("/api/config","PUT",{pause_now:true},token).then(loadData)} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:4,padding:"2px 8px",color:"#f87171",fontSize:9,fontWeight:700,cursor:"pointer"}}>Mettre en pause</button>
+                </div>
+              )}
+              {pausedCoins.length>0 && (
+                <div style={{padding:"7px 0"}}>
+                  <div style={{color:"#f87171",fontSize:10,marginBottom:4}}>⏸️ Actifs en pause auto (3 pertes) :</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                    {pausedCoins.map((p,i)=>(
+                      <span key={i} title={`Jusqu'à ${new Date(p.paused_until+"Z").toLocaleTimeString("fr-FR")}`} style={{background:"#2d0a0a",color:"#f87171",padding:"2px 7px",borderRadius:4,fontSize:9,fontWeight:700}}>{p.coin}</span>
+                    ))}
                   </div>
                 </div>
               )}
@@ -1106,8 +1124,8 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
               <div>
-                <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto sur série de pertes</div>
-                <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes d'affilée déclenchant la pause + durée de la pause</div>
+                <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto par actif (paliers 62%→72%→82%→90%)</div>
+                <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes déclenchant la pause + durée de pause. Retour : confiance fixée à 82%.</div>
               </div>
               <div style={{display:"flex",gap:8,alignItems:"center"}}>
                 <input type="number" min="2" max="10" value={config?.loss_streak_size||3}
