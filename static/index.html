@@ -1012,6 +1012,21 @@ Confirmer ?`
                 <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">LIVE</button>
               </div>
             </div>
+
+            {config?.trading_mode==="paper" && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
+                <div>
+                  <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🧠 Moteur de décision (Paper)</div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>
+                    {config?.ai_mode_paper==="rules"?"Règles techniques gratuites (RSI/MACD/EMA) — 0$ de coût IA":"Claude IA — même moteur qu'en mode Live"}
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:2,background:"#0f1629",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+                  <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"ai"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper!=="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper!=="rules"?"#22d3ee":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>IA</button>
+                  <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"rules"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper==="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper==="rules"?"#fbbf24":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>RÈGLES (gratuit)</button>
+                </div>
+              </div>
+            )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
