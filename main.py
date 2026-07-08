@@ -1472,35 +1472,40 @@ async def startup_cleanup(user_id: int):
     conn.commit()
 
     # 2. Supprimer les signaux en double (garder le plus récent par coin+action+jour)
+    # — jamais un signal lié à un trade (ouvert ou fermé), sinon on casse l'historique
     result = conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
             SELECT MAX(id) FROM signals
             WHERE user_id=?
             GROUP BY coin, action, date(created_at)
         ) AND user_id=?
+        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id, user_id))
     dup_count = conn.execute("SELECT changes()").fetchone()[0]
     if dup_count > 0:
         cleaned.append(f"🗑️ {dup_count} signaux en double supprimés")
 
-    # 3. Supprimer les signaux des actifs désactivés
+    # 3. Supprimer les signaux des actifs désactivés — sauf s'ils sont liés à un trade
+    # (ex: PAXG hors sélection mais tradé en opportuniste : son signal doit rester pour l'historique)
     config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     if config:
         import json as json_mod
         active_coins = json_mod.loads(config["active_coins"])
         placeholders = ",".join("?" * len(active_coins))
         result = conn.execute(
-            f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
+            f"""DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})
+                AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""",
             [user_id] + active_coins
         )
         inactive_count = conn.execute("SELECT changes()").fetchone()[0]
         if inactive_count > 0:
             cleaned.append(f"🗑️ {inactive_count} signaux d'actifs désactivés supprimés")
 
-    # 4. Supprimer les signaux de plus de 7 jours
+    # 4. Supprimer les signaux de plus de 7 jours — sauf s'ils sont liés à un trade
     result = conn.execute("""
         DELETE FROM signals WHERE user_id=? 
         AND created_at < datetime('now', '-7 days')
+        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id,))
     old_count = conn.execute("SELECT changes()").fetchone()[0]
     if old_count > 0:
@@ -2903,25 +2908,28 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
     # Recuperer les coins actifs
     config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     active_coins = json.loads(config["active_coins"]) if config else []
-    # Supprimer les signaux des actifs desactives
+    # Supprimer les signaux des actifs desactives — jamais ceux liés à un trade (ex: PAXG opportuniste)
     if active_coins:
         placeholders = ",".join("?" * len(active_coins))
-        conn.execute(f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
+        conn.execute(f"""DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})
+            AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""",
             [user_id] + active_coins)
         inactive_deleted = conn.execute("SELECT changes()").fetchone()[0]
     else:
         inactive_deleted = 0
-    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action
+    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action, jamais un signal tradé
     conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
             SELECT MAX(id) FROM signals
             WHERE user_id=?
             GROUP BY coin, action, date(created_at)
         ) AND user_id=?
+        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id, user_id))
     deleted = conn.execute("SELECT changes()").fetchone()[0]
-    # Supprimer aussi les signaux de plus de 24h
-    conn.execute("DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')", (user_id,))
+    # Supprimer aussi les signaux de plus de 24h — jamais ceux liés à un trade
+    conn.execute("""DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')
+        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""", (user_id,))
     deleted2 = conn.execute("SELECT changes()").fetchone()[0]
     remaining = conn.execute("SELECT COUNT(*) FROM signals WHERE user_id=?", (user_id,)).fetchone()[0]
     conn.commit()
