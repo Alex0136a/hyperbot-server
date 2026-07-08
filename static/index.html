@@ -1138,6 +1138,32 @@ Confirmer ?`
                 <span style={{fontSize:9,color:"#475569"}}>h de pause</span>
               </div>
             </div>
+
+            <div style={{background:"#050810",border:"1px solid #7c3aed",borderRadius:8,padding:14,marginBottom:12}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>⚙️ Réglages avancés (stratégie)</div>
+              <div style={{fontSize:9,color:"#475569",marginBottom:10}}>Ajustez manuellement les leviers techniques du bot.</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                {[
+                  {key:"base_confidence",label:"Confiance de base (%)",def:60,step:1,min:40,max:90},
+                  {key:"conf_step1",label:"Palier après 1 perte (%)",def:72,step:1,min:40,max:95},
+                  {key:"conf_step2",label:"Palier après 2 pertes (%)",def:82,step:1,min:40,max:98},
+                  {key:"conf_step3",label:"Palier après 3 pertes (%)",def:90,step:1,min:40,max:99},
+                  {key:"rsi_oversold",label:"RSI survente (<)",def:35,step:1,min:5,max:45},
+                  {key:"rsi_overbought",label:"RSI surachat (>)",def:65,step:1,min:55,max:95},
+                  {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
+                  {key:"btc_trend_threshold",label:"Seuil tendance BTC (%/8h)",def:2.0,step:0.1,min:0.5,max:10},
+                  {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.5,step:0.1,min:1,max:5},
+                  {key:"trailing_gap_usd",label:"Écart trailing ($)",def:0.5,step:0.05,min:0.05,max:5},
+                ].map(f=>(
+                  <div key={f.key}>
+                    <div style={{fontSize:9,color:"#475569",marginBottom:3}}>{f.label}</div>
+                    <input type="number" min={f.min} max={f.max} step={f.step} defaultValue={config?.[f.key]??f.def}
+                      onBlur={e=>{apiCall("/api/config","PUT",{[f.key]:parseFloat(e.target.value)||f.def},token).then(()=>{loadData();flashSave(f.key);});}}
+                      style={{width:"100%",background:"#0f1629",border:savedField===f.key?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"5px 7px"}}/>
+                  </div>
+                ))}
+              </div>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
