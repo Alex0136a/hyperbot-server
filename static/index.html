@@ -704,12 +704,24 @@ Confirmer ?`
         </div>
       )}
 
-      {/* HISTORIQUE — signaux tradés ET fermés */}
+      {/* HISTORIQUE — signaux tradés ET fermés, groupés par actif (ordre alphabétique) */}
       {tab==="historique" && (
         <div style={{padding:16}}>
           {signalsHistory.filter(s=>s.action!=="WAIT").length===0
             ? <div style={{textAlign:"center",padding:50,color:"#475569"}}>Aucun trade fermé pour l'instant</div>
-            : signalsHistory.filter(s=>s.action!=="WAIT").map(sig=>(
+            : Object.entries(
+                signalsHistory.filter(s=>s.action!=="WAIT").reduce((acc,sig)=>{
+                  (acc[sig.coin] = acc[sig.coin]||[]).push(sig);
+                  return acc;
+                }, {})
+              )
+              .sort(([coinA],[coinB])=>coinA.localeCompare(coinB))
+              .map(([coin,sigs])=>(
+                <div key={coin} style={{marginBottom:20}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8,paddingBottom:6,borderBottom:"1px solid #1e2d4a"}}>
+                    {coin}/USDC <span style={{color:"#475569",fontWeight:400,fontSize:11}}>({sigs.length} trade{sigs.length>1?"s":""})</span>
+                  </div>
+                  {sigs.sort((a,b)=>new Date(b.trade_closed_at)-new Date(a.trade_closed_at)).map(sig=>(
               <div key={sig.id} style={{background:"#0f1629",border:`1px solid ${sig.trade_pnl>=0?"#14532d":"#450a0a"}`,borderRadius:10,padding:14,marginBottom:12}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -736,7 +748,9 @@ Confirmer ?`
                   Ouvert: {new Date(sig.trade_opened_at).toLocaleString("fr-FR")} · Fermé: {sig.trade_closed_at?new Date(sig.trade_closed_at).toLocaleString("fr-FR"):"--"}
                 </div>
               </div>
-            ))
+                  ))}
+                </div>
+              ))
           }
         </div>
       )}
