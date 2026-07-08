@@ -1082,7 +1082,10 @@ async def scan_markets(user_id: int):
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
             add_bot_log(user_id, f"{'📐' if use_rules_engine else '🤖'} {coin}: {'Règles' if use_rules_engine else 'IA'} → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
-            if action_ia == "WAIT" or confidence_ia < required_conf:
+            if action_ia == "WAIT":
+                add_bot_log(user_id, f"⛔ {coin}: aucun signal net (WAIT) — ignoré", "info")
+                continue
+            if confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
             if is_opportunist:
