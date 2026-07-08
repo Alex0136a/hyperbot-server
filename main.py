@@ -653,6 +653,22 @@ async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
 scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
 positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
 
+def cleanup_orphan_signals(user_id: int):
+    """Supprime automatiquement les signaux jamais tradés (orphelins) : signaux générés en
+    mode Live (pas d'auto-exécution), ou refusés faute de solde/slot/position déjà ouverte.
+    Marge de 60 min pour ne jamais supprimer un signal en cours de traitement."""
+    try:
+        conn = get_db()
+        conn.execute("""
+            DELETE FROM signals WHERE user_id=? AND id NOT IN (
+                SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL
+            ) AND created_at < datetime('now', '-60 minutes')
+        """, (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Erreur cleanup_orphan_signals: {e}")
+
 async def scan_markets(user_id: int):
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -664,6 +680,8 @@ async def scan_markets(user_id: int):
 
     active_coins = json.loads(config["active_coins"])
     api_key = user["api_key"]
+
+    cleanup_orphan_signals(user_id)
 
     # Reset auto filtre macro si annonce passée
     await auto_reset_macro_filter(user_id)
@@ -2207,11 +2225,33 @@ def stop_bot(user_id: int = Depends(get_current_user)):
 
 @app.get("/api/signals")
 def get_signals(limit: int = 50, user_id: int = Depends(get_current_user)):
+    """Signaux EN COURS D'EXÉCUTION uniquement — liés à un trade Paper encore OPEN"""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM signals WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-        (user_id, limit)
-    ).fetchall()
+    rows = conn.execute("""
+        SELECT s.*, pt.status as trade_status, pt.pnl as trade_pnl, pt.pnl_pct as trade_pnl_pct,
+               pt.current_price as trade_current_price, pt.opened_at as trade_opened_at
+        FROM signals s
+        JOIN paper_trades pt ON pt.signal_id = s.id
+        WHERE s.user_id=? AND pt.status='OPEN'
+        ORDER BY s.created_at DESC LIMIT ?
+    """, (user_id, limit)).fetchall()
+    conn.close()
+    signals = [dict(r) for r in rows]
+    return {"signals": signals, "total": len(signals)}
+
+@app.get("/api/signals/history")
+def get_signals_history(limit: int = 50, user_id: int = Depends(get_current_user)):
+    """HISTORIQUE — uniquement les signaux qui ont été tradés ET fermés"""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.*, pt.status as trade_status, pt.pnl as trade_pnl, pt.pnl_pct as trade_pnl_pct,
+               pt.close_reason as trade_close_reason, pt.opened_at as trade_opened_at,
+               pt.closed_at as trade_closed_at
+        FROM signals s
+        JOIN paper_trades pt ON pt.signal_id = s.id
+        WHERE s.user_id=? AND pt.status='CLOSED'
+        ORDER BY pt.closed_at DESC LIMIT ?
+    """, (user_id, limit)).fetchall()
     conn.close()
     signals = [dict(r) for r in rows]
     return {"signals": signals, "total": len(signals)}
