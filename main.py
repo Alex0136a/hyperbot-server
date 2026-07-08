@@ -1071,8 +1071,10 @@ async def scan_markets(user_id: int):
             use_rules_engine = (config["trading_mode"] == "paper") and (ai_mode_paper == "rules")
 
             if use_rules_engine:
-                cfg_sl = conn.execute("SELECT max_loss_usd, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                portfolio_sl = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                conn_sl = get_db()
+                cfg_sl = conn_sl.execute("SELECT max_loss_usd, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                portfolio_sl = conn_sl.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                conn_sl.close()
                 _max_loss = cfg_sl["max_loss_usd"] if cfg_sl and cfg_sl["max_loss_usd"] else 0.75
                 _pct = cfg_sl["position_pct"] if cfg_sl and cfg_sl["position_pct"] else 8.0
                 _capital = portfolio_sl["balance"] if portfolio_sl else 1000.0
