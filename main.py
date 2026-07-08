@@ -75,6 +75,18 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN pause_until TEXT")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN loss_streak_size INTEGER DEFAULT 3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN pause_hours REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -276,6 +288,9 @@ def init_db():
             is_running INTEGER DEFAULT 0,
             trading_mode TEXT DEFAULT 'paper',
             ai_mode_paper TEXT DEFAULT 'ai',
+            pause_until TEXT,
+            loss_streak_size INTEGER DEFAULT 3,
+            pause_hours REAL DEFAULT 2.0,
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.1,
@@ -653,6 +668,22 @@ async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
 scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
 positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
 
+def check_losing_streak(user_id: int, streak_size: int = 3) -> bool:
+    """Détecte X pertes consécutives (tous actifs confondus, les plus récentes fermées)"""
+    try:
+        conn = get_db()
+        recent = conn.execute(
+            "SELECT pnl FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT ?",
+            (user_id, streak_size)
+        ).fetchall()
+        conn.close()
+        if len(recent) < streak_size:
+            return False
+        return all((r["pnl"] or 0) < 0 for r in recent)
+    except Exception as e:
+        print(f"⚠️ Erreur check_losing_streak: {e}")
+        return False
+
 def cleanup_orphan_signals(user_id: int):
     """Supprime automatiquement les signaux jamais tradés (orphelins) : signaux générés en
     mode Live (pas d'auto-exécution), ou refusés faute de solde/slot/position déjà ouverte.
@@ -682,6 +713,37 @@ async def scan_markets(user_id: int):
     api_key = user["api_key"]
 
     cleanup_orphan_signals(user_id)
+
+    # === PAUSE AUTO SUR SÉRIE DE PERTES ===
+    pause_until = config["pause_until"] if config and "pause_until" in config.keys() else None
+    if pause_until:
+        try:
+            pu = datetime.fromisoformat(pause_until)
+        except Exception:
+            pu = None
+        if pu and datetime.utcnow() < pu:
+            add_bot_log(user_id, f"⏸️ Pause auto active jusqu'à {pu.strftime('%H:%M')} UTC — série de pertes détectée", "warning")
+            return
+        else:
+            conn_p = get_db()
+            conn_p.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
+            conn_p.commit()
+            conn_p.close()
+            add_bot_log(user_id, "▶️ Pause auto terminée — reprise des scans", "info")
+    elif check_losing_streak(user_id, config["loss_streak_size"] if config and "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3):
+        pause_h = config["pause_hours"] if config and "pause_hours" in config.keys() and config["pause_hours"] else 2.0
+        streak_n = config["loss_streak_size"] if config and "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3
+        resume_at = datetime.utcnow() + timedelta(hours=pause_h)
+        conn_p = get_db()
+        conn_p.execute("UPDATE bot_config SET pause_until=? WHERE user_id=?", (resume_at.isoformat(), user_id))
+        conn_p.commit()
+        conn_p.close()
+        add_bot_log(user_id, f"🔴 {streak_n} pertes consécutives — pause auto jusqu'à {resume_at.strftime('%H:%M')} UTC", "error")
+        await send_alert_email(user_id, "⚠️ Série de pertes détectée — pause automatique",
+            f"{streak_n} trades perdants d'affilée viennent d'être détectés (tous actifs confondus).\n"
+            f"Le bot est mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC pour éviter d'aggraver une mauvaise période.\n"
+            "Vous pouvez le réactiver manuellement plus tôt depuis Paramètres si vous le souhaitez.")
+        return
 
     # Reset auto filtre macro si annonce passée
     await auto_reset_macro_filter(user_id)
@@ -1997,6 +2059,9 @@ class UpdateConfigRequest(BaseModel):
     active_coins: Optional[List[str]] = None
     trading_mode: Optional[str] = None
     ai_mode_paper: Optional[str] = None
+    resume_now: Optional[bool] = None
+    loss_streak_size: Optional[int] = None
+    pause_hours: Optional[float] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
@@ -2065,6 +2130,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
         "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
+        "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
+        "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
+        "pause_hours": config["pause_hours"] if "pause_hours" in config.keys() and config["pause_hours"] else 2.0,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
@@ -2096,6 +2164,13 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
     if req.ai_mode_paper is not None:
         conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
                     (req.ai_mode_paper, user_id))
+    if req.resume_now:
+        conn.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
+        add_bot_log(user_id, "▶️ Pause auto levée manuellement", "info")
+    if req.loss_streak_size is not None:
+        conn.execute("UPDATE bot_config SET loss_streak_size=? WHERE user_id=?", (req.loss_streak_size, user_id))
+    if req.pause_hours is not None:
+        conn.execute("UPDATE bot_config SET pause_hours=? WHERE user_id=?", (req.pause_hours, user_id))
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
