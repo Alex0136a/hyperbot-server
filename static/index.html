@@ -1183,7 +1183,7 @@ Confirmer ?`
                   <div style={{fontSize:13,fontWeight:700,color:config?.trading_mode==="paper"?"#fbbf24":"#34d399"}}>
                     {config?.trading_mode==="paper"?"Mode Paper — Simulation autonome":"Mode Live — Trades reels"}
                   </div>
-                  <div style={{fontSize:10,color:"#475569",marginTop:2}}>
+                  <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>
                     {config?.trading_mode==="paper"?"Le bot execute automatiquement chaque signal avec capital virtuel":"ATTENTION: trades sur votre vrai compte Hyperliquid"}
                   </div>
                 </div>
@@ -1197,7 +1197,7 @@ Confirmer ?`
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
                   <div>
                     <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🧠 Moteur de décision (Paper)</div>
-                    <div style={{fontSize:9,color:"#475569",marginTop:2}}>
+                    <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>
                       {config?.ai_mode_paper==="rules"?"Règles techniques gratuites (RSI/MACD/EMA) — 0$ de coût IA":"Claude IA — même moteur qu'en mode Live"}
                     </div>
                   </div>
@@ -1211,23 +1211,23 @@ Confirmer ?`
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
                 <div>
                   <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto par actif (paliers 62%→72%→82%→90%)</div>
-                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes déclenchant la pause + durée de pause. Retour : confiance fixée à 82%.</div>
+                  <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>Nombre de pertes déclenchant la pause + durée de pause. Retour : confiance fixée à 82%.</div>
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center"}}>
                   <input type="number" min="2" max="10" value={config?.loss_streak_size||3}
                     onChange={e=>apiCall("/api/config","PUT",{loss_streak_size:parseInt(e.target.value)||3},token).then(loadData)}
                     style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
-                  <span style={{fontSize:9,color:"#475569"}}>pertes ×</span>
+                  <span style={{fontSize:9,color:"#94a3b8"}}>pertes ×</span>
                   <input type="number" min="0.5" max="24" step="0.5" value={config?.pause_hours||2}
                     onChange={e=>apiCall("/api/config","PUT",{pause_hours:parseFloat(e.target.value)||2},token).then(loadData)}
                     style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
-                  <span style={{fontSize:9,color:"#475569"}}>h de pause</span>
+                  <span style={{fontSize:9,color:"#94a3b8"}}>h de pause</span>
                 </div>
               </div>
 
               <div style={{background:"#050810",border:"1px solid #7c3aed",borderRadius:8,padding:14,marginBottom:12}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>⚙️ Réglages avancés (stratégie)</div>
-                <div style={{fontSize:9,color:"#475569",marginBottom:10}}>Ajustez manuellement les leviers techniques du bot.</div>
+                <div style={{fontSize:9,color:"#94a3b8",marginBottom:10}}>Ajustez manuellement les leviers techniques du bot.</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                   {[
                     {key:"base_confidence",label:"Confiance de base (%)",def:60,step:1,min:40,max:90},
@@ -1253,7 +1253,7 @@ Confirmer ?`
                     {key:"macro_blackout_after_min",label:"Blackout macro - après (min)",def:60,step:5,min:0,max:1440},
                   ].map(f=>(
                     <div key={f.key}>
-                      <div style={{fontSize:9,color:"#475569",marginBottom:3}}>{f.label}</div>
+                      <div style={{fontSize:9,color:"#94a3b8",marginBottom:3}}>{f.label}</div>
                       <input type="number" min={f.min} max={f.max} step={f.step} defaultValue={config?.[f.key]??f.def}
                         onBlur={e=>{apiCall("/api/config","PUT",{[f.key]:parseFloat(e.target.value)||f.def},token).then(()=>{loadData();flashSave(f.key);});}}
                         style={{width:"100%",background:"#0f1629",border:savedField===f.key?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"5px 7px"}}/>
