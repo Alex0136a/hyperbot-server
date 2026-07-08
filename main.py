@@ -127,6 +127,50 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_period INTEGER DEFAULT 14")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_fast INTEGER DEFAULT 12")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_slow INTEGER DEFAULT 26")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_signal INTEGER DEFAULT 9")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN bb_period INTEGER DEFAULT 20")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN bb_stddev REAL DEFAULT 2")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN atr_period INTEGER DEFAULT 14")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_start INTEGER DEFAULT 21")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_end INTEGER DEFAULT 23")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN macro_blackout_before_min INTEGER DEFAULT 120")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN macro_blackout_after_min INTEGER DEFAULT 60")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -351,6 +395,17 @@ def init_db():
             btc_trend_threshold REAL DEFAULT 2.0,
             trailing_activation_mult REAL DEFAULT 1.5,
             trailing_gap_usd REAL DEFAULT 0.5,
+            rsi_period INTEGER DEFAULT 14,
+            macd_fast INTEGER DEFAULT 12,
+            macd_slow INTEGER DEFAULT 26,
+            macd_signal INTEGER DEFAULT 9,
+            bb_period INTEGER DEFAULT 20,
+            bb_stddev REAL DEFAULT 2,
+            atr_period INTEGER DEFAULT 14,
+            hours_creuses_start INTEGER DEFAULT 21,
+            hours_creuses_end INTEGER DEFAULT 23,
+            macro_blackout_before_min INTEGER DEFAULT 120,
+            macro_blackout_after_min INTEGER DEFAULT 60,
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.1,
@@ -459,14 +514,14 @@ def calc_rsi(prices, period=14):
     if al == 0: return 100
     return 100 - 100/(1 + ag/al)
 
-def calc_macd(prices):
-    e12 = calc_ema(prices, 12)
-    e26 = calc_ema(prices, 26)
+def calc_macd(prices, fast=12, slow=26, signal=9):
+    e12 = calc_ema(prices, fast)
+    e26 = calc_ema(prices, slow)
     if not e12 or not e26:
         return None
     off = len(e12) - len(e26)
     macd_line = [e12[i+off] - v for i, v in enumerate(e26)]
-    sig = calc_ema(macd_line, 9)
+    sig = calc_ema(macd_line, signal)
     if not sig:
         return None
     off_m = len(macd_line) - len(sig)
@@ -809,13 +864,14 @@ async def scan_markets(user_id: int):
     # === CALENDRIER MACRO FINNHUB ===
     finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if finnhub_key and not filter_macro:
+        macro_before_min = config["macro_blackout_before_min"] if config and "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120
         macro_data = await check_macro_calendar(user_id, finnhub_key)
         for event in macro_data.get("events", []):
             hours = event["hours_left"]
             name = event["event"]
             if hours <= 0:
                 add_bot_log(user_id, f"📰 {name} vient d'être publié — volatilité possible", "warning")
-            elif hours <= 2:
+            elif hours*60 <= macro_before_min:
                 # Auto-activer le filtre macro
                 conn_m = get_db()
                 conn_m.execute("UPDATE bot_config SET filter_macro=1 WHERE user_id=?", (user_id,))
@@ -832,7 +888,9 @@ async def scan_markets(user_id: int):
     hour_utc = now_utc.hour
     weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
 
-    if filter_hours and 21 <= hour_utc < 23:
+    hc_start = config["hours_creuses_start"] if config and "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21
+    hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23
+    if filter_hours and hc_start <= hour_utc < hc_end:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
         return
 
@@ -899,6 +957,13 @@ async def scan_markets(user_id: int):
         rsi_os = config["rsi_oversold"] if config and "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35
         rsi_ob = config["rsi_overbought"] if config and "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65
         vol_mult = config["volume_spike_mult"] if config and "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5
+        rsi_period = config["rsi_period"] if config and "rsi_period" in config.keys() and config["rsi_period"] else 14
+        macd_fast = config["macd_fast"] if config and "macd_fast" in config.keys() and config["macd_fast"] else 12
+        macd_slow = config["macd_slow"] if config and "macd_slow" in config.keys() and config["macd_slow"] else 26
+        macd_sig = config["macd_signal"] if config and "macd_signal" in config.keys() and config["macd_signal"] else 9
+        bb_period = config["bb_period"] if config and "bb_period" in config.keys() and config["bb_period"] else 20
+        bb_stddev = config["bb_stddev"] if config and "bb_stddev" in config.keys() and config["bb_stddev"] else 2
+        atr_period = config["atr_period"] if config and "atr_period" in config.keys() and config["atr_period"] else 14
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -921,11 +986,11 @@ async def scan_markets(user_id: int):
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
             e200 = calc_ema(closes, 200)
-            macd = calc_macd(closes)
-            bb = calc_bb(closes)
-            atr = calc_atr(candles)
+            macd = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
+            bb = calc_bb(closes, int(bb_period), bb_stddev)
+            atr = calc_atr(candles, int(atr_period))
             vwap = calc_vwap(candles)
-            rsi = calc_rsi(closes)
+            rsi = calc_rsi(closes, int(rsi_period))
             vol_avg = sum(vols[-20:]) / 20
             vol_cur = vols[-1]
 
@@ -1954,10 +2019,10 @@ async def check_positions_loop(user_id: int):
         raise
 
 async def auto_reset_macro_filter(user_id: int):
-    """Désactive le filtre macro 1h après une annonce"""
+    """Désactive le filtre macro après la fenêtre de blackout réglable (avant/après une annonce)"""
     conn = get_db()
     user = conn.execute("SELECT finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
-    cfg = conn.execute("SELECT filter_macro FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    cfg = conn.execute("SELECT filter_macro, macro_blackout_before_min, macro_blackout_after_min FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     
     if not cfg or not cfg["filter_macro"]:
@@ -1966,10 +2031,12 @@ async def auto_reset_macro_filter(user_id: int):
     if not finnhub_key:
         return
     
+    before_min = cfg["macro_blackout_before_min"] if "macro_blackout_before_min" in cfg.keys() and cfg["macro_blackout_before_min"] else 120
+    after_min = cfg["macro_blackout_after_min"] if "macro_blackout_after_min" in cfg.keys() and cfg["macro_blackout_after_min"] else 60
     macro_data = await check_macro_calendar(user_id, finnhub_key)
     events = macro_data.get("events", [])
-    # Si aucune annonce dans les prochaines 2h, désactiver le filtre
-    critical = [e for e in events if e["hours_left"] <= 2 and e["hours_left"] >= -1]
+    # Si aucune annonce dans la fenêtre de blackout réglable, désactiver le filtre
+    critical = [e for e in events if e["hours_left"]*60 <= before_min and e["hours_left"]*60 >= -after_min]
     if not critical:
         conn2 = get_db()
         conn2.execute("UPDATE bot_config SET filter_macro=0 WHERE user_id=?", (user_id,))
@@ -2215,6 +2282,17 @@ class UpdateConfigRequest(BaseModel):
     btc_trend_threshold: Optional[float] = None
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
+    rsi_period: Optional[int] = None
+    macd_fast: Optional[int] = None
+    macd_slow: Optional[int] = None
+    macd_signal: Optional[int] = None
+    bb_period: Optional[int] = None
+    bb_stddev: Optional[float] = None
+    atr_period: Optional[int] = None
+    hours_creuses_start: Optional[int] = None
+    hours_creuses_end: Optional[int] = None
+    macro_blackout_before_min: Optional[int] = None
+    macro_blackout_after_min: Optional[int] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
@@ -2296,6 +2374,17 @@ def get_config(user_id: int = Depends(get_current_user)):
         "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.5,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.5,
+        "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
+        "macd_fast": config["macd_fast"] if "macd_fast" in config.keys() and config["macd_fast"] else 12,
+        "macd_slow": config["macd_slow"] if "macd_slow" in config.keys() and config["macd_slow"] else 26,
+        "macd_signal": config["macd_signal"] if "macd_signal" in config.keys() and config["macd_signal"] else 9,
+        "bb_period": config["bb_period"] if "bb_period" in config.keys() and config["bb_period"] else 20,
+        "bb_stddev": config["bb_stddev"] if "bb_stddev" in config.keys() and config["bb_stddev"] else 2,
+        "atr_period": config["atr_period"] if "atr_period" in config.keys() and config["atr_period"] else 14,
+        "hours_creuses_start": config["hours_creuses_start"] if "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21,
+        "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23,
+        "macro_blackout_before_min": config["macro_blackout_before_min"] if "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120,
+        "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
@@ -2360,6 +2449,28 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
     if req.trailing_gap_usd is not None:
         conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
+    if req.rsi_period is not None:
+        conn.execute("UPDATE bot_config SET rsi_period=? WHERE user_id=?", (req.rsi_period, user_id))
+    if req.macd_fast is not None:
+        conn.execute("UPDATE bot_config SET macd_fast=? WHERE user_id=?", (req.macd_fast, user_id))
+    if req.macd_slow is not None:
+        conn.execute("UPDATE bot_config SET macd_slow=? WHERE user_id=?", (req.macd_slow, user_id))
+    if req.macd_signal is not None:
+        conn.execute("UPDATE bot_config SET macd_signal=? WHERE user_id=?", (req.macd_signal, user_id))
+    if req.bb_period is not None:
+        conn.execute("UPDATE bot_config SET bb_period=? WHERE user_id=?", (req.bb_period, user_id))
+    if req.bb_stddev is not None:
+        conn.execute("UPDATE bot_config SET bb_stddev=? WHERE user_id=?", (req.bb_stddev, user_id))
+    if req.atr_period is not None:
+        conn.execute("UPDATE bot_config SET atr_period=? WHERE user_id=?", (req.atr_period, user_id))
+    if req.hours_creuses_start is not None:
+        conn.execute("UPDATE bot_config SET hours_creuses_start=? WHERE user_id=?", (req.hours_creuses_start, user_id))
+    if req.hours_creuses_end is not None:
+        conn.execute("UPDATE bot_config SET hours_creuses_end=? WHERE user_id=?", (req.hours_creuses_end, user_id))
+    if req.macro_blackout_before_min is not None:
+        conn.execute("UPDATE bot_config SET macro_blackout_before_min=? WHERE user_id=?", (req.macro_blackout_before_min, user_id))
+    if req.macro_blackout_after_min is not None:
+        conn.execute("UPDATE bot_config SET macro_blackout_after_min=? WHERE user_id=?", (req.macro_blackout_after_min, user_id))
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
