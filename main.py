@@ -71,6 +71,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN ai_mode_paper TEXT DEFAULT 'ai'")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -271,6 +275,7 @@ def init_db():
             active_coins TEXT DEFAULT '["HYPE","SOL","INJ"]',
             is_running INTEGER DEFAULT 0,
             trading_mode TEXT DEFAULT 'paper',
+            ai_mode_paper TEXT DEFAULT 'ai',
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.1,
@@ -523,6 +528,92 @@ DATA: price={d['price']} rsi={d['rsi']} macd={'BULL' if d['macd_bull'] else 'BEA
 RULES: RSI<25=LONG RSI>75=SHORT RSI25-45=LONG_BIAS RSI55-75=SHORT_BIAS min_RR=2 leverage=2-5 size=5-15%
 Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 phrases FR","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
 
+def analyze_with_rules(coin: str, tech: dict, price: float) -> dict:
+    """Décision 100% gratuite basée sur des règles techniques fixes (RSI/MACD/EMA/Volume) —
+    utilisée en mode Paper quand l'utilisateur ne veut pas payer d'appels IA sur des trades simulés.
+    Reproduit la même heuristique que celle suggérée à l'IA (RSI<25=LONG, RSI>75=SHORT, etc.)
+    mais de façon 100% mécanique et gratuite. SL/TP calculés depuis l'ATR réel (pas inventés)."""
+    rsi = tech.get("rsi") or 50
+    atr = tech.get("atr") or price * 0.01
+    ema20, ema50, ema200 = tech.get("ema20"), tech.get("ema50"), tech.get("ema200")
+    macd_bull, macd_bear = tech.get("macd_bull"), tech.get("macd_bear")
+    vol_trend = tech.get("volume_trend")
+
+    ema_bull = bool(ema20 and ema50 and ema200 and ema20 > ema50 > ema200)
+    ema_bear = bool(ema20 and ema50 and ema200 and ema20 < ema50 < ema200)
+
+    action, confidence, signals = "WAIT", 50, []
+
+    if rsi < 25:
+        action, confidence = "LONG", 78
+        signals.append(f"RSI {rsi} survente forte")
+    elif rsi > 75:
+        action, confidence = "SHORT", 78
+        signals.append(f"RSI {rsi} surachat fort")
+    elif rsi <= 45:
+        action, confidence = "LONG", 64
+        signals.append(f"RSI {rsi} zone de rebond")
+    elif rsi >= 55:
+        action, confidence = "SHORT", 64
+        signals.append(f"RSI {rsi} zone de repli")
+
+    if action == "LONG":
+        if macd_bull:
+            confidence += 8; signals.append("MACD haussier confirmé")
+        elif macd_bear:
+            confidence -= 12; signals.append("MACD contredit (baissier)")
+        if ema_bull:
+            confidence += 6; signals.append("Structure EMA haussière")
+        elif ema_bear:
+            confidence -= 10
+    elif action == "SHORT":
+        if macd_bear:
+            confidence += 8; signals.append("MACD baissier confirmé")
+        elif macd_bull:
+            confidence -= 12; signals.append("MACD contredit (haussier)")
+        if ema_bear:
+            confidence += 6; signals.append("Structure EMA baissière")
+        elif ema_bull:
+            confidence -= 10
+
+    if vol_trend == "SPIKE":
+        confidence += 5; signals.append("pic de volume")
+
+    confidence = max(0, min(95, confidence))
+
+    if action == "WAIT" or confidence < 55:
+        return {
+            "action": "WAIT", "confidence": confidence, "entry": price,
+            "stopLoss": price, "takeProfit1": price, "takeProfit2": price,
+            "leverage": 1, "positionSize": 5,
+            "reasoning": "Règles techniques (mode Paper, sans IA) : pas de signal net",
+            "keySignals": signals, "riskReward": 0, "timeframe": "court-terme"
+        }
+
+    if action == "LONG":
+        stop_loss = round(price - atr * 1.5, 6)
+        tp1 = round(price + atr * 2, 6)
+        tp2 = round(price + atr * 3, 6)
+    else:
+        stop_loss = round(price + atr * 1.5, 6)
+        tp1 = round(price - atr * 2, 6)
+        tp2 = round(price - atr * 3, 6)
+
+    return {
+        "action": action,
+        "confidence": confidence,
+        "entry": price,
+        "stopLoss": stop_loss,
+        "takeProfit1": tp1,
+        "takeProfit2": tp2,
+        "leverage": 3 if confidence >= 70 else 2,
+        "positionSize": 10 if confidence >= 70 else 6,
+        "reasoning": f"Règles techniques (mode Paper, sans IA) : {', '.join(signals) if signals else 'signal RSI'}",
+        "keySignals": signals[:3] if signals else [f"RSI {rsi}"],
+        "riskReward": 2.0,
+        "timeframe": "court-terme"
+    }
+
 async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
     # Cacher les données et utiliser prompt compact — 60-70% moins de tokens
     cache_market_data(coin, tech, price)
@@ -771,7 +862,14 @@ async def scan_markets(user_id: int):
             # Skip les coins opportunistes si confiance pas encore connue
             # (on les analyse quand même mais on filtre après)
 
-            ai = await analyze_with_ai(client, user_id, coin, tech, None, price, api_key)
+            ai_mode_paper = config["ai_mode_paper"] if config and "ai_mode_paper" in config.keys() else "ai"
+            use_rules_engine = (config["trading_mode"] == "paper") and (ai_mode_paper == "rules")
+
+            if use_rules_engine:
+                ai = analyze_with_rules(coin, tech, price)
+                cache_market_data(coin, tech, price)
+            else:
+                ai = await analyze_with_ai(client, user_id, coin, tech, None, price, api_key)
             if not ai:
                 add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
                 continue
@@ -781,7 +879,7 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
                 continue
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
-            add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
+            add_bot_log(user_id, f"{'📐' if use_rules_engine else '🤖'} {coin}: {'Règles' if use_rules_engine else 'IA'} → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
             if action_ia == "WAIT" or confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
@@ -1880,6 +1978,7 @@ class UpdateConfigRequest(BaseModel):
     api_key: Optional[str] = None
     active_coins: Optional[List[str]] = None
     trading_mode: Optional[str] = None
+    ai_mode_paper: Optional[str] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
@@ -1947,6 +2046,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
+        "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
@@ -1975,6 +2075,9 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
                     (req.trading_mode, user_id))
         # Log le changement de mode
         print(f"Mode change: {old_mode['trading_mode'] if old_mode else 'unknown'} -> {req.trading_mode} pour user {user_id}")
+    if req.ai_mode_paper is not None:
+        conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
+                    (req.ai_mode_paper, user_id))
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
