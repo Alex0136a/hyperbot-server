@@ -1233,10 +1233,10 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
-CONFIDENCE_STEPS = [62, 72, 82, 90]  # paliers fixes : base, 1ère perte, 2e perte, 3e perte+
+CONFIDENCE_STEPS = [60, 72, 82, 90]  # paliers fixes : base, 1ère perte, 2e perte, 3e perte+
 
-def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 62) -> int:
-    """Retourne la confiance requise selon les pertes consécutives — paliers fixes 62/72/82/90"""
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 60) -> int:
+    """Retourne la confiance requise selon les pertes consécutives — paliers fixes 60/72/82/90"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
@@ -1289,7 +1289,7 @@ def is_coin_paused(user_id: int, coin: str) -> bool:
     return False
 
 async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
-    """Met à jour le compteur de pertes consécutives — paliers 62/72/82/90 — et déclenche
+    """Met à jour le compteur de pertes consécutives — paliers 60/72/82/90 — et déclenche
     la pause automatique de l'actif à la 3e perte consécutive"""
     conn = get_db()
     if won:
@@ -1297,7 +1297,7 @@ async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,0,?)""",
             (user_id, coin, action, datetime.utcnow().isoformat()))
-        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 62% (gain)", "info")
+        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 60% (gain)", "info")
         conn.commit()
         conn.close()
     else:
@@ -1756,7 +1756,7 @@ async def check_session_lifecycle(user_id: int):
             # Reset confiance dynamique à minuit pour nouvelle session
             conn.execute("DELETE FROM coin_confidence WHERE user_id=?", (user_id,))
             conn.commit()
-            add_bot_log(user_id, "🔄 Confiance dynamique remise à 62% pour tous les actifs — nouvelle session", "info")
+            add_bot_log(user_id, "🔄 Confiance dynamique remise à 60% pour tous les actifs — nouvelle session", "info")
     
     conn.close()
     return session
