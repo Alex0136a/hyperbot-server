@@ -1079,7 +1079,7 @@ Confirmer ?`
 
       {/* PAPER TRADING */}
       {tab==="paper" && (
-        <div style={{padding:16,maxWidth:900}}>
+        <div style={{padding:16,maxWidth:1400}}>
 
           {/* STATS PORTEFEUILLE */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
@@ -1096,216 +1096,224 @@ Confirmer ?`
             ))}
           </div>
 
-          {/* MODE BANNER + SETTINGS */}
-          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-              <div>
-                <div style={{fontSize:13,fontWeight:700,color:config?.trading_mode==="paper"?"#fbbf24":"#34d399"}}>
-                  {config?.trading_mode==="paper"?"Mode Paper — Simulation autonome":"Mode Live — Trades reels"}
-                </div>
-                <div style={{fontSize:10,color:"#475569",marginTop:2}}>
-                  {config?.trading_mode==="paper"?"Le bot execute automatiquement chaque signal avec capital virtuel":"ATTENTION: trades sur votre vrai compte Hyperliquid"}
-                </div>
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
-                <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">PAPER</button>
-                <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">LIVE</button>
-              </div>
-            </div>
-
-            {config?.trading_mode==="paper" && (
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
-                <div>
-                  <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🧠 Moteur de décision (Paper)</div>
-                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>
-                    {config?.ai_mode_paper==="rules"?"Règles techniques gratuites (RSI/MACD/EMA) — 0$ de coût IA":"Claude IA — même moteur qu'en mode Live"}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:16,alignItems:"start"}}>
+            {/* COLONNE GAUCHE — Trades ouverts + Historique, remontés */}
+            <div>
+            {/* TRADES OUVERTS */}
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📈 Trades ouverts</div>
+              {!paper?.open_trades?.length
+                ? <div style={{color:"#334155",fontSize:11,textAlign:"center",padding:"20px 0"}}>Aucun trade ouvert — exécutez un signal !</div>
+                : paper.open_trades.map(trade=>(
+                  <div key={trade.id} style={{background:"#0a0e1a",borderRadius:8,padding:12,marginBottom:8,border:`1px solid ${trade.pnl>=0?"#14532d":"#450a0a"}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <span style={{background:trade.action==="LONG"?"#052e16":"#2d0a0a",color:trade.action==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700}}>{trade.action}</span>
+                        <span style={{color:"#f1f5f9",fontWeight:700}}>{trade.coin}/USDC</span>
+                        <span style={{color:"#64748b",fontSize:10}}>x{trade.leverage}</span>
+                      </div>
+                      <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                        <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
+                          {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                        </span>
+                        <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontSize:11}}>
+                          ({trade.pnl_pct>=0?"+":""}{trade.pnl_pct?.toFixed(2)}%)
+                        </span>
+                        <button onClick={async()=>{
+                          await apiCall("/api/paper/close","POST",{trade_id:trade.id,reason:"MANUEL"},token);
+                          loadData();
+                        }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:10,fontWeight:700}}>
+                          Fermer
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
+                      {[
+                        {l:"ENTRÉE",v:`$${trade.entry_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                        {l:"ACTUEL",v:`$${trade.current_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                        {l:"TAILLE",v:`${trade.size_usdc} USDC`},
+                        {l:"OUVERT",v:new Date(trade.opened_at).toLocaleTimeString("fr-FR")},
+                        {l:"⏱️ DURÉE",v:formatDuration(trade.opened_at),c:"#22d3ee"},
+                      ].map((x,i)=>(
+                        <div key={i} style={{background:"#0f1629",borderRadius:5,padding:"5px 8px"}}>
+                          <div style={{fontSize:8,color:"#475569"}}>{x.l}</div>
+                          <div style={{color:x.c||"#94a3b8",fontSize:11,fontWeight:x.c?700:500}}>{x.v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{display:"flex",gap:8,marginTop:8,fontSize:10}}>
+                      <span style={{color:"#f87171"}}>SL: ${trade.stop_loss?.toFixed(4)}</span>
+                      <span style={{color:"#34d399"}}>TP1: ${trade.take_profit1?.toFixed(4)}</span>
+                      <span style={{color:"#34d399"}}>TP2: ${trade.take_profit2?.toFixed(4)}</span>
+                    </div>
                   </div>
-                </div>
-                <div style={{display:"flex",alignItems:"center",gap:2,background:"#0f1629",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
-                  <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"ai"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper!=="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper!=="rules"?"#22d3ee":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>IA</button>
-                  <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"rules"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper==="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper==="rules"?"#fbbf24":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>RÈGLES (gratuit)</button>
-                </div>
-              </div>
-            )}
-
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
-              <div>
-                <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto par actif (paliers 62%→72%→82%→90%)</div>
-                <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes déclenchant la pause + durée de pause. Retour : confiance fixée à 82%.</div>
-              </div>
-              <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                <input type="number" min="2" max="10" value={config?.loss_streak_size||3}
-                  onChange={e=>apiCall("/api/config","PUT",{loss_streak_size:parseInt(e.target.value)||3},token).then(loadData)}
-                  style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
-                <span style={{fontSize:9,color:"#475569"}}>pertes ×</span>
-                <input type="number" min="0.5" max="24" step="0.5" value={config?.pause_hours||2}
-                  onChange={e=>apiCall("/api/config","PUT",{pause_hours:parseFloat(e.target.value)||2},token).then(loadData)}
-                  style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
-                <span style={{fontSize:9,color:"#475569"}}>h de pause</span>
-              </div>
+                ))
+              }
             </div>
 
-            <div style={{background:"#050810",border:"1px solid #7c3aed",borderRadius:8,padding:14,marginBottom:12}}>
-              <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>⚙️ Réglages avancés (stratégie)</div>
-              <div style={{fontSize:9,color:"#475569",marginBottom:10}}>Ajustez manuellement les leviers techniques du bot.</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-                {[
-                  {key:"base_confidence",label:"Confiance de base (%)",def:60,step:1,min:40,max:90},
-                  {key:"conf_step1",label:"Palier après 1 perte (%)",def:72,step:1,min:40,max:95},
-                  {key:"conf_step2",label:"Palier après 2 pertes (%)",def:82,step:1,min:40,max:98},
-                  {key:"conf_step3",label:"Palier après 3 pertes (%)",def:90,step:1,min:40,max:99},
-                  {key:"rsi_oversold",label:"RSI survente (<)",def:35,step:1,min:5,max:45},
-                  {key:"rsi_overbought",label:"RSI surachat (>)",def:65,step:1,min:55,max:95},
-                  {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
-                  {key:"btc_trend_threshold",label:"Seuil tendance BTC (%/8h)",def:2.0,step:0.1,min:0.5,max:10},
-                  {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.5,step:0.1,min:1,max:5},
-                  {key:"trailing_gap_usd",label:"Écart trailing ($)",def:0.5,step:0.05,min:0.05,max:5},
-                  {key:"rsi_period",label:"RSI - période",def:14,step:1,min:5,max:30},
-                  {key:"macd_fast",label:"MACD - rapide",def:12,step:1,min:2,max:30},
-                  {key:"macd_slow",label:"MACD - lent",def:26,step:1,min:10,max:60},
-                  {key:"macd_signal",label:"MACD - signal",def:9,step:1,min:2,max:20},
-                  {key:"bb_period",label:"Bollinger - période",def:20,step:1,min:5,max:50},
-                  {key:"bb_stddev",label:"Bollinger - écart-type",def:2,step:0.1,min:1,max:4},
-                  {key:"atr_period",label:"ATR - période",def:14,step:1,min:5,max:30},
-                  {key:"hours_creuses_start",label:"Heures creuses - début (UTC)",def:21,step:1,min:0,max:23},
-                  {key:"hours_creuses_end",label:"Heures creuses - fin (UTC)",def:23,step:1,min:0,max:23},
-                  {key:"macro_blackout_before_min",label:"Blackout macro - avant (min)",def:120,step:5,min:0,max:1440},
-                  {key:"macro_blackout_after_min",label:"Blackout macro - après (min)",def:60,step:5,min:0,max:1440},
-                ].map(f=>(
-                  <div key={f.key}>
-                    <div style={{fontSize:9,color:"#475569",marginBottom:3}}>{f.label}</div>
-                    <input type="number" min={f.min} max={f.max} step={f.step} defaultValue={config?.[f.key]??f.def}
-                      onBlur={e=>{apiCall("/api/config","PUT",{[f.key]:parseFloat(e.target.value)||f.def},token).then(()=>{loadData();flashSave(f.key);});}}
-                      style={{width:"100%",background:"#0f1629",border:savedField===f.key?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"5px 7px"}}/>
+            {/* HISTORIQUE */}
+            {paper?.closed_trades?.length > 0 && (
+              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (20 derniers)</div>
+                {paper.closed_trades.map(trade=>(
+                  <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
+                      <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
+                      <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                    </div>
+                    <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
+                        {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
+                      </span>
+                      <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
+                    </div>
                   </div>
                 ))}
               </div>
+            )}
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-              <div>
-                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <input type="number" defaultValue={config?.position_pct||8} min="1" max="50"
-                    onBlur={e=>{apiCall("/api/config","PUT",{position_pct:Number(e.target.value)},token).then(()=>{loadData();flashSave("pct");});}}
-                    style={{flex:1,background:savedField==="pct"?"#0a1a0a":"#0a0e1a",border:savedField==="pct"?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:savedField==="pct"?"#34d399":"#e2e8f0",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
-                  <span style={{color:"#60a5fa",fontWeight:700,fontSize:14}}>%</span>
-                </div>
-                <div style={{fontSize:9,color:"#334155",marginTop:4}}>≈ {Math.round((config?.position_pct||5)*10)} USDC sur 1000 USDC · Adaptatif</div>
-              </div>
-              <div>
-                <div style={{fontSize:10,color:"#f59e0b",marginBottom:6,fontWeight:700,letterSpacing:1}}>⚡ QUICK PROFIT (USDC)</div>
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <input type="number" min="0.5" max="10" step="0.5" defaultValue={config?.quick_profit_usd||1}
-                    onBlur={e=>{apiCall("/api/config","PUT",{quick_profit_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("qp");});}}
-                    style={{flex:1,background:savedField==="qp"?"#1a2e0a":"#0a0e1a",border:savedField==="qp"?"1px solid #34d399":"1px solid #f59e0b",borderRadius:6,padding:"8px 10px",color:savedField==="qp"?"#34d399":"#f59e0b",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
-                  <span style={{color:"#f59e0b",fontWeight:700,fontSize:14}}>$</span>
-                </div>
-                <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique dès ce profit atteint (frais inclus)</div>
-              </div>
-              <div>
-                <div style={{fontSize:10,color:"#f87171",marginBottom:6,fontWeight:700,letterSpacing:1}}>🛡️ MAX LOSS (USDC)</div>
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <input type="number" min="0.25" max="5" step="0.25" defaultValue={config?.max_loss_usd||0.5}
-                    onBlur={e=>{apiCall("/api/config","PUT",{max_loss_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("ml");});}}
-                    style={{flex:1,background:savedField==="ml"?"#1a0a0a":"#0a0e1a",border:savedField==="ml"?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"8px 10px",color:savedField==="ml"?"#34d399":"#f87171",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
-                  <span style={{color:"#f87171",fontWeight:700,fontSize:14}}>$</span>
-                </div>
-                <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique si perte dépasse ce montant</div>
-              </div>
-              <div>
-                <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
-                <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
-                  onChange={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
-                  style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
-              </div>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{fontSize:10,color:"#334155"}}>
-                Solde initial: 1000 USDC · Le bot trade seul 24h/24
-              </div>
-              <button onClick={async()=>{
-                if(!confirm("Reinitialiser le portefeuille a 1000 USDC ?"))return;
-                await apiCall("/api/paper/reset","POST",null,token);
-                loadData();
-              }} style={{background:"transparent",border:"1px solid #334155",borderRadius:5,padding:"5px 10px",color:"#64748b",fontSize:10}}>
-                Reinitialiser
-              </button>
-            </div>
-          </div>
 
-          {/* TRADES OUVERTS */}
-          <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
-            <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📈 Trades ouverts</div>
-            {!paper?.open_trades?.length
-              ? <div style={{color:"#334155",fontSize:11,textAlign:"center",padding:"20px 0"}}>Aucun trade ouvert — exécutez un signal !</div>
-              : paper.open_trades.map(trade=>(
-                <div key={trade.id} style={{background:"#0a0e1a",borderRadius:8,padding:12,marginBottom:8,border:`1px solid ${trade.pnl>=0?"#14532d":"#450a0a"}`}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                      <span style={{background:trade.action==="LONG"?"#052e16":"#2d0a0a",color:trade.action==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700}}>{trade.action}</span>
-                      <span style={{color:"#f1f5f9",fontWeight:700}}>{trade.coin}/USDC</span>
-                      <span style={{color:"#64748b",fontSize:10}}>x{trade.leverage}</span>
-                    </div>
-                    <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
-                        {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
-                      </span>
-                      <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontSize:11}}>
-                        ({trade.pnl_pct>=0?"+":""}{trade.pnl_pct?.toFixed(2)}%)
-                      </span>
-                      <button onClick={async()=>{
-                        await apiCall("/api/paper/close","POST",{trade_id:trade.id,reason:"MANUEL"},token);
-                        loadData();
-                      }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:10,fontWeight:700}}>
-                        Fermer
-                      </button>
+            {/* COLONNE DROITE — Mode, IA/Règles, Pause auto, Réglages avancés */}
+            <div>
+            {/* MODE BANNER + SETTINGS */}
+            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:config?.trading_mode==="paper"?"#fbbf24":"#34d399"}}>
+                    {config?.trading_mode==="paper"?"Mode Paper — Simulation autonome":"Mode Live — Trades reels"}
+                  </div>
+                  <div style={{fontSize:10,color:"#475569",marginTop:2}}>
+                    {config?.trading_mode==="paper"?"Le bot execute automatiquement chaque signal avec capital virtuel":"ATTENTION: trades sur votre vrai compte Hyperliquid"}
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:2,background:"#050810",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+                  <button onClick={()=>updateTradingMode("paper")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="paper"?"#1e2d4a":"transparent",color:config?.trading_mode==="paper"?"#fbbf24":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">PAPER</button>
+                  <button onClick={()=>updateTradingMode("live")} style={{padding:"6px 12px",borderRadius:4,border:"none",background:config?.trading_mode==="live"?"#052e16":"transparent",color:config?.trading_mode==="live"?"#34d399":"#475569",fontWeight:700,fontSize:11,cursor:"pointer"}} title="Reinitialise signaux et trades au changement">LIVE</button>
+                </div>
+              </div>
+
+              {config?.trading_mode==="paper" && (
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🧠 Moteur de décision (Paper)</div>
+                    <div style={{fontSize:9,color:"#475569",marginTop:2}}>
+                      {config?.ai_mode_paper==="rules"?"Règles techniques gratuites (RSI/MACD/EMA) — 0$ de coût IA":"Claude IA — même moteur qu'en mode Live"}
                     </div>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
-                    {[
-                      {l:"ENTRÉE",v:`$${trade.entry_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
-                      {l:"ACTUEL",v:`$${trade.current_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
-                      {l:"TAILLE",v:`${trade.size_usdc} USDC`},
-                      {l:"OUVERT",v:new Date(trade.opened_at).toLocaleTimeString("fr-FR")},
-                      {l:"⏱️ DURÉE",v:formatDuration(trade.opened_at),c:"#22d3ee"},
-                    ].map((x,i)=>(
-                      <div key={i} style={{background:"#0f1629",borderRadius:5,padding:"5px 8px"}}>
-                        <div style={{fontSize:8,color:"#475569"}}>{x.l}</div>
-                        <div style={{color:x.c||"#94a3b8",fontSize:11,fontWeight:x.c?700:500}}>{x.v}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{display:"flex",gap:8,marginTop:8,fontSize:10}}>
-                    <span style={{color:"#f87171"}}>SL: ${trade.stop_loss?.toFixed(4)}</span>
-                    <span style={{color:"#34d399"}}>TP1: ${trade.take_profit1?.toFixed(4)}</span>
-                    <span style={{color:"#34d399"}}>TP2: ${trade.take_profit2?.toFixed(4)}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:2,background:"#0f1629",borderRadius:6,padding:3,border:"1px solid #1e2d4a"}}>
+                    <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"ai"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper!=="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper!=="rules"?"#22d3ee":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>IA</button>
+                    <button onClick={()=>apiCall("/api/config","PUT",{ai_mode_paper:"rules"},token).then(loadData)} style={{padding:"5px 10px",borderRadius:4,border:"none",background:config?.ai_mode_paper==="rules"?"#1e2d4a":"transparent",color:config?.ai_mode_paper==="rules"?"#fbbf24":"#475569",fontWeight:700,fontSize:10,cursor:"pointer"}}>RÈGLES (gratuit)</button>
                   </div>
                 </div>
-              ))
-            }
-          </div>
+              )}
 
-          {/* HISTORIQUE */}
-          {paper?.closed_trades?.length > 0 && (
-            <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
-              <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (20 derniers)</div>
-              {paper.closed_trades.map(trade=>(
-                <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
-                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                    <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
-                    <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
-                    <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
-                  </div>
-                  <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                    <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
-                      {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
-                    </span>
-                    <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
-                  </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#050810",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 12px",marginBottom:12}}>
+                <div>
+                  <div style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>🛡️ Pause auto par actif (paliers 62%→72%→82%→90%)</div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:2}}>Nombre de pertes déclenchant la pause + durée de pause. Retour : confiance fixée à 82%.</div>
                 </div>
-              ))}
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <input type="number" min="2" max="10" value={config?.loss_streak_size||3}
+                    onChange={e=>apiCall("/api/config","PUT",{loss_streak_size:parseInt(e.target.value)||3},token).then(loadData)}
+                    style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
+                  <span style={{fontSize:9,color:"#475569"}}>pertes ×</span>
+                  <input type="number" min="0.5" max="24" step="0.5" value={config?.pause_hours||2}
+                    onChange={e=>apiCall("/api/config","PUT",{pause_hours:parseFloat(e.target.value)||2},token).then(loadData)}
+                    style={{width:44,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"4px 6px",textAlign:"center"}}/>
+                  <span style={{fontSize:9,color:"#475569"}}>h de pause</span>
+                </div>
+              </div>
+
+              <div style={{background:"#050810",border:"1px solid #7c3aed",borderRadius:8,padding:14,marginBottom:12}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>⚙️ Réglages avancés (stratégie)</div>
+                <div style={{fontSize:9,color:"#475569",marginBottom:10}}>Ajustez manuellement les leviers techniques du bot.</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                  {[
+                    {key:"base_confidence",label:"Confiance de base (%)",def:60,step:1,min:40,max:90},
+                    {key:"conf_step1",label:"Palier après 1 perte (%)",def:72,step:1,min:40,max:95},
+                    {key:"conf_step2",label:"Palier après 2 pertes (%)",def:82,step:1,min:40,max:98},
+                    {key:"conf_step3",label:"Palier après 3 pertes (%)",def:90,step:1,min:40,max:99},
+                    {key:"rsi_oversold",label:"RSI survente (<)",def:35,step:1,min:5,max:45},
+                    {key:"rsi_overbought",label:"RSI surachat (>)",def:65,step:1,min:55,max:95},
+                    {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
+                    {key:"btc_trend_threshold",label:"Seuil tendance BTC (%/8h)",def:2.0,step:0.1,min:0.5,max:10},
+                    {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.5,step:0.1,min:1,max:5},
+                    {key:"trailing_gap_usd",label:"Écart trailing ($)",def:0.5,step:0.05,min:0.05,max:5},
+                    {key:"rsi_period",label:"RSI - période",def:14,step:1,min:5,max:30},
+                    {key:"macd_fast",label:"MACD - rapide",def:12,step:1,min:2,max:30},
+                    {key:"macd_slow",label:"MACD - lent",def:26,step:1,min:10,max:60},
+                    {key:"macd_signal",label:"MACD - signal",def:9,step:1,min:2,max:20},
+                    {key:"bb_period",label:"Bollinger - période",def:20,step:1,min:5,max:50},
+                    {key:"bb_stddev",label:"Bollinger - écart-type",def:2,step:0.1,min:1,max:4},
+                    {key:"atr_period",label:"ATR - période",def:14,step:1,min:5,max:30},
+                    {key:"hours_creuses_start",label:"Heures creuses - début (UTC)",def:21,step:1,min:0,max:23},
+                    {key:"hours_creuses_end",label:"Heures creuses - fin (UTC)",def:23,step:1,min:0,max:23},
+                    {key:"macro_blackout_before_min",label:"Blackout macro - avant (min)",def:120,step:5,min:0,max:1440},
+                    {key:"macro_blackout_after_min",label:"Blackout macro - après (min)",def:60,step:5,min:0,max:1440},
+                  ].map(f=>(
+                    <div key={f.key}>
+                      <div style={{fontSize:9,color:"#475569",marginBottom:3}}>{f.label}</div>
+                      <input type="number" min={f.min} max={f.max} step={f.step} defaultValue={config?.[f.key]??f.def}
+                        onBlur={e=>{apiCall("/api/config","PUT",{[f.key]:parseFloat(e.target.value)||f.def},token).then(()=>{loadData();flashSave(f.key);});}}
+                        style={{width:"100%",background:"#0f1629",border:savedField===f.key?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:4,color:"#f1f5f9",fontSize:11,padding:"5px 7px"}}/>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                <div>
+                  <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TAILLE PAR TRADE (% DU CAPITAL)</div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <input type="number" defaultValue={config?.position_pct||8} min="1" max="50"
+                      onBlur={e=>{apiCall("/api/config","PUT",{position_pct:Number(e.target.value)},token).then(()=>{loadData();flashSave("pct");});}}
+                      style={{flex:1,background:savedField==="pct"?"#0a1a0a":"#0a0e1a",border:savedField==="pct"?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:savedField==="pct"?"#34d399":"#e2e8f0",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
+                    <span style={{color:"#60a5fa",fontWeight:700,fontSize:14}}>%</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>≈ {Math.round((config?.position_pct||5)*10)} USDC sur 1000 USDC · Adaptatif</div>
+                </div>
+                <div>
+                  <div style={{fontSize:10,color:"#f59e0b",marginBottom:6,fontWeight:700,letterSpacing:1}}>⚡ QUICK PROFIT (USDC)</div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <input type="number" min="0.5" max="10" step="0.5" defaultValue={config?.quick_profit_usd||1}
+                      onBlur={e=>{apiCall("/api/config","PUT",{quick_profit_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("qp");});}}
+                      style={{flex:1,background:savedField==="qp"?"#1a2e0a":"#0a0e1a",border:savedField==="qp"?"1px solid #34d399":"1px solid #f59e0b",borderRadius:6,padding:"8px 10px",color:savedField==="qp"?"#34d399":"#f59e0b",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
+                    <span style={{color:"#f59e0b",fontWeight:700,fontSize:14}}>$</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique dès ce profit atteint (frais inclus)</div>
+                </div>
+                <div>
+                  <div style={{fontSize:10,color:"#f87171",marginBottom:6,fontWeight:700,letterSpacing:1}}>🛡️ MAX LOSS (USDC)</div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <input type="number" min="0.25" max="5" step="0.25" defaultValue={config?.max_loss_usd||0.5}
+                      onBlur={e=>{apiCall("/api/config","PUT",{max_loss_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("ml");});}}
+                      style={{flex:1,background:savedField==="ml"?"#1a0a0a":"#0a0e1a",border:savedField==="ml"?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"8px 10px",color:savedField==="ml"?"#34d399":"#f87171",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
+                    <span style={{color:"#f87171",fontWeight:700,fontSize:14}}>$</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique si perte dépasse ce montant</div>
+                </div>
+                <div>
+                  <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
+                  <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
+                    onChange={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
+                    style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                </div>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:10,color:"#334155"}}>
+                  Solde initial: 1000 USDC · Le bot trade seul 24h/24
+                </div>
+                <button onClick={async()=>{
+                  if(!confirm("Reinitialiser le portefeuille a 1000 USDC ?"))return;
+                  await apiCall("/api/paper/reset","POST",null,token);
+                  loadData();
+                }} style={{background:"transparent",border:"1px solid #334155",borderRadius:5,padding:"5px 10px",color:"#64748b",fontSize:10}}>
+                  Reinitialiser
+                </button>
+              </div>
             </div>
-          )}
+            </div>
+          </div>
         </div>
       )}
 
