@@ -658,11 +658,12 @@ DATA: price={d['price']} rsi={d['rsi']} macd={'BULL' if d['macd_bull'] else 'BEA
 RULES: RSI<25=LONG RSI>75=SHORT RSI25-45=LONG_BIAS RSI55-75=SHORT_BIAS min_RR=2 leverage=2-5 size=5-15%
 Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 phrases FR","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
 
-def analyze_with_rules(coin: str, tech: dict, price: float) -> dict:
+def analyze_with_rules(coin: str, tech: dict, price: float, max_loss_usd: float = 0.75, size_usdc: float = 50.0) -> dict:
     """Décision 100% gratuite basée sur des règles techniques fixes (RSI/MACD/EMA/Volume) —
     utilisée en mode Paper quand l'utilisateur ne veut pas payer d'appels IA sur des trades simulés.
     Reproduit la même heuristique que celle suggérée à l'IA (RSI<25=LONG, RSI>75=SHORT, etc.)
-    mais de façon 100% mécanique et gratuite. SL/TP calculés depuis l'ATR réel (pas inventés)."""
+    mais de façon 100% mécanique et gratuite. SL calculé pour correspondre à 1.5× Max Loss
+    (cohérent avec la protection $ réelle, pas de conflit) ; TP1/TP2 restent basés sur l'ATR."""
     rsi = tech.get("rsi") or 50
     atr = tech.get("atr") or price * 0.01
     ema20, ema50, ema200 = tech.get("ema20"), tech.get("ema50"), tech.get("ema200")
@@ -720,12 +721,15 @@ def analyze_with_rules(coin: str, tech: dict, price: float) -> dict:
             "keySignals": signals, "riskReward": 0, "timeframe": "court-terme"
         }
 
+    leverage = 3 if confidence >= 70 else 2
+    # SL cohérent avec 1.5× Max Loss ($) — évite tout conflit avec la protection dollar réelle
+    sl_distance_pct = (max_loss_usd * 1.5) / max(size_usdc * leverage, 1)
     if action == "LONG":
-        stop_loss = round(price - atr * 1.5, 6)
+        stop_loss = round(price * (1 - sl_distance_pct), 6)
         tp1 = round(price + atr * 2, 6)
         tp2 = round(price + atr * 3, 6)
     else:
-        stop_loss = round(price + atr * 1.5, 6)
+        stop_loss = round(price * (1 + sl_distance_pct), 6)
         tp1 = round(price - atr * 2, 6)
         tp2 = round(price - atr * 3, 6)
 
@@ -736,7 +740,7 @@ def analyze_with_rules(coin: str, tech: dict, price: float) -> dict:
         "stopLoss": stop_loss,
         "takeProfit1": tp1,
         "takeProfit2": tp2,
-        "leverage": 3 if confidence >= 70 else 2,
+        "leverage": leverage,
         "positionSize": 10 if confidence >= 70 else 6,
         "reasoning": f"Règles techniques (mode Paper, sans IA) : {', '.join(signals) if signals else 'signal RSI'}",
         "keySignals": signals[:3] if signals else [f"RSI {rsi}"],
@@ -1067,7 +1071,13 @@ async def scan_markets(user_id: int):
             use_rules_engine = (config["trading_mode"] == "paper") and (ai_mode_paper == "rules")
 
             if use_rules_engine:
-                ai = analyze_with_rules(coin, tech, price)
+                cfg_sl = conn.execute("SELECT max_loss_usd, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                portfolio_sl = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                _max_loss = cfg_sl["max_loss_usd"] if cfg_sl and cfg_sl["max_loss_usd"] else 0.75
+                _pct = cfg_sl["position_pct"] if cfg_sl and cfg_sl["position_pct"] else 8.0
+                _capital = portfolio_sl["balance"] if portfolio_sl else 1000.0
+                _size_est = max(10.0, min(round(_capital * _pct / 100, 2), _capital * 0.5))
+                ai = analyze_with_rules(coin, tech, price, _max_loss, _size_est)
                 cache_market_data(coin, tech, price)
             else:
                 ai = await analyze_with_ai(client, user_id, coin, tech, None, price, api_key)
@@ -1227,7 +1237,6 @@ async def scan_markets(user_id: int):
             direction = 1 if trade["action"] == "LONG" else -1
             pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
             close_reason = None
-            trailing_pct = 0.015  # 1.5% trailing distance
             tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
             trailing_sl = trade["trailing_sl"]
             highest = trade["highest_price"] or cur
@@ -1247,15 +1256,8 @@ async def scan_markets(user_id: int):
                     conn.commit()
                     add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
                     continue
-                # Trailing SL actif apres TP1
-                if tp1_hit:
-                    new_trailing_sl = new_highest * (1 - trailing_pct)
-                    effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_highest, cur, trade["id"]))
-                    if cur <= effective_sl:
-                        close_reason = "TRAILING_SL"
-                else:
+                # Trailing dollar géré plus bas — TP1 ne ferme jamais le trade lui-même
+                if not tp1_hit:
                     # SL normal avant TP1
                     # SL technique désactivé — Max Loss gère la protection
                 # if trade["stop_loss"] and cur <= trade["stop_loss"]:
@@ -1266,24 +1268,15 @@ async def scan_markets(user_id: int):
             elif trade["action"] == "SHORT":
                 # TP1 pas encore atteint
                 if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                    pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                    # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
                     conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
                         lowest_price=?, current_price=? WHERE id=?""",
                         (trade["entry_price"], new_lowest, cur, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                        (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                    add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
                     conn.commit()
+                    add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
                     continue
-                # Trailing SL actif apres TP1
-                if tp1_hit:
-                    new_trailing_sl = new_lowest * (1 + trailing_pct)
-                    effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                    conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                        (effective_sl, new_lowest, cur, trade["id"]))
-                    if cur >= effective_sl:
-                        close_reason = "TRAILING_SL"
-                else:
+                # Trailing dollar géré plus bas — TP1/TP2 ne ferment jamais le trade eux-mêmes
+                if not tp1_hit:
                     # SL technique désactivé — Max Loss gère la protection
                 # if trade["stop_loss"] and cur >= trade["stop_loss"]:
                 #     close_reason = "STOP_LOSS"
@@ -1569,8 +1562,7 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
             add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)}$ ⚡ WS", "warning")
 
         if close_reason:
-            tp1_hit = trade["tp1_hit"] or 0
-            remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
+            remaining = trade["size_usdc"]  # TP1 est un jalon pur — aucun crédit partiel, tout revient à la fermeture
             conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                 closed_at=?, close_reason=? WHERE id=?""",
                 (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
@@ -2095,9 +2087,7 @@ async def update_open_positions(user_id: int):
             continue
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
         close_reason = None
-        trailing_pct = 0.015
         tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-        trailing_sl = trade["trailing_sl"]
         highest = trade["highest_price"] or cur
         lowest = trade["lowest_price"] or cur
         new_highest = max(highest, cur)
@@ -2105,82 +2095,56 @@ async def update_open_positions(user_id: int):
 
         if trade["action"] == "LONG":
             if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                pnl_tp1 = (cur - trade["entry_price"]) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
+                # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
                 conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
                     (trade["entry_price"], new_highest, cur, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
                 conn.commit()
+                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
                 continue
-            if tp1_hit:
-                # Trailing progressif selon niveaux atteints
-                tp2 = trade["take_profit2"]
-                if tp2 and cur >= tp2 * 1.02:
-                    # Au-dela de TP2 + 2% → trailing ultra serré 0.5%
-                    trailing_pct = 0.005
-                elif tp2 and cur >= tp2:
-                    # TP2 atteint → trailing serré 0.8%
-                    trailing_pct = 0.008
-                else:
-                    # Entre TP1 et TP2 → trailing normal 1.5%
-                    trailing_pct = 0.015
-                new_trailing_sl = new_highest * (1 - trailing_pct)
-                effective_sl = max(trailing_sl or trade["entry_price"], new_trailing_sl)
-                conn.execute("UPDATE paper_trades SET trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                    (effective_sl, new_highest, cur, trade["id"]))
-                if cur <= effective_sl:
-                    close_reason = "TRAILING_SL"
-                    if tp2 and trade["highest_price"] and trade["highest_price"] >= tp2:
-                        close_reason = "TRAILING_SL_POST_TP2"
-            else:
-                # SL technique désactivé - Max Loss gère
-                pass
-                conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                    (new_highest, cur, trade["id"]))
+            conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
+                (new_highest, cur, trade["id"]))
         elif trade["action"] == "SHORT":
             if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                pnl_tp1 = (trade["entry_price"] - cur) / trade["entry_price"] * (trade["size_usdc"] * 0.5) * trade["leverage"]
                 conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
                     (trade["entry_price"], new_lowest, cur, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+? WHERE user_id=?",
-                    (trade["size_usdc"] * 0.5 + pnl_tp1, user_id))
-                add_bot_log(user_id, f"🎯 {trade['coin']} TP1 atteint! +{round(pnl_tp1,2)} USDC | SL → breakeven | Trailing actif", "success")
                 conn.commit()
+                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
                 continue
-            if tp1_hit:
-                # Trailing progressif selon niveaux atteints
-                tp2 = trade["take_profit2"]
-                if tp2 and cur <= tp2 * 0.98:
-                    # Au-dela de TP2 - 2% → trailing ultra serré 0.5%
-                    trailing_pct = 0.005
-                elif tp2 and cur <= tp2:
-                    # TP2 atteint → trailing serré 0.8%
-                    trailing_pct = 0.008
+            conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
+                (new_lowest, cur, trade["id"]))
+
+        # === TRAILING PROFIT & MAX LOSS (dollar, seul mécanisme de fermeture profit/perte) ===
+        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
+        max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
+        trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
+        trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
+        trail_trigger = quick_profit_target * trail_mult
+
+        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
+        if pnl > peak_pnl:
+            peak_pnl = pnl
+            conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+
+        if peak_pnl >= trail_trigger:
+            trail_sl = peak_pnl - trail_gap
+            if pnl <= trail_sl:
+                if trail_sl <= quick_profit_target:
+                    close_reason = "QUICK_PROFIT"
                 else:
-                    # Entre TP1 et TP2 → trailing normal 1.5%
-                    trailing_pct = 0.015
-                new_trailing_sl = new_lowest * (1 + trailing_pct)
-                effective_sl = min(trailing_sl or trade["entry_price"], new_trailing_sl)
-                conn.execute("UPDATE paper_trades SET trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                    (effective_sl, new_lowest, cur, trade["id"]))
-                if cur >= effective_sl:
-                    close_reason = "TRAILING_SL"
-                    if tp2 and trade["lowest_price"] and trade["lowest_price"] <= tp2:
-                        close_reason = "TRAILING_SL_POST_TP2"
-            else:
-                # SL technique désactivé - Max Loss gère
-                pass
-                conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                    (new_lowest, cur, trade["id"]))
+                    close_reason = "TRAILING_PROFIT"
+        elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
+            close_reason = "QUICK_PROFIT"
+        elif pnl <= -max_loss_target:
+            close_reason = "MAX_LOSS"
 
         if close_reason:
             conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                 closed_at=?, close_reason=? WHERE id=?""",
                 (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
                  datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            # Si TP1 deja touche, on rend seulement la moitie restante + PnL sur cette moitie
-            remaining = trade["size_usdc"] * (0.5 if tp1_hit else 1)
+            # Si TP1 deja touche, on rend la totalite - TP1 est un jalon pur, aucun credit partiel
+            remaining = trade["size_usdc"]
             conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                 (remaining, pnl, user_id))
             emoji = "🎯" if close_reason in ("TP1","TP2","TRAILING_PROFIT","QUICK_PROFIT") else "🏁"
