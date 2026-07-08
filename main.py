@@ -196,6 +196,16 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
+            user_id INTEGER,
+            coin TEXT,
+            paused_until TEXT,
+            reason TEXT,
+            PRIMARY KEY (user_id, coin)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS ai_usage (
             user_id INTEGER,
             date TEXT,
@@ -714,7 +724,8 @@ async def scan_markets(user_id: int):
 
     cleanup_orphan_signals(user_id)
 
-    # === PAUSE AUTO SUR SÉRIE DE PERTES ===
+    # === PAUSE GÉNÉRALE — MANUELLE UNIQUEMENT (plus de déclenchement auto ici,
+    # remplacée par la pause par actif ci-dessous, plus précise) ===
     pause_until = config["pause_until"] if config and "pause_until" in config.keys() else None
     if pause_until:
         try:
@@ -722,28 +733,14 @@ async def scan_markets(user_id: int):
         except Exception:
             pu = None
         if pu and datetime.utcnow() < pu:
-            add_bot_log(user_id, f"⏸️ Pause auto active jusqu'à {pu.strftime('%H:%M')} UTC — série de pertes détectée", "warning")
+            add_bot_log(user_id, f"⏸️ Pause générale active jusqu'à {pu.strftime('%H:%M')} UTC (déclenchée manuellement)", "warning")
             return
         else:
             conn_p = get_db()
             conn_p.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
             conn_p.commit()
             conn_p.close()
-            add_bot_log(user_id, "▶️ Pause auto terminée — reprise des scans", "info")
-    elif check_losing_streak(user_id, config["loss_streak_size"] if config and "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3):
-        pause_h = config["pause_hours"] if config and "pause_hours" in config.keys() and config["pause_hours"] else 2.0
-        streak_n = config["loss_streak_size"] if config and "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3
-        resume_at = datetime.utcnow() + timedelta(hours=pause_h)
-        conn_p = get_db()
-        conn_p.execute("UPDATE bot_config SET pause_until=? WHERE user_id=?", (resume_at.isoformat(), user_id))
-        conn_p.commit()
-        conn_p.close()
-        add_bot_log(user_id, f"🔴 {streak_n} pertes consécutives — pause auto jusqu'à {resume_at.strftime('%H:%M')} UTC", "error")
-        await send_alert_email(user_id, "⚠️ Série de pertes détectée — pause automatique",
-            f"{streak_n} trades perdants d'affilée viennent d'être détectés (tous actifs confondus).\n"
-            f"Le bot est mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC pour éviter d'aggraver une mauvaise période.\n"
-            "Vous pouvez le réactiver manuellement plus tôt depuis Paramètres si vous le souhaitez.")
-        return
+            add_bot_log(user_id, "▶️ Pause générale terminée — reprise des scans", "info")
 
     # Reset auto filtre macro si annonce passée
     await auto_reset_macro_filter(user_id)
@@ -850,6 +847,9 @@ async def scan_markets(user_id: int):
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
             if coin not in prices:
+                continue
+
+            if is_coin_paused(user_id, coin):
                 continue
 
             price = prices[coin]
@@ -1233,8 +1233,10 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+CONFIDENCE_STEPS = [62, 72, 82, 90]  # paliers fixes : base, 1ère perte, 2e perte, 3e perte+
+
 def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 62) -> int:
-    """Retourne la confiance requise selon les pertes consécutives"""
+    """Retourne la confiance requise selon les pertes consécutives — paliers fixes 62/72/82/90"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
@@ -1242,12 +1244,53 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
     ).fetchone()
     conn.close()
     losses = row["consecutive_losses"] if row else 0
-    # +5% par perte consécutive, max 90%
-    required = min(base_confidence + (losses * 5), 90)
-    return required
+    return CONFIDENCE_STEPS[min(losses, len(CONFIDENCE_STEPS) - 1)]
 
-def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
-    """Met à jour le compteur de pertes consécutives"""
+async def pause_coin(user_id: int, coin: str, reason: str):
+    """Met un actif spécifique en pause automatique (3e perte consécutive atteinte)"""
+    conn = get_db()
+    cfg = conn.execute("SELECT pause_hours FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    pause_h = cfg["pause_hours"] if cfg and "pause_hours" in cfg.keys() and cfg["pause_hours"] else 2.0
+    resume_at = datetime.utcnow() + timedelta(hours=pause_h)
+    conn.execute("""INSERT OR REPLACE INTO coin_pause (user_id, coin, paused_until, reason) VALUES (?,?,?,?)""",
+        (user_id, coin, resume_at.isoformat(), reason))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"⏸️ {coin}: mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC — {reason}", "error")
+    await send_alert_email(user_id, f"⏸️ {coin} mis en pause automatique",
+        f"{coin} vient d'accumuler 3 pertes consécutives (paliers de confiance 72% → 82% → 90% tous franchis puis perdants).\n"
+        f"Cet actif est mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC.\n"
+        "Les autres actifs continuent de trader normalement.")
+
+def is_coin_paused(user_id: int, coin: str) -> bool:
+    """Vérifie si un actif est actuellement en pause automatique (et nettoie si expiré)"""
+    conn = get_db()
+    row = conn.execute("SELECT paused_until FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin)).fetchone()
+    if not row or not row["paused_until"]:
+        conn.close()
+        return False
+    try:
+        paused_until = datetime.fromisoformat(row["paused_until"])
+    except Exception:
+        conn.close()
+        return False
+    if datetime.utcnow() < paused_until:
+        conn.close()
+        return True
+    # Pause expirée → nettoyer, et exiger 82% de confiance (palier 2) au retour, par précaution
+    conn.execute("DELETE FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin))
+    conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
+        VALUES (?,?,'LONG',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
+    conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
+        VALUES (?,?,'SHORT',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"▶️ {coin}: pause terminée — confiance requise fixée à 82% pour la reprise", "info")
+    return False
+
+async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
+    """Met à jour le compteur de pertes consécutives — paliers 62/72/82/90 — et déclenche
+    la pause automatique de l'actif à la 3e perte consécutive"""
     conn = get_db()
     if won:
         # Victoire → reset compteur
@@ -1255,6 +1298,8 @@ def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,0,?)""",
             (user_id, coin, action, datetime.utcnow().isoformat()))
         add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 62% (gain)", "info")
+        conn.commit()
+        conn.close()
     else:
         # Défaite → incrémenter
         current = conn.execute(
@@ -1262,13 +1307,19 @@ def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
             (user_id, coin, action)
         ).fetchone()
         losses = (current["consecutive_losses"] + 1) if current else 1
-        new_conf = min(62 + (losses * 5), 90)
+        new_conf = CONFIDENCE_STEPS[min(losses, len(CONFIDENCE_STEPS) - 1)]
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,?,?)""",
             (user_id, coin, action, losses, datetime.utcnow().isoformat()))
         add_bot_log(user_id, f"📈 {coin} {action}: Confiance requise → {new_conf}% ({losses} pertes consécutives)", "warning")
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+        conn2 = get_db()
+        cfg = conn2.execute("SELECT loss_streak_size FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        conn2.close()
+        streak_size = cfg["loss_streak_size"] if cfg and "loss_streak_size" in cfg.keys() and cfg["loss_streak_size"] else 3
+        if losses >= streak_size:
+            await pause_coin(user_id, coin, f"{losses} pertes consécutives en {action}")
 
 async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
     """Vérifie les annonces macro importantes dans les prochaines 24h via Finnhub"""
@@ -1373,7 +1424,7 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
             conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                 (remaining, pnl, user_id))
             conn.commit()
-            update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
+            await update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
             return True
         conn.commit()
         return False
@@ -1980,7 +2031,7 @@ async def update_open_positions(user_id: int):
             add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
             # Mettre à jour confiance dynamique
             won = pnl > 0
-            update_coin_confidence(user_id, trade["coin"], trade["action"], won)
+            await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
             
             # Mettre à jour les stats de la session du jour en temps réel
             try:
@@ -2065,6 +2116,7 @@ class UpdateConfigRequest(BaseModel):
     trading_mode: Optional[str] = None
     ai_mode_paper: Optional[str] = None
     resume_now: Optional[bool] = None
+    pause_now: Optional[bool] = None
     loss_streak_size: Optional[int] = None
     pause_hours: Optional[float] = None
     max_position_usdc: Optional[float] = None
@@ -2171,7 +2223,13 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
                     (req.ai_mode_paper, user_id))
     if req.resume_now:
         conn.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
-        add_bot_log(user_id, "▶️ Pause auto levée manuellement", "info")
+        add_bot_log(user_id, "▶️ Pause levée manuellement", "info")
+    if req.pause_now:
+        cfg_p = conn.execute("SELECT pause_hours FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        pause_h = cfg_p["pause_hours"] if cfg_p and "pause_hours" in cfg_p.keys() and cfg_p["pause_hours"] else 2.0
+        resume_at = datetime.utcnow() + timedelta(hours=pause_h)
+        conn.execute("UPDATE bot_config SET pause_until=? WHERE user_id=?", (resume_at.isoformat(), user_id))
+        add_bot_log(user_id, f"⏸️ Pause générale déclenchée manuellement jusqu'à {resume_at.strftime('%H:%M')} UTC", "warning")
     if req.loss_streak_size is not None:
         conn.execute("UPDATE bot_config SET loss_streak_size=? WHERE user_id=?", (req.loss_streak_size, user_id))
     if req.pause_hours is not None:
@@ -2383,6 +2441,17 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
+
+@app.get("/api/coins/paused")
+def get_paused_coins(user_id: int = Depends(get_current_user)):
+    """Liste des actifs actuellement en pause automatique (3 pertes consécutives)"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT coin, paused_until, reason FROM coin_pause WHERE user_id=? AND paused_until > ?",
+        (user_id, datetime.utcnow().isoformat())
+    ).fetchall()
+    conn.close()
+    return {"paused": [dict(r) for r in rows]}
 
 @app.get("/api/stats/ai-usage")
 def get_ai_usage(user_id: int = Depends(get_current_user)):
