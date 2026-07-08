@@ -87,6 +87,46 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN base_confidence REAL DEFAULT 60")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step1 REAL DEFAULT 72")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step2 REAL DEFAULT 82")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step3 REAL DEFAULT 90")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_oversold REAL DEFAULT 35")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_overbought REAL DEFAULT 65")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN volume_spike_mult REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN btc_trend_threshold REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_activation_mult REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -301,6 +341,16 @@ def init_db():
             pause_until TEXT,
             loss_streak_size INTEGER DEFAULT 3,
             pause_hours REAL DEFAULT 2.0,
+            base_confidence REAL DEFAULT 60,
+            conf_step1 REAL DEFAULT 72,
+            conf_step2 REAL DEFAULT 82,
+            conf_step3 REAL DEFAULT 90,
+            rsi_oversold REAL DEFAULT 35,
+            rsi_overbought REAL DEFAULT 65,
+            volume_spike_mult REAL DEFAULT 1.5,
+            btc_trend_threshold REAL DEFAULT 2.0,
+            trailing_activation_mult REAL DEFAULT 1.5,
+            trailing_gap_usd REAL DEFAULT 0.5,
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.1,
@@ -823,15 +873,16 @@ async def scan_markets(user_id: int):
         # Tendance BTC globale sur 4h
         btc_trend = "neutral"
         btc_change = 0
+        btc_thresh = config["btc_trend_threshold"] if config and "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0
         btc_candles_4h = await fetch_candles(client, "BTC", "1h", 8)
         if btc_candles_4h and len(btc_candles_4h) >= 4:
             btc_open = float(btc_candles_4h[0]["c"])
             btc_close = float(btc_candles_4h[-1]["c"])
             btc_change = (btc_close - btc_open) / btc_open * 100
-            if btc_change > 2.0:
+            if btc_change > btc_thresh:
                 btc_trend = "bullish"
                 add_bot_log(user_id, f"🟢 BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif", "success")
-            elif btc_change < -2.0:
+            elif btc_change < -btc_thresh:
                 btc_trend = "bearish"
                 add_bot_log(user_id, f"🔴 BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif", "error")
             else:
@@ -843,6 +894,11 @@ async def scan_markets(user_id: int):
         
         # Scanner d'abord les coins actifs (priorité d'affichage), puis les autres
         coins_to_scan = active_coins + opportunist_coins
+
+        # Seuils stratégie réglables (Paramètres > Réglages avancés), avec repli sur les défauts
+        rsi_os = config["rsi_oversold"] if config and "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35
+        rsi_ob = config["rsi_overbought"] if config and "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65
+        vol_mult = config["volume_spike_mult"] if config and "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -884,14 +940,14 @@ async def scan_markets(user_id: int):
                 "bb_lower": round(bb["lower"], 4) if bb else None,
                 "atr": round(atr, 4) if atr else None,
                 "vwap": round(vwap, 4) if vwap else None,
-                "volume_trend": "SPIKE" if vol_cur > vol_avg*1.5 else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
+                "volume_trend": "SPIKE" if vol_cur > vol_avg*vol_mult else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
                 "btc_trend": btc_trend,
                 "btc_change": btc_change,
             }
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
-            has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5
+            has_signal = (rsi and (rsi < rsi_os or rsi > rsi_ob)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*vol_mult
 
             # BTC/ETH : ces deux actifs tendent en continu — un pullback en pleine tendance
             # (RSI modéré, ~40-60) mérite quand même une analyse IA si la structure EMA est claire
@@ -1167,11 +1223,12 @@ async def scan_markets(user_id: int):
                         (new_lowest, cur, trade["id"]))
 
             # === TRAILING PROFIT & MAX LOSS ===
-            cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
             max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-            trail_trigger = quick_profit_target * 1.5  # Active le trailing à 1.5$ si QP = 1$
-            trail_gap = 0.5  # TSL = pic - 0.5$
+            trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
+            trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
+            trail_trigger = quick_profit_target * trail_mult  # Active le trailing à trail_mult × QP
             hl_fees = trade["size_usdc"] * 0.001
 
             # Mettre à jour le pic de PnL
@@ -1191,7 +1248,9 @@ async def scan_markets(user_id: int):
                             add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
                         else:
                             close_reason = "TRAILING_PROFIT"
-                            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$) !", "success")
+                            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
+                    elif pnl <= trail_sl + 0.5:
+                        add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing (scan 3min) — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
                 elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
                     # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
                     # Le WebSocket étant temps réel, la précision est au centime
@@ -1233,18 +1292,34 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
-CONFIDENCE_STEPS = [60, 72, 82, 90]  # paliers fixes : base, 1ère perte, 2e perte, 3e perte+
-
-def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 60) -> int:
-    """Retourne la confiance requise selon les pertes consécutives — paliers fixes 60/72/82/90"""
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None) -> int:
+    """Retourne la confiance requise selon les pertes consécutives — paliers réglables (défaut 60/72/82/90)"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
         (user_id, coin, action)
     ).fetchone()
+    cfg = conn.execute(
+        "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
     conn.close()
     losses = row["consecutive_losses"] if row else 0
-    return CONFIDENCE_STEPS[min(losses, len(CONFIDENCE_STEPS) - 1)]
+    steps = get_confidence_steps(cfg)
+    return steps[min(losses, len(steps) - 1)]
+
+def get_confidence_steps(cfg) -> list:
+    """Construit la liste des paliers [base, step1, step2, step3] à partir de la config utilisateur,
+    avec repli sur les valeurs par défaut si non réglées."""
+    if not cfg:
+        return [60, 72, 82, 90]
+    keys = cfg.keys()
+    return [
+        cfg["base_confidence"] if "base_confidence" in keys and cfg["base_confidence"] else 60,
+        cfg["conf_step1"] if "conf_step1" in keys and cfg["conf_step1"] else 72,
+        cfg["conf_step2"] if "conf_step2" in keys and cfg["conf_step2"] else 82,
+        cfg["conf_step3"] if "conf_step3" in keys and cfg["conf_step3"] else 90,
+    ]
 
 async def pause_coin(user_id: int, coin: str, reason: str):
     """Met un actif spécifique en pause automatique (3e perte consécutive atteinte)"""
@@ -1307,7 +1382,12 @@ async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool
             (user_id, coin, action)
         ).fetchone()
         losses = (current["consecutive_losses"] + 1) if current else 1
-        new_conf = CONFIDENCE_STEPS[min(losses, len(CONFIDENCE_STEPS) - 1)]
+        cfg_steps = conn.execute(
+            "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        steps = get_confidence_steps(cfg_steps)
+        new_conf = steps[min(losses, len(steps) - 1)]
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,?,?)""",
             (user_id, coin, action, losses, datetime.utcnow().isoformat()))
@@ -1383,11 +1463,12 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
         pnl = price_diff * trade["size_usdc"] * trade["leverage"] * pnl_direction
 
         # Récupérer config
-        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
         max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-        trail_trigger = quick_profit_target * 1.5
-        trail_gap = 0.5
+        trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
+        trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
+        trail_trigger = quick_profit_target * trail_mult
         hl_fees = trade["size_usdc"] * 0.001
 
         # Mettre à jour peak_pnl
@@ -1396,6 +1477,8 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
             peak_pnl = pnl
             conn.execute("UPDATE paper_trades SET peak_pnl=?, current_price=?, pnl=?, pnl_pct=? WHERE id=?",
                 (peak_pnl, cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+            if peak_pnl >= trail_trigger:
+                add_bot_log(user_id, f"📊 {trade['coin']}: nouveau pic +{round(peak_pnl,2)}$ (trailing actif, seuil clôture: {round(peak_pnl-trail_gap,2)}$)", "info")
         else:
             conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
                 (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
@@ -1406,7 +1489,10 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
             trail_sl = peak_pnl - trail_gap
             if pnl <= trail_sl:
                 close_reason = "TRAILING_PROFIT" if trail_sl > quick_profit_target else "QUICK_PROFIT"
-                add_bot_log(user_id, f"🎯 {trade['coin']}: {'Trailing' if close_reason=='TRAILING_PROFIT' else 'Quick'} Profit +{round(pnl,2)}$ (pic: +{round(peak_pnl,2)}$) ⚡ WS", "success")
+                add_bot_log(user_id, f"🎯 {trade['coin']}: {'Trailing' if close_reason=='TRAILING_PROFIT' else 'Quick'} Profit +{round(pnl,2)}$ (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) ⚡ WS", "success")
+            elif pnl <= trail_sl + 0.5:
+                # Zone d'approche du seuil — log de diagnostic pour tracer les ticks précis
+                add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
         elif pnl > 0 and pnl <= quick_profit_target and peak_pnl > quick_profit_target:
             close_reason = "QUICK_PROFIT"
             add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)}$ ⚡ WS", "success")
@@ -2119,6 +2205,16 @@ class UpdateConfigRequest(BaseModel):
     pause_now: Optional[bool] = None
     loss_streak_size: Optional[int] = None
     pause_hours: Optional[float] = None
+    base_confidence: Optional[float] = None
+    conf_step1: Optional[float] = None
+    conf_step2: Optional[float] = None
+    conf_step3: Optional[float] = None
+    rsi_oversold: Optional[float] = None
+    rsi_overbought: Optional[float] = None
+    volume_spike_mult: Optional[float] = None
+    btc_trend_threshold: Optional[float] = None
+    trailing_activation_mult: Optional[float] = None
+    trailing_gap_usd: Optional[float] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
@@ -2190,6 +2286,16 @@ def get_config(user_id: int = Depends(get_current_user)):
         "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
         "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
         "pause_hours": config["pause_hours"] if "pause_hours" in config.keys() and config["pause_hours"] else 2.0,
+        "base_confidence": config["base_confidence"] if "base_confidence" in config.keys() and config["base_confidence"] else 60,
+        "conf_step1": config["conf_step1"] if "conf_step1" in config.keys() and config["conf_step1"] else 72,
+        "conf_step2": config["conf_step2"] if "conf_step2" in config.keys() and config["conf_step2"] else 82,
+        "conf_step3": config["conf_step3"] if "conf_step3" in config.keys() and config["conf_step3"] else 90,
+        "rsi_oversold": config["rsi_oversold"] if "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35,
+        "rsi_overbought": config["rsi_overbought"] if "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65,
+        "volume_spike_mult": config["volume_spike_mult"] if "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5,
+        "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
+        "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.5,
+        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.5,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
@@ -2234,6 +2340,26 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET loss_streak_size=? WHERE user_id=?", (req.loss_streak_size, user_id))
     if req.pause_hours is not None:
         conn.execute("UPDATE bot_config SET pause_hours=? WHERE user_id=?", (req.pause_hours, user_id))
+    if req.base_confidence is not None:
+        conn.execute("UPDATE bot_config SET base_confidence=? WHERE user_id=?", (req.base_confidence, user_id))
+    if req.conf_step1 is not None:
+        conn.execute("UPDATE bot_config SET conf_step1=? WHERE user_id=?", (req.conf_step1, user_id))
+    if req.conf_step2 is not None:
+        conn.execute("UPDATE bot_config SET conf_step2=? WHERE user_id=?", (req.conf_step2, user_id))
+    if req.conf_step3 is not None:
+        conn.execute("UPDATE bot_config SET conf_step3=? WHERE user_id=?", (req.conf_step3, user_id))
+    if req.rsi_oversold is not None:
+        conn.execute("UPDATE bot_config SET rsi_oversold=? WHERE user_id=?", (req.rsi_oversold, user_id))
+    if req.rsi_overbought is not None:
+        conn.execute("UPDATE bot_config SET rsi_overbought=? WHERE user_id=?", (req.rsi_overbought, user_id))
+    if req.volume_spike_mult is not None:
+        conn.execute("UPDATE bot_config SET volume_spike_mult=? WHERE user_id=?", (req.volume_spike_mult, user_id))
+    if req.btc_trend_threshold is not None:
+        conn.execute("UPDATE bot_config SET btc_trend_threshold=? WHERE user_id=?", (req.btc_trend_threshold, user_id))
+    if req.trailing_activation_mult is not None:
+        conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
+    if req.trailing_gap_usd is not None:
+        conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
