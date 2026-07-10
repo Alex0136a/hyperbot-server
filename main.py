@@ -1223,130 +1223,128 @@ async def scan_markets(user_id: int):
             conn.commit()
             conn.close()
 
-        # Auto-update paper trades
-        async with httpx.AsyncClient() as client2:
-            open_trades = conn.execute(
-                "SELECT DISTINCT coin FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-            ).fetchall() if False else []
-        conn = get_db()
-        paper_trades = conn.execute(
-            "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-        ).fetchall()
-        for trade in paper_trades:
-            price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
-            if not price_row: continue
-            cur = price_row["price"]
-            direction = 1 if trade["action"] == "LONG" else -1
-            pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-            close_reason = None
-            tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-            trailing_sl = trade["trailing_sl"]
-            highest = trade["highest_price"] or cur
-            lowest = trade["lowest_price"] or cur
+        # Auto-update paper trades — UNIQUEMENT si le WebSocket est déconnecté
+        # (sinon double-gestion des mêmes trades = contention DB + timeouts WS, voir bug résolu)
+        if not ws_connected:
+            conn = get_db()
+            paper_trades = conn.execute(
+                "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+            ).fetchall()
+            for trade in paper_trades:
+                price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
+                if not price_row: continue
+                cur = price_row["price"]
+                direction = 1 if trade["action"] == "LONG" else -1
+                pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+                close_reason = None
+                tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
+                trailing_sl = trade["trailing_sl"]
+                highest = trade["highest_price"] or cur
+                lowest = trade["lowest_price"] or cur
 
-            # Mettre a jour highest/lowest price
-            new_highest = max(highest, cur)
-            new_lowest = min(lowest, cur)
+                # Mettre a jour highest/lowest price
+                new_highest = max(highest, cur)
+                new_lowest = min(lowest, cur)
 
-            if trade["action"] == "LONG":
-                # TP1 pas encore atteint
-                if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                                        # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                        lowest_price=?, current_price=? WHERE id=?""",
-                        (trade["entry_price"], new_lowest, cur, trade["id"]))
-                    conn.commit()
-                    add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                    continue
-                # Trailing dollar géré plus bas — TP1 ne ferme jamais le trade lui-même
-                if not tp1_hit:
-                    # SL normal avant TP1
-                    # SL technique désactivé — Max Loss gère la protection
-                # if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                #     close_reason = "STOP_LOSS"
-                    conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                        (new_highest, cur, trade["id"]))
+                if trade["action"] == "LONG":
+                    # TP1 pas encore atteint
+                    if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
+                                            # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
+                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
+                            lowest_price=?, current_price=? WHERE id=?""",
+                            (trade["entry_price"], new_lowest, cur, trade["id"]))
+                        conn.commit()
+                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
+                        continue
+                    # Trailing dollar géré plus bas — TP1 ne ferme jamais le trade lui-même
+                    if not tp1_hit:
+                        # SL normal avant TP1
+                        # SL technique désactivé — Max Loss gère la protection
+                    # if trade["stop_loss"] and cur <= trade["stop_loss"]:
+                    #     close_reason = "STOP_LOSS"
+                        conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
+                            (new_highest, cur, trade["id"]))
 
-            elif trade["action"] == "SHORT":
-                # TP1 pas encore atteint
-                if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                    # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                    conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                        lowest_price=?, current_price=? WHERE id=?""",
-                        (trade["entry_price"], new_lowest, cur, trade["id"]))
-                    conn.commit()
-                    add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                    continue
-                # Trailing dollar géré plus bas — TP1/TP2 ne ferment jamais le trade eux-mêmes
-                if not tp1_hit:
-                    # SL technique désactivé — Max Loss gère la protection
-                # if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                #     close_reason = "STOP_LOSS"
-                    conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                        (new_lowest, cur, trade["id"]))
+                elif trade["action"] == "SHORT":
+                    # TP1 pas encore atteint
+                    if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
+                        # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
+                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
+                            lowest_price=?, current_price=? WHERE id=?""",
+                            (trade["entry_price"], new_lowest, cur, trade["id"]))
+                        conn.commit()
+                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
+                        continue
+                    # Trailing dollar géré plus bas — TP1/TP2 ne ferment jamais le trade eux-mêmes
+                    if not tp1_hit:
+                        # SL technique désactivé — Max Loss gère la protection
+                    # if trade["stop_loss"] and cur >= trade["stop_loss"]:
+                    #     close_reason = "STOP_LOSS"
+                        conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
+                            (new_lowest, cur, trade["id"]))
 
-            # === TRAILING PROFIT & MAX LOSS ===
-            cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-            max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-            trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-            trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-            trail_trigger = quick_profit_target * trail_mult  # Active le trailing à trail_mult × QP
-            hl_fees = trade["size_usdc"] * 0.001
+                # === TRAILING PROFIT & MAX LOSS ===
+                cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
+                max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
+                trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
+                trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
+                trail_trigger = quick_profit_target * trail_mult  # Active le trailing à trail_mult × QP
+                hl_fees = trade["size_usdc"] * 0.001
 
-            # Mettre à jour le pic de PnL
-            peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-            if pnl > peak_pnl:
-                peak_pnl = pnl
-                conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+                # Mettre à jour le pic de PnL
+                peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
+                if pnl > peak_pnl:
+                    peak_pnl = pnl
+                    conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
 
-            if not close_reason:
-                if peak_pnl >= trail_trigger:
-                    # Trailing actif — TSL = pic - 0.5$
-                    trail_sl = peak_pnl - trail_gap
-                    if pnl <= trail_sl:
-                        # Si TSL descend sous Quick Profit → fermer au Quick Profit
-                        if trail_sl <= quick_profit_target:
-                            close_reason = "QUICK_PROFIT"
-                            add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
-                        else:
-                            close_reason = "TRAILING_PROFIT"
-                            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
-                    elif pnl <= trail_sl + 0.5:
-                        add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing (scan 3min) — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
-                elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
-                    # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
-                    # Le WebSocket étant temps réel, la précision est au centime
-                    close_reason = "QUICK_PROFIT"
-                    add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
-                elif pnl <= -max_loss_target:
-                    # Max Loss
-                    close_reason = "MAX_LOSS"
-                    add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
+                if not close_reason:
+                    if peak_pnl >= trail_trigger:
+                        # Trailing actif — TSL = pic - 0.5$
+                        trail_sl = peak_pnl - trail_gap
+                        if pnl <= trail_sl:
+                            # Si TSL descend sous Quick Profit → fermer au Quick Profit
+                            if trail_sl <= quick_profit_target:
+                                close_reason = "QUICK_PROFIT"
+                                add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
+                            else:
+                                close_reason = "TRAILING_PROFIT"
+                                add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
+                        elif pnl <= trail_sl + 0.5:
+                            add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing (scan 3min) — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
+                    elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
+                        # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
+                        # Le WebSocket étant temps réel, la précision est au centime
+                        close_reason = "QUICK_PROFIT"
+                        add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
+                    elif pnl <= -max_loss_target:
+                        # Max Loss
+                        close_reason = "MAX_LOSS"
+                        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
 
-            # Mettre à jour prix seulement si changement significatif (> 0.05%)
-            if not close_reason:
-                last_price = trade["current_price"] if trade["current_price"] else trade["entry_price"]
-                if last_price and abs(cur - last_price) / last_price > 0.0005:
-                    conn.execute(
-                        "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
-                    )
+                # Mettre à jour prix seulement si changement significatif (> 0.05%)
+                if not close_reason:
+                    last_price = trade["current_price"] if trade["current_price"] else trade["entry_price"]
+                    if last_price and abs(cur - last_price) / last_price > 0.0005:
+                        conn.execute(
+                            "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
+                        )
 
-            if close_reason:
-                # PnL final = ce que le trade a généré en totalité
-                conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                    closed_at=?, close_reason=? WHERE id=?""",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                     datetime.utcnow().isoformat(), close_reason, trade["id"]))
-                conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                            (trade["size_usdc"], round(pnl,2), user_id))
-                add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-            else:
-                conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-        conn.commit()
-        conn.close()
+                if close_reason:
+                    # PnL final = ce que le trade a généré en totalité
+                    conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                        closed_at=?, close_reason=? WHERE id=?""",
+                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+                         datetime.utcnow().isoformat(), close_reason, trade["id"]))
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                                (trade["size_usdc"], round(pnl,2), user_id))
+                    add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+                else:
+                    conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+            conn.commit()
+            conn.close()
 
         # Update last scan
         conn = get_db()
