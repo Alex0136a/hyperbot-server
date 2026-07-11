@@ -71,106 +71,6 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN ai_mode_paper TEXT DEFAULT 'ai'")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN pause_until TEXT")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN loss_streak_size INTEGER DEFAULT 3")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN pause_hours REAL DEFAULT 2.0")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN base_confidence REAL DEFAULT 60")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step1 REAL DEFAULT 72")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step2 REAL DEFAULT 82")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN conf_step3 REAL DEFAULT 90")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_oversold REAL DEFAULT 35")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_overbought REAL DEFAULT 65")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN volume_spike_mult REAL DEFAULT 1.5")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN btc_trend_threshold REAL DEFAULT 2.0")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_activation_mult REAL DEFAULT 1.5")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 0.5")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_period INTEGER DEFAULT 14")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_fast INTEGER DEFAULT 12")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_slow INTEGER DEFAULT 26")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN macd_signal INTEGER DEFAULT 9")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN bb_period INTEGER DEFAULT 20")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN bb_stddev REAL DEFAULT 2")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN atr_period INTEGER DEFAULT 14")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_start INTEGER DEFAULT 21")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_end INTEGER DEFAULT 23")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN macro_blackout_before_min INTEGER DEFAULT 120")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN macro_blackout_after_min INTEGER DEFAULT 60")
-        conn.commit()
-    except: pass
-    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_position_usdc REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -280,27 +180,6 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
-            user_id INTEGER,
-            coin TEXT,
-            paused_until TEXT,
-            reason TEXT,
-            PRIMARY KEY (user_id, coin)
-        )""")
-        conn.commit()
-    except: pass
-    try:
-        conn.execute("""CREATE TABLE IF NOT EXISTS ai_usage (
-            user_id INTEGER,
-            date TEXT,
-            calls INTEGER DEFAULT 0,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, date)
-        )""")
-        conn.commit()
-    except: pass
-    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_usd REAL DEFAULT 0.5")
         conn.commit()
     except: pass
@@ -381,31 +260,6 @@ def init_db():
             active_coins TEXT DEFAULT '["HYPE","SOL","INJ"]',
             is_running INTEGER DEFAULT 0,
             trading_mode TEXT DEFAULT 'paper',
-            ai_mode_paper TEXT DEFAULT 'ai',
-            pause_until TEXT,
-            loss_streak_size INTEGER DEFAULT 3,
-            pause_hours REAL DEFAULT 2.0,
-            base_confidence REAL DEFAULT 60,
-            conf_step1 REAL DEFAULT 72,
-            conf_step2 REAL DEFAULT 82,
-            conf_step3 REAL DEFAULT 90,
-            rsi_oversold REAL DEFAULT 35,
-            rsi_overbought REAL DEFAULT 65,
-            volume_spike_mult REAL DEFAULT 1.5,
-            btc_trend_threshold REAL DEFAULT 2.0,
-            trailing_activation_mult REAL DEFAULT 1.5,
-            trailing_gap_usd REAL DEFAULT 0.5,
-            rsi_period INTEGER DEFAULT 14,
-            macd_fast INTEGER DEFAULT 12,
-            macd_slow INTEGER DEFAULT 26,
-            macd_signal INTEGER DEFAULT 9,
-            bb_period INTEGER DEFAULT 20,
-            bb_stddev REAL DEFAULT 2,
-            atr_period INTEGER DEFAULT 14,
-            hours_creuses_start INTEGER DEFAULT 21,
-            hours_creuses_end INTEGER DEFAULT 23,
-            macro_blackout_before_min INTEGER DEFAULT 120,
-            macro_blackout_after_min INTEGER DEFAULT 60,
             max_position_usdc REAL DEFAULT 50.0,
             position_pct REAL DEFAULT 5.0,
             quick_profit_usd REAL DEFAULT 1.1,
@@ -514,14 +368,14 @@ def calc_rsi(prices, period=14):
     if al == 0: return 100
     return 100 - 100/(1 + ag/al)
 
-def calc_macd(prices, fast=12, slow=26, signal=9):
-    e12 = calc_ema(prices, fast)
-    e26 = calc_ema(prices, slow)
+def calc_macd(prices):
+    e12 = calc_ema(prices, 12)
+    e26 = calc_ema(prices, 26)
     if not e12 or not e26:
         return None
     off = len(e12) - len(e26)
     macd_line = [e12[i+off] - v for i, v in enumerate(e26)]
-    sig = calc_ema(macd_line, signal)
+    sig = calc_ema(macd_line, 9)
     if not sig:
         return None
     off_m = len(macd_line) - len(sig)
@@ -615,27 +469,6 @@ def cache_market_data(coin: str, tech: dict, price: float):
         "updated_at": dt.utcnow().strftime("%H:%M:%S")
     }
 
-# Tarifs Claude Sonnet 4.6 (Anthropic API) — $ par million de tokens
-AI_PRICE_INPUT_PER_M = 3.0
-AI_PRICE_OUTPUT_PER_M = 15.0
-
-def record_ai_usage(user_id: int, input_tokens: int, output_tokens: int):
-    """Enregistre l'usage réel de l'API IA (tokens retournés par Anthropic) pour suivi de coût"""
-    try:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        conn = get_db()
-        conn.execute("""INSERT INTO ai_usage (user_id, date, calls, input_tokens, output_tokens)
-            VALUES (?,?,1,?,?)
-            ON CONFLICT(user_id, date) DO UPDATE SET
-                calls = calls + 1,
-                input_tokens = input_tokens + excluded.input_tokens,
-                output_tokens = output_tokens + excluded.output_tokens""",
-            (user_id, today, input_tokens or 0, output_tokens or 0))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ Erreur record_ai_usage: {e}")
-
 def get_compact_prompt(coin: str, tech: dict, price: float) -> str:
     """Génère un prompt compact depuis le cache — moins de tokens"""
     d = market_data_cache.get(coin, {})
@@ -658,97 +491,7 @@ DATA: price={d['price']} rsi={d['rsi']} macd={'BULL' if d['macd_bull'] else 'BEA
 RULES: RSI<25=LONG RSI>75=SHORT RSI25-45=LONG_BIAS RSI55-75=SHORT_BIAS min_RR=2 leverage=2-5 size=5-15%
 Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":number,"stopLoss":number,"takeProfit1":number,"takeProfit2":number,"leverage":2-5,"positionSize":5-15,"reasoning":"2 phrases FR","keySignals":["s1","s2","s3"],"riskReward":number,"timeframe":"court-terme"|"moyen-terme"}}"""
 
-def analyze_with_rules(coin: str, tech: dict, price: float, max_loss_usd: float = 0.75, size_usdc: float = 50.0) -> dict:
-    """Décision 100% gratuite basée sur des règles techniques fixes (RSI/MACD/EMA/Volume) —
-    utilisée en mode Paper quand l'utilisateur ne veut pas payer d'appels IA sur des trades simulés.
-    Reproduit la même heuristique que celle suggérée à l'IA (RSI<25=LONG, RSI>75=SHORT, etc.)
-    mais de façon 100% mécanique et gratuite. SL calculé pour correspondre à 1.5× Max Loss
-    (cohérent avec la protection $ réelle, pas de conflit) ; TP1/TP2 restent basés sur l'ATR."""
-    rsi = tech.get("rsi") or 50
-    atr = tech.get("atr") or price * 0.01
-    ema20, ema50, ema200 = tech.get("ema20"), tech.get("ema50"), tech.get("ema200")
-    macd_bull, macd_bear = tech.get("macd_bull"), tech.get("macd_bear")
-    vol_trend = tech.get("volume_trend")
-
-    ema_bull = bool(ema20 and ema50 and ema200 and ema20 > ema50 > ema200)
-    ema_bear = bool(ema20 and ema50 and ema200 and ema20 < ema50 < ema200)
-
-    action, confidence, signals = "WAIT", 50, []
-
-    if rsi < 25:
-        action, confidence = "LONG", 78
-        signals.append(f"RSI {rsi} survente forte")
-    elif rsi > 75:
-        action, confidence = "SHORT", 78
-        signals.append(f"RSI {rsi} surachat fort")
-    elif rsi <= 45:
-        action, confidence = "LONG", 64
-        signals.append(f"RSI {rsi} zone de rebond")
-    elif rsi >= 55:
-        action, confidence = "SHORT", 64
-        signals.append(f"RSI {rsi} zone de repli")
-
-    if action == "LONG":
-        if macd_bull:
-            confidence += 8; signals.append("MACD haussier confirmé")
-        elif macd_bear:
-            confidence -= 12; signals.append("MACD contredit (baissier)")
-        if ema_bull:
-            confidence += 6; signals.append("Structure EMA haussière")
-        elif ema_bear:
-            confidence -= 10
-    elif action == "SHORT":
-        if macd_bear:
-            confidence += 8; signals.append("MACD baissier confirmé")
-        elif macd_bull:
-            confidence -= 12; signals.append("MACD contredit (haussier)")
-        if ema_bear:
-            confidence += 6; signals.append("Structure EMA baissière")
-        elif ema_bull:
-            confidence -= 10
-
-    if vol_trend == "SPIKE":
-        confidence += 5; signals.append("pic de volume")
-
-    confidence = max(0, min(95, confidence))
-
-    if action == "WAIT" or confidence < 55:
-        return {
-            "action": "WAIT", "confidence": confidence, "entry": price,
-            "stopLoss": price, "takeProfit1": price, "takeProfit2": price,
-            "leverage": 1, "positionSize": 5,
-            "reasoning": "Règles techniques (mode Paper, sans IA) : pas de signal net",
-            "keySignals": signals, "riskReward": 0, "timeframe": "court-terme"
-        }
-
-    leverage = 3 if confidence >= 70 else 2
-    # SL cohérent avec 1.5× Max Loss ($) — évite tout conflit avec la protection dollar réelle
-    sl_distance_pct = (max_loss_usd * 1.5) / max(size_usdc * leverage, 1)
-    if action == "LONG":
-        stop_loss = round(price * (1 - sl_distance_pct), 6)
-        tp1 = round(price + atr * 2, 6)
-        tp2 = round(price + atr * 3, 6)
-    else:
-        stop_loss = round(price * (1 + sl_distance_pct), 6)
-        tp1 = round(price - atr * 2, 6)
-        tp2 = round(price - atr * 3, 6)
-
-    return {
-        "action": action,
-        "confidence": confidence,
-        "entry": price,
-        "stopLoss": stop_loss,
-        "takeProfit1": tp1,
-        "takeProfit2": tp2,
-        "leverage": leverage,
-        "positionSize": 10 if confidence >= 70 else 6,
-        "reasoning": f"Règles techniques (mode Paper, sans IA) : {', '.join(signals) if signals else 'signal RSI'}",
-        "keySignals": signals[:3] if signals else [f"RSI {rsi}"],
-        "riskReward": 2.0,
-        "timeframe": "court-terme"
-    }
-
-async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
+async def analyze_with_ai(client, coin, tech, ob, price, api_key):
     # Cacher les données et utiliser prompt compact — 60-70% moins de tokens
     cache_market_data(coin, tech, price)
     prompt = get_compact_prompt(coin, tech, price)
@@ -771,8 +514,6 @@ async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
         if "error" in data:
             print(f"Anthropic API erreur: {data['error']}")
             return None
-        usage = data.get("usage", {})
-        record_ai_usage(user_id, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
         text = "".join(b.get("text","") for b in data.get("content",[]))
         clean = text.replace("```json","").replace("```","").strip()
         return json.loads(clean)
@@ -787,37 +528,80 @@ async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
 scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
 positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
 
-def check_losing_streak(user_id: int, streak_size: int = 3) -> bool:
-    """Détecte X pertes consécutives (tous actifs confondus, les plus récentes fermées)"""
-    try:
-        conn = get_db()
-        recent = conn.execute(
-            "SELECT pnl FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT ?",
-            (user_id, streak_size)
-        ).fetchall()
-        conn.close()
-        if len(recent) < streak_size:
-            return False
-        return all((r["pnl"] or 0) < 0 for r in recent)
-    except Exception as e:
-        print(f"⚠️ Erreur check_losing_streak: {e}")
-        return False
+# ── SYSTEME UNIQUE DE GESTION DES TRADES OUVERTS ──────────────
+# Seul point de fermeture d'un paper_trade : Trailing Profit + Max Loss.
+# Aucun autre emplacement du code ne doit fixer status='CLOSED'.
+# (le futur SL réel posé sur Hyperliquid sera le seul autre déclencheur,
+# côté exchange, en cas de défaillance du bot)
+def manage_open_trade(user_id: int, trade: dict, cur: float, conn) -> bool:
+    """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
+    Retourne True si le trade a été fermé, False sinon.
+    C'est la SEULE fonction autorisée à fermer un paper_trade."""
+    direction = 1 if trade["action"] == "LONG" else -1
+    pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
 
-def cleanup_orphan_signals(user_id: int):
-    """Supprime automatiquement les signaux jamais tradés (orphelins) : signaux générés en
-    mode Live (pas d'auto-exécution), ou refusés faute de solde/slot/position déjà ouverte.
-    Marge de 60 min pour ne jamais supprimer un signal en cours de traitement."""
-    try:
-        conn = get_db()
-        conn.execute("""
-            DELETE FROM signals WHERE user_id=? AND id NOT IN (
-                SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL
-            ) AND created_at < datetime('now', '-60 minutes')
-        """, (user_id,))
+    cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
+    max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
+    trail_trigger = quick_profit_target  # Trailing actif dès que le PnL dépasse le seuil configuré
+    trail_gap = 0.3  # TSL = pic - 0.3$
+
+    peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
+    if pnl > peak_pnl:
+        peak_pnl = pnl
+        conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+
+    close_reason = None
+    if peak_pnl >= trail_trigger:
+        trail_sl = peak_pnl - trail_gap
+        if pnl <= trail_sl:
+            close_reason = "TRAILING_PROFIT"
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$) !", "success")
+    elif pnl <= -max_loss_target:
+        close_reason = "MAX_LOSS"
+        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
+
+    if close_reason:
+        conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+            closed_at=?, close_reason=? WHERE id=?""",
+            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+             datetime.utcnow().isoformat(), close_reason, trade["id"]))
+        conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                    (trade["size_usdc"], round(pnl,2), user_id))
+        add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
         conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ Erreur cleanup_orphan_signals: {e}")
+        update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
+
+        # Mettre à jour les stats de la session du jour en temps réel
+        try:
+            trade_date = trade.get("session_date") or (trade.get("opened_at") or "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
+            session_stats = conn.execute("""
+                SELECT COUNT(*) as total,
+                    SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                    SUM(pnl) as net
+                FROM paper_trades
+                WHERE user_id=? AND status='CLOSED'
+                AND COALESCE(session_date, date(opened_at), date(closed_at))=?
+            """, (user_id, trade_date)).fetchone()
+            if session_stats:
+                conn.execute("""UPDATE trading_sessions
+                    SET total_trades=?, wins=?, losses=?, net_pnl=?
+                    WHERE user_id=? AND session_date=?""",
+                    (session_stats["total"] or 0, session_stats["wins"] or 0,
+                     session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
+                     user_id, trade_date))
+                conn.commit()
+        except Exception:
+            pass
+
+        return True
+
+    # Pas de fermeture : simple mise à jour de l'état pour affichage
+    conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+    conn.commit()
+    return False
 
 async def scan_markets(user_id: int):
     conn = get_db()
@@ -830,26 +614,6 @@ async def scan_markets(user_id: int):
 
     active_coins = json.loads(config["active_coins"])
     api_key = user["api_key"]
-
-    cleanup_orphan_signals(user_id)
-
-    # === PAUSE GÉNÉRALE — MANUELLE UNIQUEMENT (plus de déclenchement auto ici,
-    # remplacée par la pause par actif ci-dessous, plus précise) ===
-    pause_until = config["pause_until"] if config and "pause_until" in config.keys() else None
-    if pause_until:
-        try:
-            pu = datetime.fromisoformat(pause_until)
-        except Exception:
-            pu = None
-        if pu and datetime.utcnow() < pu:
-            add_bot_log(user_id, f"⏸️ Pause générale active jusqu'à {pu.strftime('%H:%M')} UTC (déclenchée manuellement)", "warning")
-            return
-        else:
-            conn_p = get_db()
-            conn_p.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
-            conn_p.commit()
-            conn_p.close()
-            add_bot_log(user_id, "▶️ Pause générale terminée — reprise des scans", "info")
 
     # Reset auto filtre macro si annonce passée
     await auto_reset_macro_filter(user_id)
@@ -868,14 +632,13 @@ async def scan_markets(user_id: int):
     # === CALENDRIER MACRO FINNHUB ===
     finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if finnhub_key and not filter_macro:
-        macro_before_min = config["macro_blackout_before_min"] if config and "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120
         macro_data = await check_macro_calendar(user_id, finnhub_key)
         for event in macro_data.get("events", []):
             hours = event["hours_left"]
             name = event["event"]
             if hours <= 0:
                 add_bot_log(user_id, f"📰 {name} vient d'être publié — volatilité possible", "warning")
-            elif hours*60 <= macro_before_min:
+            elif hours <= 2:
                 # Auto-activer le filtre macro
                 conn_m = get_db()
                 conn_m.execute("UPDATE bot_config SET filter_macro=1 WHERE user_id=?", (user_id,))
@@ -892,9 +655,7 @@ async def scan_markets(user_id: int):
     hour_utc = now_utc.hour
     weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
 
-    hc_start = config["hours_creuses_start"] if config and "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21
-    hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23
-    if filter_hours and hc_start <= hour_utc < hc_end:
+    if filter_hours and 21 <= hour_utc < 23:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
         return
 
@@ -908,24 +669,12 @@ async def scan_markets(user_id: int):
         return
 
     async with httpx.AsyncClient() as client:
-        # Liste complète des actifs disponibles (30) — scannés dans tous les cas
-        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
+        # Fetch prices
+        prices = await fetch_all_metas(client)
 
-        # Prix : WebSocket temps réel en priorité (déjà en mémoire, gratuit), REST en fallback
-        if ws_connected and ws_prices:
-            prices = dict(ws_prices)
-            missing = [c for c in all_available_coins if c not in prices]
-            if missing:
-                rest_prices = await fetch_all_metas(client)
-                for c in missing:
-                    if c in rest_prices:
-                        prices[c] = rest_prices[c]
-        else:
-            prices = await fetch_all_metas(client)
-
-        # Update prices en DB pour tous les actifs scannés (pas seulement les 7 "actifs")
+        # Update prices en DB uniquement pour les coins actifs
         conn = get_db()
-        for coin in all_available_coins:
+        for coin in active_coins:
             if coin in prices:
                 conn.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
                             (coin, prices[coin], datetime.utcnow().isoformat()))
@@ -935,51 +684,49 @@ async def scan_markets(user_id: int):
         # Tendance BTC globale sur 4h
         btc_trend = "neutral"
         btc_change = 0
-        btc_thresh = config["btc_trend_threshold"] if config and "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0
         btc_candles_4h = await fetch_candles(client, "BTC", "1h", 8)
         if btc_candles_4h and len(btc_candles_4h) >= 4:
             btc_open = float(btc_candles_4h[0]["c"])
             btc_close = float(btc_candles_4h[-1]["c"])
             btc_change = (btc_close - btc_open) / btc_open * 100
-            if btc_change > btc_thresh:
+            if btc_change > 2.0:
                 btc_trend = "bullish"
                 add_bot_log(user_id, f"🟢 BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif", "success")
-            elif btc_change < -btc_thresh:
+            elif btc_change < -2.0:
                 btc_trend = "bearish"
                 add_bot_log(user_id, f"🔴 BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif", "error")
             else:
                 add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
 
-        # Analyze each coin — tous les actifs sont traités à égalité (le pré-filtre technique
-        # décide seul qui mérite un appel IA, "active_coins" ne sert plus qu'à l'ordre de scan)
+        # Analyze each coin
+        # Coins opportunistes (75%+) = tous les 30 coins disponibles
+        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
         opportunist_coins = [c for c in all_available_coins if c not in active_coins]
         
-        # Scanner d'abord les coins actifs (priorité d'affichage), puis les autres
+        # Scanner d'abord les coins actifs, puis les opportunistes
         coins_to_scan = active_coins + opportunist_coins
-
-        # Seuils stratégie réglables (Paramètres > Réglages avancés), avec repli sur les défauts
-        rsi_os = config["rsi_oversold"] if config and "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35
-        rsi_ob = config["rsi_overbought"] if config and "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65
-        vol_mult = config["volume_spike_mult"] if config and "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5
-        rsi_period = config["rsi_period"] if config and "rsi_period" in config.keys() and config["rsi_period"] else 14
-        macd_fast = config["macd_fast"] if config and "macd_fast" in config.keys() and config["macd_fast"] else 12
-        macd_slow = config["macd_slow"] if config and "macd_slow" in config.keys() and config["macd_slow"] else 26
-        macd_sig = config["macd_signal"] if config and "macd_signal" in config.keys() and config["macd_signal"] else 9
-        bb_period = config["bb_period"] if config and "bb_period" in config.keys() and config["bb_period"] else 20
-        bb_stddev = config["bb_stddev"] if config and "bb_stddev" in config.keys() and config["bb_stddev"] else 2
-        atr_period = config["atr_period"] if config and "atr_period" in config.keys() and config["atr_period"] else 14
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
             if coin not in prices:
                 continue
 
-            if is_coin_paused(user_id, coin):
-                continue
-
             price = prices[coin]
             candles_raw = await fetch_candles(client, coin)
             
+            # Pré-filtre RSI pour les coins opportunistes — économise les crédits IA
+            if is_opportunist and candles_raw:
+                # candles_raw est une liste de dicts {h, l, c, o, v}
+                closes = [float(cd["c"]) for cd in candles_raw[-15:] if "c" in cd]
+                if len(closes) >= 14:
+                    gains = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
+                    losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
+                    avg_gain = sum(gains[-14:])/14
+                    avg_loss = sum(losses[-14:])/14
+                    rsi_quick = 100-(100/(1+avg_gain/max(avg_loss,0.0001)))
+                    # Appeler l'IA seulement si RSI en zone extrême (<35 ou >65)
+                    if 35 <= rsi_quick <= 65:
+                        continue  # Zone neutre — pas d'opportunité
             if not candles_raw or len(candles_raw) < 50:
                 continue
 
@@ -990,11 +737,11 @@ async def scan_markets(user_id: int):
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
             e200 = calc_ema(closes, 200)
-            macd = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
-            bb = calc_bb(closes, int(bb_period), bb_stddev)
-            atr = calc_atr(candles, int(atr_period))
+            macd = calc_macd(closes)
+            bb = calc_bb(closes)
+            atr = calc_atr(candles)
             vwap = calc_vwap(candles)
-            rsi = calc_rsi(closes, int(rsi_period))
+            rsi = calc_rsi(closes)
             vol_avg = sum(vols[-20:]) / 20
             vol_cur = vols[-1]
 
@@ -1009,20 +756,13 @@ async def scan_markets(user_id: int):
                 "bb_lower": round(bb["lower"], 4) if bb else None,
                 "atr": round(atr, 4) if atr else None,
                 "vwap": round(vwap, 4) if vwap else None,
-                "volume_trend": "SPIKE" if vol_cur > vol_avg*vol_mult else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
+                "volume_trend": "SPIKE" if vol_cur > vol_avg*1.5 else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
                 "btc_trend": btc_trend,
                 "btc_change": btc_change,
             }
 
-            # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
-            # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
-            has_signal = (rsi and (rsi < rsi_os or rsi > rsi_ob)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*vol_mult
-
-            # BTC/ETH : ces deux actifs tendent en continu — un pullback en pleine tendance
-            # (RSI modéré, ~40-60) mérite quand même une analyse IA si la structure EMA est claire
-            if coin in ("BTC", "ETH") and e20 and e50 and e200:
-                if (e20[-1] > e50[-1] > e200[-1]) or (e20[-1] < e50[-1] < e200[-1]):
-                    has_signal = True
+            # Pre-filter
+            has_signal = (rsi and (rsi < 35 or rsi > 65)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*1.5 or True
 
             if not has_signal or not api_key:
                 continue
@@ -1067,22 +807,7 @@ async def scan_markets(user_id: int):
             # Skip les coins opportunistes si confiance pas encore connue
             # (on les analyse quand même mais on filtre après)
 
-            ai_mode_paper = config["ai_mode_paper"] if config and "ai_mode_paper" in config.keys() else "ai"
-            use_rules_engine = (config["trading_mode"] == "paper") and (ai_mode_paper == "rules")
-
-            if use_rules_engine:
-                conn_sl = get_db()
-                cfg_sl = conn_sl.execute("SELECT max_loss_usd, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                portfolio_sl = conn_sl.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-                conn_sl.close()
-                _max_loss = cfg_sl["max_loss_usd"] if cfg_sl and cfg_sl["max_loss_usd"] else 0.75
-                _pct = cfg_sl["position_pct"] if cfg_sl and cfg_sl["position_pct"] else 8.0
-                _capital = portfolio_sl["balance"] if portfolio_sl else 1000.0
-                _size_est = max(10.0, min(round(_capital * _pct / 100, 2), _capital * 0.5))
-                ai = analyze_with_rules(coin, tech, price, _max_loss, _size_est)
-                cache_market_data(coin, tech, price)
-            else:
-                ai = await analyze_with_ai(client, user_id, coin, tech, None, price, api_key)
+            ai = await analyze_with_ai(client, coin, tech, None, price, api_key)
             if not ai:
                 add_bot_log(user_id, f"⚠️ {coin}: Pas de réponse IA", "warning")
                 continue
@@ -1092,34 +817,20 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"💡 {coin} (déjà ouvert): IA → {action_ia} ({confidence_ia}%) — info seulement", "info")
                 continue
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
-            add_bot_log(user_id, f"{'📐' if use_rules_engine else '🤖'} {coin}: {'Règles' if use_rules_engine else 'IA'} → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
+            add_bot_log(user_id, f"🤖 {coin}: IA → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
             required_conf = get_required_confidence(user_id, coin, action_ia)
-            if action_ia == "WAIT":
-                add_bot_log(user_id, f"⛔ {coin}: aucun signal net (WAIT) — ignoré", "info")
-                continue
-            if confidence_ia < required_conf:
+            # Pour les coins opportunistes, seuil minimum 75%
+            opportunist_threshold = 75
+            if is_opportunist:
+                if action_ia == "WAIT" or confidence_ia < opportunist_threshold:
+                    continue  # Skip silencieux pour les opportunistes
+                add_bot_log(user_id, f"🎯 {coin}: Trade opportuniste ({confidence_ia}%) hors sélection !", "success")
+            elif action_ia == "WAIT" or confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
-            if is_opportunist:
-                add_bot_log(user_id, f"🎯 {coin}: Trade hors sélection ({confidence_ia}%) — actif ouvert dynamiquement !", "success")
 
             rsi_now = tech.get("rsi") or 50
             action = ai.get("action")
-
-            # === RÈGLE RENFORCÉE BTC/ETH — ces deux actifs suivent des tendances
-            # persistantes plutôt que des retournements fréquents (contrairement aux alts).
-            # On bloque tout trade à contre-tendance de leur PROPRE structure EMA,
-            # même si le filtre global BTC ±2%/8h considère la zone "neutre".
-            if coin in ("BTC", "ETH") and e20 and e50 and e200:
-                own_ema_align = "BULL" if e20[-1] > e50[-1] > e200[-1] else "BEAR" if e20[-1] < e50[-1] < e200[-1] else "MIXED"
-                if own_ema_align == "BULL" and action == "SHORT":
-                    add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — structure EMA haussière (20>50>200)", "warning")
-                    continue
-                if own_ema_align == "BEAR" and action == "LONG":
-                    add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — structure EMA baissière (20<50<200)", "warning")
-                    continue
-                if own_ema_align != "MIXED":
-                    add_bot_log(user_id, f"📈 {coin}: Structure EMA {own_ema_align} confirmée — trade dans le sens de tendance", "success")
 
             # === MODE TENDANCE HAUSSIERE (BTC +2%) ===
             if btc_trend == "bullish" and coin != "PAXG":
@@ -1223,128 +934,23 @@ async def scan_markets(user_id: int):
             conn.commit()
             conn.close()
 
-        # Auto-update paper trades — UNIQUEMENT si le WebSocket est déconnecté
-        # (sinon double-gestion des mêmes trades = contention DB + timeouts WS, voir bug résolu)
-        if not ws_connected:
-            conn = get_db()
-            paper_trades = conn.execute(
-                "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
-            ).fetchall()
-            for trade in paper_trades:
-                price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
-                if not price_row: continue
-                cur = price_row["price"]
-                direction = 1 if trade["action"] == "LONG" else -1
-                pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-                close_reason = None
-                tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-                trailing_sl = trade["trailing_sl"]
-                highest = trade["highest_price"] or cur
-                lowest = trade["lowest_price"] or cur
-
-                # Mettre a jour highest/lowest price
-                new_highest = max(highest, cur)
-                new_lowest = min(lowest, cur)
-
-                if trade["action"] == "LONG":
-                    # TP1 pas encore atteint
-                    if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                                            # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                            lowest_price=?, current_price=? WHERE id=?""",
-                            (trade["entry_price"], new_lowest, cur, trade["id"]))
-                        conn.commit()
-                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                        continue
-                    # Trailing dollar géré plus bas — TP1 ne ferme jamais le trade lui-même
-                    if not tp1_hit:
-                        # SL normal avant TP1
-                        # SL technique désactivé — Max Loss gère la protection
-                    # if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                    #     close_reason = "STOP_LOSS"
-                        conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                            (new_highest, cur, trade["id"]))
-
-                elif trade["action"] == "SHORT":
-                    # TP1 pas encore atteint
-                    if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                        # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                            lowest_price=?, current_price=? WHERE id=?""",
-                            (trade["entry_price"], new_lowest, cur, trade["id"]))
-                        conn.commit()
-                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                        continue
-                    # Trailing dollar géré plus bas — TP1/TP2 ne ferment jamais le trade eux-mêmes
-                    if not tp1_hit:
-                        # SL technique désactivé — Max Loss gère la protection
-                    # if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                    #     close_reason = "STOP_LOSS"
-                        conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                            (new_lowest, cur, trade["id"]))
-
-                # === TRAILING PROFIT & MAX LOSS ===
-                cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-                max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-                trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-                trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-                trail_trigger = quick_profit_target * trail_mult  # Active le trailing à trail_mult × QP
-                hl_fees = trade["size_usdc"] * 0.001
-
-                # Mettre à jour le pic de PnL
-                peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-                if pnl > peak_pnl:
-                    peak_pnl = pnl
-                    conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
-
-                if not close_reason:
-                    if peak_pnl >= trail_trigger:
-                        # Trailing actif — TSL = pic - 0.5$
-                        trail_sl = peak_pnl - trail_gap
-                        if pnl <= trail_sl:
-                            # Si TSL descend sous Quick Profit → fermer au Quick Profit
-                            if trail_sl <= quick_profit_target:
-                                close_reason = "QUICK_PROFIT"
-                                add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
-                            else:
-                                close_reason = "TRAILING_PROFIT"
-                                add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
-                        elif pnl <= trail_sl + 0.5:
-                            add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing (scan 3min) — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
-                    elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
-                        # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
-                        # Le WebSocket étant temps réel, la précision est au centime
-                        close_reason = "QUICK_PROFIT"
-                        add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
-                    elif pnl <= -max_loss_target:
-                        # Max Loss
-                        close_reason = "MAX_LOSS"
-                        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
-
-                # Mettre à jour prix seulement si changement significatif (> 0.05%)
-                if not close_reason:
-                    last_price = trade["current_price"] if trade["current_price"] else trade["entry_price"]
-                    if last_price and abs(cur - last_price) / last_price > 0.0005:
-                        conn.execute(
-                            "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
-                        )
-
-                if close_reason:
-                    # PnL final = ce que le trade a généré en totalité
-                    conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                        closed_at=?, close_reason=? WHERE id=?""",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                         datetime.utcnow().isoformat(), close_reason, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                                (trade["size_usdc"], round(pnl,2), user_id))
-                    add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-                else:
-                    conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-            conn.commit()
-            conn.close()
+        # Auto-update paper trades
+        async with httpx.AsyncClient() as client2:
+            open_trades = conn.execute(
+                "SELECT DISTINCT coin FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+            ).fetchall() if False else []
+        conn = get_db()
+        paper_trades = conn.execute(
+            "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
+        ).fetchall()
+        for trade in paper_trades:
+            price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
+            if not price_row: continue
+            cur = price_row["price"]
+            # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
+            manage_open_trade(user_id, dict(trade), cur, conn)
+        conn.commit()
+        conn.close()
 
         # Update last scan
         conn = get_db()
@@ -1353,89 +959,28 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
-def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None) -> int:
-    """Retourne la confiance requise selon les pertes consécutives — paliers réglables (défaut 60/72/82/90)"""
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = 62) -> int:
+    """Retourne la confiance requise selon les pertes consécutives"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
         (user_id, coin, action)
     ).fetchone()
-    cfg = conn.execute(
-        "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
     conn.close()
     losses = row["consecutive_losses"] if row else 0
-    steps = get_confidence_steps(cfg)
-    return steps[min(losses, len(steps) - 1)]
+    # +5% par perte consécutive, max 90%
+    required = min(base_confidence + (losses * 5), 90)
+    return required
 
-def get_confidence_steps(cfg) -> list:
-    """Construit la liste des paliers [base, step1, step2, step3] à partir de la config utilisateur,
-    avec repli sur les valeurs par défaut si non réglées."""
-    if not cfg:
-        return [60, 72, 82, 90]
-    keys = cfg.keys()
-    return [
-        cfg["base_confidence"] if "base_confidence" in keys and cfg["base_confidence"] else 60,
-        cfg["conf_step1"] if "conf_step1" in keys and cfg["conf_step1"] else 72,
-        cfg["conf_step2"] if "conf_step2" in keys and cfg["conf_step2"] else 82,
-        cfg["conf_step3"] if "conf_step3" in keys and cfg["conf_step3"] else 90,
-    ]
-
-async def pause_coin(user_id: int, coin: str, reason: str):
-    """Met un actif spécifique en pause automatique (3e perte consécutive atteinte)"""
-    conn = get_db()
-    cfg = conn.execute("SELECT pause_hours FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    pause_h = cfg["pause_hours"] if cfg and "pause_hours" in cfg.keys() and cfg["pause_hours"] else 2.0
-    resume_at = datetime.utcnow() + timedelta(hours=pause_h)
-    conn.execute("""INSERT OR REPLACE INTO coin_pause (user_id, coin, paused_until, reason) VALUES (?,?,?,?)""",
-        (user_id, coin, resume_at.isoformat(), reason))
-    conn.commit()
-    conn.close()
-    add_bot_log(user_id, f"⏸️ {coin}: mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC — {reason}", "error")
-    await send_alert_email(user_id, f"⏸️ {coin} mis en pause automatique",
-        f"{coin} vient d'accumuler 3 pertes consécutives (paliers de confiance 72% → 82% → 90% tous franchis puis perdants).\n"
-        f"Cet actif est mis en pause automatique jusqu'à {resume_at.strftime('%H:%M')} UTC.\n"
-        "Les autres actifs continuent de trader normalement.")
-
-def is_coin_paused(user_id: int, coin: str) -> bool:
-    """Vérifie si un actif est actuellement en pause automatique (et nettoie si expiré)"""
-    conn = get_db()
-    row = conn.execute("SELECT paused_until FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin)).fetchone()
-    if not row or not row["paused_until"]:
-        conn.close()
-        return False
-    try:
-        paused_until = datetime.fromisoformat(row["paused_until"])
-    except Exception:
-        conn.close()
-        return False
-    if datetime.utcnow() < paused_until:
-        conn.close()
-        return True
-    # Pause expirée → nettoyer, et exiger 82% de confiance (palier 2) au retour, par précaution
-    conn.execute("DELETE FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin))
-    conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
-        VALUES (?,?,'LONG',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
-    conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
-        VALUES (?,?,'SHORT',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
-    add_bot_log(user_id, f"▶️ {coin}: pause terminée — confiance requise fixée à 82% pour la reprise", "info")
-    return False
-
-async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
-    """Met à jour le compteur de pertes consécutives — paliers 60/72/82/90 — et déclenche
-    la pause automatique de l'actif à la 3e perte consécutive"""
+def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
+    """Met à jour le compteur de pertes consécutives"""
     conn = get_db()
     if won:
         # Victoire → reset compteur
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,0,?)""",
             (user_id, coin, action, datetime.utcnow().isoformat()))
-        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 60% (gain)", "info")
-        conn.commit()
-        conn.close()
+        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 62% (gain)", "info")
     else:
         # Défaite → incrémenter
         current = conn.execute(
@@ -1443,24 +988,13 @@ async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool
             (user_id, coin, action)
         ).fetchone()
         losses = (current["consecutive_losses"] + 1) if current else 1
-        cfg_steps = conn.execute(
-            "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        steps = get_confidence_steps(cfg_steps)
-        new_conf = steps[min(losses, len(steps) - 1)]
+        new_conf = min(62 + (losses * 5), 90)
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
             (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,?,?)""",
             (user_id, coin, action, losses, datetime.utcnow().isoformat()))
         add_bot_log(user_id, f"📈 {coin} {action}: Confiance requise → {new_conf}% ({losses} pertes consécutives)", "warning")
-        conn.commit()
-        conn.close()
-        conn2 = get_db()
-        cfg = conn2.execute("SELECT loss_streak_size FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        conn2.close()
-        streak_size = cfg["loss_streak_size"] if cfg and "loss_streak_size" in cfg.keys() and cfg["loss_streak_size"] else 3
-        if losses >= streak_size:
-            await pause_coin(user_id, coin, f"{losses} pertes consécutives en {action}")
+    conn.commit()
+    conn.close()
 
 async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
     """Vérifie les annonces macro importantes dans les prochaines 24h via Finnhub"""
@@ -1517,63 +1051,11 @@ ws_connected = False
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
-    """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket"""
+    """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket.
+    Simple relais vers manage_open_trade : AUCUNE logique de fermeture ici,
+    pour éviter toute divergence avec la boucle de polling."""
     try:
-        pnl_direction = 1 if trade["action"] == "LONG" else -1
-        price_diff = (cur - trade["entry_price"]) / trade["entry_price"]
-        pnl = price_diff * trade["size_usdc"] * trade["leverage"] * pnl_direction
-
-        # Récupérer config
-        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-        max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-        trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-        trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-        trail_trigger = quick_profit_target * trail_mult
-        hl_fees = trade["size_usdc"] * 0.001
-
-        # Mettre à jour peak_pnl
-        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-        if pnl > peak_pnl:
-            peak_pnl = pnl
-            conn.execute("UPDATE paper_trades SET peak_pnl=?, current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                (peak_pnl, cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-            if peak_pnl >= trail_trigger:
-                add_bot_log(user_id, f"📊 {trade['coin']}: nouveau pic +{round(peak_pnl,2)}$ (trailing actif, seuil clôture: {round(peak_pnl-trail_gap,2)}$)", "info")
-        else:
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-
-        close_reason = None
-
-        if peak_pnl >= trail_trigger:
-            trail_sl = peak_pnl - trail_gap
-            if pnl <= trail_sl:
-                close_reason = "TRAILING_PROFIT" if trail_sl > quick_profit_target else "QUICK_PROFIT"
-                add_bot_log(user_id, f"🎯 {trade['coin']}: {'Trailing' if close_reason=='TRAILING_PROFIT' else 'Quick'} Profit +{round(pnl,2)}$ (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) ⚡ WS", "success")
-            elif pnl <= trail_sl + 0.5:
-                # Zone d'approche du seuil — log de diagnostic pour tracer les ticks précis
-                add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
-        elif pnl > 0 and pnl <= quick_profit_target and peak_pnl > quick_profit_target:
-            close_reason = "QUICK_PROFIT"
-            add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)}$ ⚡ WS", "success")
-        elif pnl <= -max_loss_target:
-            close_reason = "MAX_LOSS"
-            add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)}$ ⚡ WS", "warning")
-
-        if close_reason:
-            remaining = trade["size_usdc"]  # TP1 est un jalon pur — aucun crédit partiel, tout revient à la fermeture
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (remaining, pnl, user_id))
-            conn.commit()
-            await update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
-            return True
-        conn.commit()
-        return False
+        return manage_open_trade(user_id, trade, cur, conn)
     except Exception as e:
         print(f"WS trade error {trade.get('coin','?')}: {e}")
         return False
@@ -1669,40 +1151,35 @@ async def startup_cleanup(user_id: int):
     conn.commit()
 
     # 2. Supprimer les signaux en double (garder le plus récent par coin+action+jour)
-    # — jamais un signal lié à un trade (ouvert ou fermé), sinon on casse l'historique
     result = conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
             SELECT MAX(id) FROM signals
             WHERE user_id=?
             GROUP BY coin, action, date(created_at)
         ) AND user_id=?
-        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id, user_id))
     dup_count = conn.execute("SELECT changes()").fetchone()[0]
     if dup_count > 0:
         cleaned.append(f"🗑️ {dup_count} signaux en double supprimés")
 
-    # 3. Supprimer les signaux des actifs désactivés — sauf s'ils sont liés à un trade
-    # (ex: PAXG hors sélection mais tradé en opportuniste : son signal doit rester pour l'historique)
+    # 3. Supprimer les signaux des actifs désactivés
     config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     if config:
         import json as json_mod
         active_coins = json_mod.loads(config["active_coins"])
         placeholders = ",".join("?" * len(active_coins))
         result = conn.execute(
-            f"""DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})
-                AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""",
+            f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
             [user_id] + active_coins
         )
         inactive_count = conn.execute("SELECT changes()").fetchone()[0]
         if inactive_count > 0:
             cleaned.append(f"🗑️ {inactive_count} signaux d'actifs désactivés supprimés")
 
-    # 4. Supprimer les signaux de plus de 7 jours — sauf s'ils sont liés à un trade
+    # 4. Supprimer les signaux de plus de 7 jours
     result = conn.execute("""
         DELETE FROM signals WHERE user_id=? 
         AND created_at < datetime('now', '-7 days')
-        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id,))
     old_count = conn.execute("SELECT changes()").fetchone()[0]
     if old_count > 0:
@@ -1786,7 +1263,7 @@ async def send_alert_email(user_id: int, subject: str, body: str):
                 },
                 json={
                     "personalizations": [{"to": [{"email": to_email}]}],
-                    "from": {"email": "smeesxm@wanadoo.fr", "name": "HyperBot AI"},
+                    "from": {"email": "hyperbot@noreply.com", "name": "HyperBot AI"},
                     "subject": f"🤖 HyperBot Alert: {subject}",
                     "content": [{"type": "text/plain", "value": body}]
                 },
@@ -1809,19 +1286,6 @@ async def send_alert_if_needed(user_id: int, alert_key: str, subject: str, body:
     if last and (now - last).total_seconds() < cooldown_minutes * 60:
         return  # Déjà alerté récemment
     last_alerts[f"{user_id}_{alert_key}"] = now
-    await send_alert_email(user_id, subject, body)
-
-async def notify_daily_summary(user_id: int, session_date: str, total: int, wins: int, losses: int, net_pnl: float):
-    """Envoie le résumé quotidien par email à la clôture de session (minuit UTC)"""
-    win_rate = round((wins or 0) / max(total or 1, 1) * 100, 1)
-    emoji = "📈" if (net_pnl or 0) >= 0 else "📉"
-    subject = f"{emoji} Résumé du {session_date} — NET: {round(net_pnl or 0, 2)}$"
-    body = (
-        f"Résumé de la session du {session_date}\n"
-        f"Trades: {total or 0} (Gagnants: {wins or 0} / Perdants: {losses or 0})\n"
-        f"Win rate: {win_rate}%\n"
-        f"NET PnL: {round(net_pnl or 0, 2)} USDC"
-    )
     await send_alert_email(user_id, subject, body)
 
 async def check_session_lifecycle(user_id: int):
@@ -1897,12 +1361,11 @@ async def check_session_lifecycle(user_id: int):
             add_bot_log(user_id, 
                 f"✅ Session {yesterday} clôturée | {stats['total']} trades | NET: {round(stats['net'] or 0, 2)}$ | Win rate: {round((stats['wins'] or 0)/max(stats['total'] or 1,1)*100,1)}%",
                 "success")
-            await notify_daily_summary(user_id, yesterday, stats["total"], stats["wins"], stats["losses"], stats["net"])
             
             # Reset confiance dynamique à minuit pour nouvelle session
             conn.execute("DELETE FROM coin_confidence WHERE user_id=?", (user_id,))
             conn.commit()
-            add_bot_log(user_id, "🔄 Confiance dynamique remise à 60% pour tous les actifs — nouvelle session", "info")
+            add_bot_log(user_id, "🔄 Confiance dynamique remise à 62% pour tous les actifs — nouvelle session", "info")
     
     conn.close()
     return session
@@ -2014,10 +1477,10 @@ async def check_positions_loop(user_id: int):
         raise
 
 async def auto_reset_macro_filter(user_id: int):
-    """Désactive le filtre macro après la fenêtre de blackout réglable (avant/après une annonce)"""
+    """Désactive le filtre macro 1h après une annonce"""
     conn = get_db()
     user = conn.execute("SELECT finnhub_key FROM users WHERE id=?", (user_id,)).fetchone()
-    cfg = conn.execute("SELECT filter_macro, macro_blackout_before_min, macro_blackout_after_min FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    cfg = conn.execute("SELECT filter_macro FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     
     if not cfg or not cfg["filter_macro"]:
@@ -2026,12 +1489,10 @@ async def auto_reset_macro_filter(user_id: int):
     if not finnhub_key:
         return
     
-    before_min = cfg["macro_blackout_before_min"] if "macro_blackout_before_min" in cfg.keys() and cfg["macro_blackout_before_min"] else 120
-    after_min = cfg["macro_blackout_after_min"] if "macro_blackout_after_min" in cfg.keys() and cfg["macro_blackout_after_min"] else 60
     macro_data = await check_macro_calendar(user_id, finnhub_key)
     events = macro_data.get("events", [])
-    # Si aucune annonce dans la fenêtre de blackout réglable, désactiver le filtre
-    critical = [e for e in events if e["hours_left"]*60 <= before_min and e["hours_left"]*60 >= -after_min]
+    # Si aucune annonce dans les prochaines 2h, désactiver le filtre
+    critical = [e for e in events if e["hours_left"] <= 2 and e["hours_left"] >= -1]
     if not critical:
         conn2 = get_db()
         conn2.execute("UPDATE bot_config SET filter_macro=0 WHERE user_id=?", (user_id,))
@@ -2064,7 +1525,9 @@ async def update_prices_display(user_id: int):
         pass
 
 async def update_open_positions(user_id: int):
-    """Met a jour SL/TP/Trailing sur les positions ouvertes"""
+    """Rafraîchit uniquement l'affichage (prix courant / PnL) des positions ouvertes.
+    NE FERME AUCUN TRADE — la fermeture est gérée exclusivement par manage_open_trade
+    (appelée depuis la boucle de scan et depuis le WebSocket)."""
     conn = get_db()
     paper_trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
@@ -2076,7 +1539,6 @@ async def update_open_positions(user_id: int):
     # Utiliser WebSocket si disponible, sinon REST
     if ws_connected and ws_prices:
         prices = ws_prices.copy()
-        client_ctx = None
     else:
         async with httpx.AsyncClient() as client:
             prices = await fetch_all_metas(client)
@@ -2086,95 +1548,9 @@ async def update_open_positions(user_id: int):
         if not cur:
             continue
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
-        close_reason = None
-        tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-        highest = trade["highest_price"] or cur
-        lowest = trade["lowest_price"] or cur
-        new_highest = max(highest, cur)
-        new_lowest = min(lowest, cur)
-
-        if trade["action"] == "LONG":
-            if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_highest, cur, trade["id"]))
-                conn.commit()
-                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                continue
-            conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                (new_highest, cur, trade["id"]))
-        elif trade["action"] == "SHORT":
-            if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_lowest, cur, trade["id"]))
-                conn.commit()
-                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                continue
-            conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                (new_lowest, cur, trade["id"]))
-
-        # === TRAILING PROFIT & MAX LOSS (dollar, seul mécanisme de fermeture profit/perte) ===
-        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-        max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-        trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-        trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-        trail_trigger = quick_profit_target * trail_mult
-
-        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-        if pnl > peak_pnl:
-            peak_pnl = pnl
-            conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
-
-        if peak_pnl >= trail_trigger:
-            trail_sl = peak_pnl - trail_gap
-            if pnl <= trail_sl:
-                if trail_sl <= quick_profit_target:
-                    close_reason = "QUICK_PROFIT"
-                else:
-                    close_reason = "TRAILING_PROFIT"
-        elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
-            close_reason = "QUICK_PROFIT"
-        elif pnl <= -max_loss_target:
-            close_reason = "MAX_LOSS"
-
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            # Si TP1 deja touche, on rend la totalite - TP1 est un jalon pur, aucun credit partiel
-            remaining = trade["size_usdc"]
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (remaining, pnl, user_id))
-            emoji = "🎯" if close_reason in ("TP1","TP2","TRAILING_PROFIT","QUICK_PROFIT") else "🏁"
-            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-            # Mettre à jour confiance dynamique
-            won = pnl > 0
-            await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
-            
-            # Mettre à jour les stats de la session du jour en temps réel
-            try:
-                trade_date = trade.get("session_date") or trade.get("opened_at", "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
-                session_stats = conn.execute("""
-                    SELECT COUNT(*) as total,
-                        SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
-                        SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
-                        SUM(pnl) as net
-                    FROM paper_trades 
-                    WHERE user_id=? AND status='CLOSED' 
-                    AND COALESCE(session_date, date(opened_at), date(closed_at))=?
-                """, (user_id, trade_date)).fetchone()
-                if session_stats:
-                    conn.execute("""UPDATE trading_sessions 
-                        SET total_trades=?, wins=?, losses=?, net_pnl=?
-                        WHERE user_id=? AND session_date=?""",
-                        (session_stats["total"] or 0, session_stats["wins"] or 0,
-                         session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
-                         user_id, trade_date))
-                    conn.commit()
-            except: pass
-        conn.commit()
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+    conn.commit()
     conn.close()
 
 async def run_bot_loop(user_id: int):
@@ -2234,32 +1610,6 @@ class UpdateConfigRequest(BaseModel):
     api_key: Optional[str] = None
     active_coins: Optional[List[str]] = None
     trading_mode: Optional[str] = None
-    ai_mode_paper: Optional[str] = None
-    resume_now: Optional[bool] = None
-    pause_now: Optional[bool] = None
-    loss_streak_size: Optional[int] = None
-    pause_hours: Optional[float] = None
-    base_confidence: Optional[float] = None
-    conf_step1: Optional[float] = None
-    conf_step2: Optional[float] = None
-    conf_step3: Optional[float] = None
-    rsi_oversold: Optional[float] = None
-    rsi_overbought: Optional[float] = None
-    volume_spike_mult: Optional[float] = None
-    btc_trend_threshold: Optional[float] = None
-    trailing_activation_mult: Optional[float] = None
-    trailing_gap_usd: Optional[float] = None
-    rsi_period: Optional[int] = None
-    macd_fast: Optional[int] = None
-    macd_slow: Optional[int] = None
-    macd_signal: Optional[int] = None
-    bb_period: Optional[int] = None
-    bb_stddev: Optional[float] = None
-    atr_period: Optional[int] = None
-    hours_creuses_start: Optional[int] = None
-    hours_creuses_end: Optional[int] = None
-    macro_blackout_before_min: Optional[int] = None
-    macro_blackout_after_min: Optional[int] = None
     max_position_usdc: Optional[float] = None
     max_open_trades: Optional[int] = None
     position_pct: Optional[float] = None
@@ -2327,31 +1677,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
-        "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
-        "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
-        "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
-        "pause_hours": config["pause_hours"] if "pause_hours" in config.keys() and config["pause_hours"] else 2.0,
-        "base_confidence": config["base_confidence"] if "base_confidence" in config.keys() and config["base_confidence"] else 60,
-        "conf_step1": config["conf_step1"] if "conf_step1" in config.keys() and config["conf_step1"] else 72,
-        "conf_step2": config["conf_step2"] if "conf_step2" in config.keys() and config["conf_step2"] else 82,
-        "conf_step3": config["conf_step3"] if "conf_step3" in config.keys() and config["conf_step3"] else 90,
-        "rsi_oversold": config["rsi_oversold"] if "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35,
-        "rsi_overbought": config["rsi_overbought"] if "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65,
-        "volume_spike_mult": config["volume_spike_mult"] if "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5,
-        "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
-        "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.5,
-        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.5,
-        "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
-        "macd_fast": config["macd_fast"] if "macd_fast" in config.keys() and config["macd_fast"] else 12,
-        "macd_slow": config["macd_slow"] if "macd_slow" in config.keys() and config["macd_slow"] else 26,
-        "macd_signal": config["macd_signal"] if "macd_signal" in config.keys() and config["macd_signal"] else 9,
-        "bb_period": config["bb_period"] if "bb_period" in config.keys() and config["bb_period"] else 20,
-        "bb_stddev": config["bb_stddev"] if "bb_stddev" in config.keys() and config["bb_stddev"] else 2,
-        "atr_period": config["atr_period"] if "atr_period" in config.keys() and config["atr_period"] else 14,
-        "hours_creuses_start": config["hours_creuses_start"] if "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21,
-        "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23,
-        "macro_blackout_before_min": config["macro_blackout_before_min"] if "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120,
-        "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
         "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
@@ -2380,64 +1705,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
                     (req.trading_mode, user_id))
         # Log le changement de mode
         print(f"Mode change: {old_mode['trading_mode'] if old_mode else 'unknown'} -> {req.trading_mode} pour user {user_id}")
-    if req.ai_mode_paper is not None:
-        conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
-                    (req.ai_mode_paper, user_id))
-    if req.resume_now:
-        conn.execute("UPDATE bot_config SET pause_until=NULL WHERE user_id=?", (user_id,))
-        add_bot_log(user_id, "▶️ Pause levée manuellement", "info")
-    if req.pause_now:
-        cfg_p = conn.execute("SELECT pause_hours FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        pause_h = cfg_p["pause_hours"] if cfg_p and "pause_hours" in cfg_p.keys() and cfg_p["pause_hours"] else 2.0
-        resume_at = datetime.utcnow() + timedelta(hours=pause_h)
-        conn.execute("UPDATE bot_config SET pause_until=? WHERE user_id=?", (resume_at.isoformat(), user_id))
-        add_bot_log(user_id, f"⏸️ Pause générale déclenchée manuellement jusqu'à {resume_at.strftime('%H:%M')} UTC", "warning")
-    if req.loss_streak_size is not None:
-        conn.execute("UPDATE bot_config SET loss_streak_size=? WHERE user_id=?", (req.loss_streak_size, user_id))
-    if req.pause_hours is not None:
-        conn.execute("UPDATE bot_config SET pause_hours=? WHERE user_id=?", (req.pause_hours, user_id))
-    if req.base_confidence is not None:
-        conn.execute("UPDATE bot_config SET base_confidence=? WHERE user_id=?", (req.base_confidence, user_id))
-    if req.conf_step1 is not None:
-        conn.execute("UPDATE bot_config SET conf_step1=? WHERE user_id=?", (req.conf_step1, user_id))
-    if req.conf_step2 is not None:
-        conn.execute("UPDATE bot_config SET conf_step2=? WHERE user_id=?", (req.conf_step2, user_id))
-    if req.conf_step3 is not None:
-        conn.execute("UPDATE bot_config SET conf_step3=? WHERE user_id=?", (req.conf_step3, user_id))
-    if req.rsi_oversold is not None:
-        conn.execute("UPDATE bot_config SET rsi_oversold=? WHERE user_id=?", (req.rsi_oversold, user_id))
-    if req.rsi_overbought is not None:
-        conn.execute("UPDATE bot_config SET rsi_overbought=? WHERE user_id=?", (req.rsi_overbought, user_id))
-    if req.volume_spike_mult is not None:
-        conn.execute("UPDATE bot_config SET volume_spike_mult=? WHERE user_id=?", (req.volume_spike_mult, user_id))
-    if req.btc_trend_threshold is not None:
-        conn.execute("UPDATE bot_config SET btc_trend_threshold=? WHERE user_id=?", (req.btc_trend_threshold, user_id))
-    if req.trailing_activation_mult is not None:
-        conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
-    if req.trailing_gap_usd is not None:
-        conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
-    if req.rsi_period is not None:
-        conn.execute("UPDATE bot_config SET rsi_period=? WHERE user_id=?", (req.rsi_period, user_id))
-    if req.macd_fast is not None:
-        conn.execute("UPDATE bot_config SET macd_fast=? WHERE user_id=?", (req.macd_fast, user_id))
-    if req.macd_slow is not None:
-        conn.execute("UPDATE bot_config SET macd_slow=? WHERE user_id=?", (req.macd_slow, user_id))
-    if req.macd_signal is not None:
-        conn.execute("UPDATE bot_config SET macd_signal=? WHERE user_id=?", (req.macd_signal, user_id))
-    if req.bb_period is not None:
-        conn.execute("UPDATE bot_config SET bb_period=? WHERE user_id=?", (req.bb_period, user_id))
-    if req.bb_stddev is not None:
-        conn.execute("UPDATE bot_config SET bb_stddev=? WHERE user_id=?", (req.bb_stddev, user_id))
-    if req.atr_period is not None:
-        conn.execute("UPDATE bot_config SET atr_period=? WHERE user_id=?", (req.atr_period, user_id))
-    if req.hours_creuses_start is not None:
-        conn.execute("UPDATE bot_config SET hours_creuses_start=? WHERE user_id=?", (req.hours_creuses_start, user_id))
-    if req.hours_creuses_end is not None:
-        conn.execute("UPDATE bot_config SET hours_creuses_end=? WHERE user_id=?", (req.hours_creuses_end, user_id))
-    if req.macro_blackout_before_min is not None:
-        conn.execute("UPDATE bot_config SET macro_blackout_before_min=? WHERE user_id=?", (req.macro_blackout_before_min, user_id))
-    if req.macro_blackout_after_min is not None:
-        conn.execute("UPDATE bot_config SET macro_blackout_after_min=? WHERE user_id=?", (req.macro_blackout_after_min, user_id))
     if req.max_position_usdc is not None:
         conn.execute("UPDATE bot_config SET max_position_usdc=? WHERE user_id=?",
                     (req.max_position_usdc, user_id))
@@ -2567,33 +1834,11 @@ def stop_bot(user_id: int = Depends(get_current_user)):
 
 @app.get("/api/signals")
 def get_signals(limit: int = 50, user_id: int = Depends(get_current_user)):
-    """Signaux EN COURS D'EXÉCUTION uniquement — liés à un trade Paper encore OPEN"""
     conn = get_db()
-    rows = conn.execute("""
-        SELECT s.*, pt.status as trade_status, pt.pnl as trade_pnl, pt.pnl_pct as trade_pnl_pct,
-               pt.current_price as trade_current_price, pt.opened_at as trade_opened_at
-        FROM signals s
-        JOIN paper_trades pt ON pt.signal_id = s.id
-        WHERE s.user_id=? AND pt.status='OPEN'
-        ORDER BY s.created_at DESC LIMIT ?
-    """, (user_id, limit)).fetchall()
-    conn.close()
-    signals = [dict(r) for r in rows]
-    return {"signals": signals, "total": len(signals)}
-
-@app.get("/api/signals/history")
-def get_signals_history(limit: int = 50, user_id: int = Depends(get_current_user)):
-    """HISTORIQUE — uniquement les signaux qui ont été tradés ET fermés"""
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT s.*, pt.status as trade_status, pt.pnl as trade_pnl, pt.pnl_pct as trade_pnl_pct,
-               pt.close_reason as trade_close_reason, pt.opened_at as trade_opened_at,
-               pt.closed_at as trade_closed_at
-        FROM signals s
-        JOIN paper_trades pt ON pt.signal_id = s.id
-        WHERE s.user_id=? AND pt.status='CLOSED'
-        ORDER BY pt.closed_at DESC LIMIT ?
-    """, (user_id, limit)).fetchall()
+    rows = conn.execute(
+        "SELECT * FROM signals WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+        (user_id, limit)
+    ).fetchall()
     conn.close()
     signals = [dict(r) for r in rows]
     return {"signals": signals, "total": len(signals)}
@@ -2645,46 +1890,6 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
-
-@app.get("/api/coins/paused")
-def get_paused_coins(user_id: int = Depends(get_current_user)):
-    """Liste des actifs actuellement en pause automatique (3 pertes consécutives)"""
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT coin, paused_until, reason FROM coin_pause WHERE user_id=? AND paused_until > ?",
-        (user_id, datetime.utcnow().isoformat())
-    ).fetchall()
-    conn.close()
-    return {"paused": [dict(r) for r in rows]}
-
-@app.get("/api/stats/ai-usage")
-def get_ai_usage(user_id: int = Depends(get_current_user)):
-    """Suivi du coût réel des appels IA — aujourd'hui et cumul total"""
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    conn = get_db()
-    today_row = conn.execute(
-        "SELECT calls, input_tokens, output_tokens FROM ai_usage WHERE user_id=? AND date=?",
-        (user_id, today)
-    ).fetchone()
-    total_row = conn.execute(
-        "SELECT SUM(calls) as calls, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens FROM ai_usage WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
-    conn.close()
-
-    def to_cost(row):
-        if not row or not row["calls"]:
-            return {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
-        cost = (row["input_tokens"] or 0) / 1_000_000 * AI_PRICE_INPUT_PER_M + \
-               (row["output_tokens"] or 0) / 1_000_000 * AI_PRICE_OUTPUT_PER_M
-        return {
-            "calls": row["calls"] or 0,
-            "input_tokens": row["input_tokens"] or 0,
-            "output_tokens": row["output_tokens"] or 0,
-            "cost_usd": round(cost, 4)
-        }
-
-    return {"today": to_cost(today_row), "total": to_cost(total_row)}
 
 # ── PAPER TRADING ───────────────────────────────────────────
 class PaperTradeRequest(BaseModel):
@@ -2809,6 +2014,8 @@ def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
 
 @app.put("/api/paper/update")
 async def update_paper_trades(user_id: int = Depends(get_current_user)):
+    """Rafraîchit uniquement l'affichage (prix courant / PnL) des positions ouvertes.
+    NE FERME AUCUN TRADE — la fermeture est gérée exclusivement par manage_open_trade."""
     conn = get_db()
     trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
@@ -2819,24 +2026,8 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
         cur = price_row["price"]
         direction = 1 if trade["action"] == "LONG" else -1
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-        close_reason = None
-        # SL technique désactivé - Max Loss gère la protection
-        if trade["take_profit2"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
-        elif trade["take_profit1"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                        (trade["size_usdc"], round(pnl,2), user_id))
-        else:
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
     conn.commit()
     conn.close()
     return {"message": "Trades mis à jour"}
@@ -3181,28 +2372,25 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
     # Recuperer les coins actifs
     config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     active_coins = json.loads(config["active_coins"]) if config else []
-    # Supprimer les signaux des actifs desactives — jamais ceux liés à un trade (ex: PAXG opportuniste)
+    # Supprimer les signaux des actifs desactives
     if active_coins:
         placeholders = ",".join("?" * len(active_coins))
-        conn.execute(f"""DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})
-            AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""",
+        conn.execute(f"DELETE FROM signals WHERE user_id=? AND coin NOT IN ({placeholders})",
             [user_id] + active_coins)
         inactive_deleted = conn.execute("SELECT changes()").fetchone()[0]
     else:
         inactive_deleted = 0
-    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action, jamais un signal tradé
+    # Supprimer les doublons — garder seulement le signal le plus récent par coin+action
     conn.execute("""
         DELETE FROM signals WHERE id NOT IN (
             SELECT MAX(id) FROM signals
             WHERE user_id=?
             GROUP BY coin, action, date(created_at)
         ) AND user_id=?
-        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)
     """, (user_id, user_id))
     deleted = conn.execute("SELECT changes()").fetchone()[0]
-    # Supprimer aussi les signaux de plus de 24h — jamais ceux liés à un trade
-    conn.execute("""DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')
-        AND id NOT IN (SELECT signal_id FROM paper_trades WHERE signal_id IS NOT NULL)""", (user_id,))
+    # Supprimer aussi les signaux de plus de 24h
+    conn.execute("DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', '-24 hours')", (user_id,))
     deleted2 = conn.execute("SELECT changes()").fetchone()[0]
     remaining = conn.execute("SELECT COUNT(*) FROM signals WHERE user_id=?", (user_id,)).fetchone()[0]
     conn.commit()
