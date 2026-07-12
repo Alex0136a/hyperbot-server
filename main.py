@@ -119,11 +119,11 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_activation_mult REAL DEFAULT 1.5")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_activation_mult REAL DEFAULT 1.0")
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 0.5")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 0.3")
         conn.commit()
     except: pass
     try:
@@ -254,6 +254,30 @@ def init_db():
     except: pass
     try:
         conn.execute("UPDATE bot_config SET quick_profit_usd=1.1 WHERE quick_profit_usd=1.0 OR quick_profit_usd IS NULL")
+        conn.commit()
+    except: pass
+    try:
+        # Fusion Quick Profit / Trailing Take Profit (voir diagnostic bug) :
+        # trailing actif dès que le PnL dépasse quick_profit_usd (mult=1.0), gap resserré à 0.3$.
+        # Uniquement pour les configs encore sur l'ancien défaut (1.5/0.5) — ne touche pas
+        # aux réglages déjà personnalisés manuellement par l'utilisateur.
+        conn.execute("UPDATE bot_config SET trailing_activation_mult=1.0 WHERE trailing_activation_mult=1.5 OR trailing_activation_mult IS NULL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET trailing_gap_usd=0.3 WHERE trailing_gap_usd=0.5 OR trailing_gap_usd IS NULL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN is_live INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN hl_sl_oid INTEGER")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN hl_size REAL")
         conn.commit()
     except: pass
     try:
@@ -393,8 +417,8 @@ def init_db():
             rsi_overbought REAL DEFAULT 65,
             volume_spike_mult REAL DEFAULT 1.5,
             btc_trend_threshold REAL DEFAULT 2.0,
-            trailing_activation_mult REAL DEFAULT 1.5,
-            trailing_gap_usd REAL DEFAULT 0.5,
+            trailing_activation_mult REAL DEFAULT 1.0,
+            trailing_gap_usd REAL DEFAULT 0.3,
             rsi_period INTEGER DEFAULT 14,
             macd_fast INTEGER DEFAULT 12,
             macd_slow INTEGER DEFAULT 26,
@@ -591,6 +615,92 @@ async def fetch_positions(client, address):
         return []
     data = await hl_post(client, "/info", {"type": "clearinghouseState", "user": address})
     return data.get("assetPositions", []) if data else []
+
+# ── HYPERLIQUID LIVE TRADING (ordres réels via API wallet) ───
+# ⚠️ Utilise UNIQUEMENT la clé privée de l'API wallet (agent), jamais celle du wallet principal.
+# La clé privée n'est JAMAIS stockée en base : uniquement via variable d'environnement.
+HL_AGENT_PRIVATE_KEY = os.environ.get("HL_AGENT_PRIVATE_KEY", "")
+HL_USE_TESTNET = os.environ.get("HL_USE_TESTNET", "true").lower() != "false"
+
+try:
+    import eth_account
+    from hyperliquid.info import Info as HLInfo
+    from hyperliquid.exchange import Exchange as HLExchange
+    from hyperliquid.utils import constants as hl_constants
+    HL_SDK_AVAILABLE = True
+except ImportError:
+    HL_SDK_AVAILABLE = False
+
+def hl_base_url():
+    return hl_constants.TESTNET_API_URL if HL_USE_TESTNET else hl_constants.MAINNET_API_URL
+
+def get_hl_exchange(account_address: str):
+    """Crée un client Exchange signé par l'API wallet (agent), agissant pour le compte account_address."""
+    if not HL_SDK_AVAILABLE:
+        raise RuntimeError("hyperliquid-python-sdk non installé (pip install hyperliquid-python-sdk)")
+    if not HL_AGENT_PRIVATE_KEY:
+        raise RuntimeError("HL_AGENT_PRIVATE_KEY non configurée dans les variables d'environnement")
+    wallet = eth_account.Account.from_key(HL_AGENT_PRIVATE_KEY)
+    return HLExchange(wallet, hl_base_url(), account_address=account_address)
+
+def get_hl_account_value(account_address: str) -> float:
+    """Récupère la valeur réelle du compte (equity) sur Hyperliquid — utilisé pour le sizing en mode live."""
+    if not HL_SDK_AVAILABLE or not account_address:
+        return 0.0
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        state = info.user_state(account_address)
+        return float(state["marginSummary"]["accountValue"])
+    except Exception as e:
+        print(f"HL account_value error: {e}")
+        return 0.0
+
+def hl_open_position(account_address: str, coin: str, action: str, size_usdc: float,
+                      leverage: int, cur_price: float, max_loss_usd: float):
+    """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
+    (trigger order, reduce_only) sur l'exchange — filet en cas de défaillance du bot.
+    Retourne (coin_size, sl_oid) ou lève une exception."""
+    exchange = get_hl_exchange(account_address)
+    is_buy = (action == "LONG")
+    coin_size = round((size_usdc * leverage) / cur_price, 4)
+    if coin_size <= 0:
+        raise ValueError("Taille de position calculée nulle ou négative")
+
+    result = exchange.market_open(coin, is_buy, coin_size, slippage=0.01)
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Échec ouverture position Hyperliquid: {result}")
+
+    # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss.
+    # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré.
+    safety_loss_usd = max(max_loss_usd, 0.5) * 3
+    price_move = safety_loss_usd / (size_usdc * leverage) * cur_price
+    sl_price = round(cur_price - price_move, 4) if is_buy else round(cur_price + price_move, 4)
+
+    sl_oid = None
+    try:
+        sl_result = exchange.order(
+            coin, not is_buy, coin_size, sl_price,
+            {"trigger": {"triggerPx": sl_price, "isMarket": True, "tpsl": "sl"}},
+            reduce_only=True,
+        )
+        if sl_result.get("status") == "ok":
+            statuses = sl_result["response"]["data"]["statuses"]
+            if statuses and "resting" in statuses[0]:
+                sl_oid = statuses[0]["resting"]["oid"]
+    except Exception as e:
+        print(f"⚠️ SL de sécurité Hyperliquid non posé pour {coin}: {e}")
+
+    return coin_size, sl_oid
+
+def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
+    """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé."""
+    exchange = get_hl_exchange(account_address)
+    if sl_oid:
+        try:
+            exchange.cancel(coin, sl_oid)
+        except Exception as e:
+            print(f"⚠️ Annulation SL Hyperliquid échouée pour {coin} (oid={sl_oid}): {e}")
+    return exchange.market_close(coin)
 
 # ── ANALYSE IA ───────────────────────────────────────────────
 def cache_market_data(coin: str, tech: dict, price: float):
@@ -818,6 +928,96 @@ def cleanup_orphan_signals(user_id: int):
         conn.close()
     except Exception as e:
         print(f"⚠️ Erreur cleanup_orphan_signals: {e}")
+
+# ── SYSTEME UNIQUE DE GESTION DES TRADES OUVERTS ──────────────
+# Seul point de fermeture d'un paper_trade : Trailing Profit + Max Loss.
+# Aucun autre emplacement du code ne doit fixer status='CLOSED' pour la logique
+# de trading (les fermetures manuelles utilisateur et le reset restent à part).
+# Le SL de sécurité réel posé sur Hyperliquid (mode live) est le seul autre
+# déclencheur possible, côté exchange, en cas de défaillance du bot.
+def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
+    """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
+    Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
+    C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement."""
+    direction = 1 if trade["action"] == "LONG" else -1
+    pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+
+    cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.0
+    max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() and cfg_qp["max_loss_usd"] else 0.75
+    trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
+    trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.3
+    trail_trigger = quick_profit_target * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
+
+    peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
+    if pnl > peak_pnl:
+        peak_pnl = pnl
+        conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+
+    close_reason = None
+    if peak_pnl >= trail_trigger:
+        trail_sl = peak_pnl - trail_gap
+        if pnl <= trail_sl:
+            close_reason = "TRAILING_PROFIT"
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
+    elif pnl <= -max_loss_target:
+        close_reason = "MAX_LOSS"
+        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
+
+    if not close_reason:
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        return None
+
+    is_live = bool(trade.get("is_live"))
+    if is_live:
+        user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+        account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+        try:
+            hl_close_position(account_address, trade["coin"], trade.get("hl_sl_oid"))
+            add_bot_log(user_id, f"🔴 {trade['coin']}: position réelle fermée sur Hyperliquid ({close_reason})", "success")
+        except Exception as e:
+            add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — vérifiez manuellement sur l'exchange !", "error")
+
+    conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+        closed_at=?, close_reason=? WHERE id=?""",
+        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
+         datetime.utcnow().isoformat(), close_reason, trade["id"]))
+    if not is_live:
+        # Le solde réel vit sur Hyperliquid pour les trades live — on ne touche pas paper_portfolio
+        conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                    (trade["size_usdc"], round(pnl,2), user_id))
+    add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
+    conn.commit()
+    return {"pnl": pnl, "close_reason": close_reason}
+
+async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn):
+    """Bookkeeping post-fermeture (confiance dynamique + stats de session temps réel).
+    À appeler après un manage_open_trade qui a retourné un résultat non-None."""
+    won = pnl > 0
+    await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
+    try:
+        trade_date = trade.get("session_date") or (trade.get("opened_at") or "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
+        session_stats = conn.execute("""
+            SELECT COUNT(*) as total,
+                SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as net
+            FROM paper_trades
+            WHERE user_id=? AND status='CLOSED'
+            AND COALESCE(session_date, date(opened_at), date(closed_at))=?
+        """, (user_id, trade_date)).fetchone()
+        if session_stats:
+            conn.execute("""UPDATE trading_sessions
+                SET total_trades=?, wins=?, losses=?, net_pnl=?
+                WHERE user_id=? AND session_date=?""",
+                (session_stats["total"] or 0, session_stats["wins"] or 0,
+                 session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
+                 user_id, trade_date))
+            conn.commit()
+    except Exception:
+        pass
 
 async def scan_markets(user_id: int):
     conn = get_db()
@@ -1183,7 +1383,7 @@ async def scan_markets(user_id: int):
             sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             # Auto-execute en mode paper
-            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             if cfg and cfg["trading_mode"] == "paper":
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
@@ -1220,6 +1420,53 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
                     add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
 
+            elif cfg and cfg["trading_mode"] == "live":
+                user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+                if not account_address:
+                    add_bot_log(user_id, "⛔ Mode live: aucune adresse de wallet Hyperliquid configurée", "error")
+                elif not HL_SDK_AVAILABLE:
+                    add_bot_log(user_id, "⛔ Mode live: hyperliquid-python-sdk non installé sur le serveur", "error")
+                elif not HL_AGENT_PRIVATE_KEY:
+                    add_bot_log(user_id, "⛔ Mode live: HL_AGENT_PRIVATE_KEY non configurée", "error")
+                else:
+                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
+                    max_trades = cfg["max_open_trades"] or 5
+                    position_pct = cfg["position_pct"] if "position_pct" in cfg.keys() and cfg["position_pct"] else 8.0
+                    capital = get_hl_account_value(account_address)
+                    size = round(capital * position_pct / 100, 2)
+                    size = max(10.0, min(size, capital * 0.5)) if capital > 0 else 0.0
+                    coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                    net_env = "TESTNET" if HL_USE_TESTNET else "MAINNET ⚠️ ARGENT RÉEL"
+                    if capital <= 0:
+                        add_bot_log(user_id, f"⛔ {coin}: Impossible de récupérer le capital réel Hyperliquid ({net_env})", "error")
+                    elif open_count >= max_trades:
+                        add_bot_log(user_id, f"⛔ {coin}: Max trades atteint ({open_count}/{max_trades})", "warning")
+                    elif capital < size:
+                        add_bot_log(user_id, f"⛔ {coin}: Solde insuffisant ({round(capital,2)} < {size} USDC)", "warning")
+                    elif coin_open:
+                        add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
+                    else:
+                        try:
+                            cfg_ml = conn.execute("SELECT max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                            max_loss_target = float(cfg_ml["max_loss_usd"]) if cfg_ml and "max_loss_usd" in cfg_ml.keys() and cfg_ml["max_loss_usd"] else 0.75
+                            leverage = ai.get("leverage") or 1
+                            coin_size, sl_oid = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_target)
+                            entry_price = ai.get("entry") or price
+                            conn.execute("""
+                                INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
+                                size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at,
+                                session_date, is_live, hl_sl_oid, hl_size)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+                            """, (user_id, coin, ai["action"], entry_price, price, size,
+                                   leverage, ai.get("stopLoss"),
+                                   ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
+                                   datetime.utcnow().isoformat(),
+                                   datetime.utcnow().strftime("%Y-%m-%d"), sl_oid, coin_size))
+                            add_bot_log(user_id, f"🔴 LIVE TRADE ({net_env}): {ai['action']} {coin} @ ${entry_price} | {size} USDC | SL sécurité posé: {'oui' if sl_oid else 'NON — vérifier manuellement'}", "success")
+                        except Exception as e:
+                            add_bot_log(user_id, f"⛔ {coin}: Échec ouverture live Hyperliquid — {e}", "error")
+
             conn.commit()
             conn.close()
 
@@ -1234,115 +1481,11 @@ async def scan_markets(user_id: int):
                 price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (trade["coin"],)).fetchone()
                 if not price_row: continue
                 cur = price_row["price"]
-                direction = 1 if trade["action"] == "LONG" else -1
-                pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-                close_reason = None
-                tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-                trailing_sl = trade["trailing_sl"]
-                highest = trade["highest_price"] or cur
-                lowest = trade["lowest_price"] or cur
-
-                # Mettre a jour highest/lowest price
-                new_highest = max(highest, cur)
-                new_lowest = min(lowest, cur)
-
-                if trade["action"] == "LONG":
-                    # TP1 pas encore atteint
-                    if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                                            # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                            lowest_price=?, current_price=? WHERE id=?""",
-                            (trade["entry_price"], new_lowest, cur, trade["id"]))
-                        conn.commit()
-                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                        continue
-                    # Trailing dollar géré plus bas — TP1 ne ferme jamais le trade lui-même
-                    if not tp1_hit:
-                        # SL normal avant TP1
-                        # SL technique désactivé — Max Loss gère la protection
-                    # if trade["stop_loss"] and cur <= trade["stop_loss"]:
-                    #     close_reason = "STOP_LOSS"
-                        conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                            (new_highest, cur, trade["id"]))
-
-                elif trade["action"] == "SHORT":
-                    # TP1 pas encore atteint
-                    if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                        # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                        conn.execute("""UPDATE paper_trades SET tp1_hit=1, trailing_sl=?,
-                            lowest_price=?, current_price=? WHERE id=?""",
-                            (trade["entry_price"], new_lowest, cur, trade["id"]))
-                        conn.commit()
-                        add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                        continue
-                    # Trailing dollar géré plus bas — TP1/TP2 ne ferment jamais le trade eux-mêmes
-                    if not tp1_hit:
-                        # SL technique désactivé — Max Loss gère la protection
-                    # if trade["stop_loss"] and cur >= trade["stop_loss"]:
-                    #     close_reason = "STOP_LOSS"
-                        conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                            (new_lowest, cur, trade["id"]))
-
-                # === TRAILING PROFIT & MAX LOSS ===
-                cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-                max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-                trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-                trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-                trail_trigger = quick_profit_target * trail_mult  # Active le trailing à trail_mult × QP
-                hl_fees = trade["size_usdc"] * 0.001
-
-                # Mettre à jour le pic de PnL
-                peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-                if pnl > peak_pnl:
-                    peak_pnl = pnl
-                    conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
-
-                if not close_reason:
-                    if peak_pnl >= trail_trigger:
-                        # Trailing actif — TSL = pic - 0.5$
-                        trail_sl = peak_pnl - trail_gap
-                        if pnl <= trail_sl:
-                            # Si TSL descend sous Quick Profit → fermer au Quick Profit
-                            if trail_sl <= quick_profit_target:
-                                close_reason = "QUICK_PROFIT"
-                                add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit +{round(pnl,2)} USDC (protection descente) !", "success")
-                            else:
-                                close_reason = "TRAILING_PROFIT"
-                                add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
-                        elif pnl <= trail_sl + 0.5:
-                            add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing (scan 3min) — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
-                    elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
-                        # Prix redescend à exactement 1$ après avoir dépassé — Quick Profit filet
-                        # Le WebSocket étant temps réel, la précision est au centime
-                        close_reason = "QUICK_PROFIT"
-                        add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)} USDC (descente depuis +{round(peak_pnl,2)}$) !", "success")
-                    elif pnl <= -max_loss_target:
-                        # Max Loss
-                        close_reason = "MAX_LOSS"
-                        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
-
-                # Mettre à jour prix seulement si changement significatif (> 0.05%)
-                if not close_reason:
-                    last_price = trade["current_price"] if trade["current_price"] else trade["entry_price"]
-                    if last_price and abs(cur - last_price) / last_price > 0.0005:
-                        conn.execute(
-                            "UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"])
-                        )
-
-                if close_reason:
-                    # PnL final = ce que le trade a généré en totalité
-                    conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                        closed_at=?, close_reason=? WHERE id=?""",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                         datetime.utcnow().isoformat(), close_reason, trade["id"]))
-                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                                (trade["size_usdc"], round(pnl,2), user_id))
-                    add_bot_log(user_id, f"🏁 {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-                else:
-                    conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                trade_dict = dict(trade)
+                # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
+                result = manage_open_trade(user_id, trade_dict, cur, conn)
+                if result:
+                    await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn)
             conn.commit()
             conn.close()
 
@@ -1517,62 +1660,14 @@ ws_connected = False
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
-    """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket"""
+    """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket.
+    Simple relais vers manage_open_trade : AUCUNE logique de fermeture ici,
+    pour éviter toute divergence avec la boucle de polling."""
     try:
-        pnl_direction = 1 if trade["action"] == "LONG" else -1
-        price_diff = (cur - trade["entry_price"]) / trade["entry_price"]
-        pnl = price_diff * trade["size_usdc"] * trade["leverage"] * pnl_direction
-
-        # Récupérer config
-        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-        max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-        trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-        trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-        trail_trigger = quick_profit_target * trail_mult
-        hl_fees = trade["size_usdc"] * 0.001
-
-        # Mettre à jour peak_pnl
-        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-        if pnl > peak_pnl:
-            peak_pnl = pnl
-            conn.execute("UPDATE paper_trades SET peak_pnl=?, current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                (peak_pnl, cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-            if peak_pnl >= trail_trigger:
-                add_bot_log(user_id, f"📊 {trade['coin']}: nouveau pic +{round(peak_pnl,2)}$ (trailing actif, seuil clôture: {round(peak_pnl-trail_gap,2)}$)", "info")
-        else:
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-
-        close_reason = None
-
-        if peak_pnl >= trail_trigger:
-            trail_sl = peak_pnl - trail_gap
-            if pnl <= trail_sl:
-                close_reason = "TRAILING_PROFIT" if trail_sl > quick_profit_target else "QUICK_PROFIT"
-                add_bot_log(user_id, f"🎯 {trade['coin']}: {'Trailing' if close_reason=='TRAILING_PROFIT' else 'Quick'} Profit +{round(pnl,2)}$ (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) ⚡ WS", "success")
-            elif pnl <= trail_sl + 0.5:
-                # Zone d'approche du seuil — log de diagnostic pour tracer les ticks précis
-                add_bot_log(user_id, f"🔎 {trade['coin']}: approche seuil trailing — pnl={round(pnl,2)}$ / seuil={round(trail_sl,2)}$ / pic={round(peak_pnl,2)}$", "info")
-        elif pnl > 0 and pnl <= quick_profit_target and peak_pnl > quick_profit_target:
-            close_reason = "QUICK_PROFIT"
-            add_bot_log(user_id, f"⚡ {trade['coin']}: Quick Profit filet +{round(pnl,2)}$ ⚡ WS", "success")
-        elif pnl <= -max_loss_target:
-            close_reason = "MAX_LOSS"
-            add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)}$ ⚡ WS", "warning")
-
-        if close_reason:
-            remaining = trade["size_usdc"]  # TP1 est un jalon pur — aucun crédit partiel, tout revient à la fermeture
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (remaining, pnl, user_id))
-            conn.commit()
-            await update_coin_confidence(user_id, trade["coin"], trade["action"], pnl > 0)
+        result = manage_open_trade(user_id, trade, cur, conn)
+        if result:
+            await finalize_closed_trade(user_id, trade, result["pnl"], conn)
             return True
-        conn.commit()
         return False
     except Exception as e:
         print(f"WS trade error {trade.get('coin','?')}: {e}")
@@ -2064,7 +2159,9 @@ async def update_prices_display(user_id: int):
         pass
 
 async def update_open_positions(user_id: int):
-    """Met a jour SL/TP/Trailing sur les positions ouvertes"""
+    """Rafraîchit uniquement l'affichage (prix courant / PnL) des positions ouvertes.
+    NE FERME AUCUN TRADE — la fermeture est gérée exclusivement par manage_open_trade
+    (appelée depuis scan_markets et depuis le WebSocket)."""
     conn = get_db()
     paper_trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
@@ -2076,7 +2173,6 @@ async def update_open_positions(user_id: int):
     # Utiliser WebSocket si disponible, sinon REST
     if ws_connected and ws_prices:
         prices = ws_prices.copy()
-        client_ctx = None
     else:
         async with httpx.AsyncClient() as client:
             prices = await fetch_all_metas(client)
@@ -2086,95 +2182,9 @@ async def update_open_positions(user_id: int):
         if not cur:
             continue
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
-        close_reason = None
-        tp1_hit = trade["tp1_hit"] if trade["tp1_hit"] else 0
-        highest = trade["highest_price"] or cur
-        lowest = trade["lowest_price"] or cur
-        new_highest = max(highest, cur)
-        new_lowest = min(lowest, cur)
-
-        if trade["action"] == "LONG":
-            if not tp1_hit and trade["take_profit1"] and cur >= trade["take_profit1"]:
-                # TP1 jalon — active trailing, SL breakeven, pas de crédit partiel
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, highest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_highest, cur, trade["id"]))
-                conn.commit()
-                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                continue
-            conn.execute("UPDATE paper_trades SET highest_price=?, current_price=? WHERE id=?",
-                (new_highest, cur, trade["id"]))
-        elif trade["action"] == "SHORT":
-            if not tp1_hit and trade["take_profit1"] and cur <= trade["take_profit1"]:
-                conn.execute("UPDATE paper_trades SET tp1_hit=1, trailing_sl=?, lowest_price=?, current_price=? WHERE id=?",
-                    (trade["entry_price"], new_lowest, cur, trade["id"]))
-                conn.commit()
-                add_bot_log(user_id, f"📌 {trade['coin']} TP1 jalon @ {cur} | Trailing actif | SL → breakeven", "info")
-                continue
-            conn.execute("UPDATE paper_trades SET lowest_price=?, current_price=? WHERE id=?",
-                (new_lowest, cur, trade["id"]))
-
-        # === TRAILING PROFIT & MAX LOSS (dollar, seul mécanisme de fermeture profit/perte) ===
-        cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        quick_profit_target = cfg_qp["quick_profit_usd"] if cfg_qp and "quick_profit_usd" in cfg_qp.keys() else 1.0
-        max_loss_target = cfg_qp["max_loss_usd"] if cfg_qp and "max_loss_usd" in cfg_qp.keys() else 0.75
-        trail_mult = cfg_qp["trailing_activation_mult"] if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.5
-        trail_gap = cfg_qp["trailing_gap_usd"] if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.5
-        trail_trigger = quick_profit_target * trail_mult
-
-        peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
-        if pnl > peak_pnl:
-            peak_pnl = pnl
-            conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
-
-        if peak_pnl >= trail_trigger:
-            trail_sl = peak_pnl - trail_gap
-            if pnl <= trail_sl:
-                if trail_sl <= quick_profit_target:
-                    close_reason = "QUICK_PROFIT"
-                else:
-                    close_reason = "TRAILING_PROFIT"
-        elif peak_pnl > quick_profit_target and pnl <= quick_profit_target:
-            close_reason = "QUICK_PROFIT"
-        elif pnl <= -max_loss_target:
-            close_reason = "MAX_LOSS"
-
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            # Si TP1 deja touche, on rend la totalite - TP1 est un jalon pur, aucun credit partiel
-            remaining = trade["size_usdc"]
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (remaining, pnl, user_id))
-            emoji = "🎯" if close_reason in ("TP1","TP2","TRAILING_PROFIT","QUICK_PROFIT") else "🏁"
-            add_bot_log(user_id, f"{emoji} {trade['coin']} fermé: {close_reason} | PnL: {round(pnl,2)} USDC", "success" if pnl >= 0 else "error")
-            # Mettre à jour confiance dynamique
-            won = pnl > 0
-            await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
-            
-            # Mettre à jour les stats de la session du jour en temps réel
-            try:
-                trade_date = trade.get("session_date") or trade.get("opened_at", "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
-                session_stats = conn.execute("""
-                    SELECT COUNT(*) as total,
-                        SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
-                        SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
-                        SUM(pnl) as net
-                    FROM paper_trades 
-                    WHERE user_id=? AND status='CLOSED' 
-                    AND COALESCE(session_date, date(opened_at), date(closed_at))=?
-                """, (user_id, trade_date)).fetchone()
-                if session_stats:
-                    conn.execute("""UPDATE trading_sessions 
-                        SET total_trades=?, wins=?, losses=?, net_pnl=?
-                        WHERE user_id=? AND session_date=?""",
-                        (session_stats["total"] or 0, session_stats["wins"] or 0,
-                         session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
-                         user_id, trade_date))
-                    conn.commit()
-            except: pass
-        conn.commit()
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+    conn.commit()
     conn.close()
 
 async def run_bot_loop(user_id: int):
@@ -2339,8 +2349,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "rsi_overbought": config["rsi_overbought"] if "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65,
         "volume_spike_mult": config["volume_spike_mult"] if "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5,
         "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
-        "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.5,
-        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.5,
+        "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
+        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.3,
         "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
         "macd_fast": config["macd_fast"] if "macd_fast" in config.keys() and config["macd_fast"] else 12,
         "macd_slow": config["macd_slow"] if "macd_slow" in config.keys() and config["macd_slow"] else 26,
@@ -2777,13 +2787,22 @@ def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current
     cur_price = price_row["price"] if price_row else trade["entry_price"]
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur_price - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+    if trade["is_live"]:
+        user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+        account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+        try:
+            hl_close_position(account_address, trade["coin"], trade["hl_sl_oid"])
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"Échec de fermeture réelle sur Hyperliquid — vérifiez manuellement sur l'exchange ! ({e})")
     conn.execute("""
         UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
         closed_at=?, close_reason=? WHERE id=?
     """, (cur_price, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
           datetime.utcnow().isoformat(), req.reason, req.trade_id))
-    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                (trade["size_usdc"], round(pnl,2), user_id))
+    if not trade["is_live"]:
+        conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                    (trade["size_usdc"], round(pnl,2), user_id))
     conn.commit()
     conn.close()
     return {"message": f"Trade fermé avec PnL: {round(pnl,2)} USDC"}
@@ -2791,6 +2810,10 @@ def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current
 @app.post("/api/paper/reset")
 def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
     conn = get_db()
+    open_live = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_live=1", (user_id,)).fetchone()[0]
+    if open_live > 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"{open_live} trade(s) LIVE encore ouvert(s) sur Hyperliquid — fermez-les d'abord (le reset supprimerait leur suivi sans toucher à l'exchange)")
     # Reset portfolio
     conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0, reset_at=? WHERE user_id=?", 
         (datetime.utcnow().isoformat(), user_id))
@@ -2809,6 +2832,8 @@ def reset_paper_portfolio(user_id: int = Depends(get_current_user)):
 
 @app.put("/api/paper/update")
 async def update_paper_trades(user_id: int = Depends(get_current_user)):
+    """Rafraîchit uniquement l'affichage (prix courant / PnL) des positions ouvertes.
+    NE FERME AUCUN TRADE — la fermeture est gérée exclusivement par manage_open_trade."""
     conn = get_db()
     trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)
@@ -2819,24 +2844,8 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
         cur = price_row["price"]
         direction = 1 if trade["action"] == "LONG" else -1
         pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
-        close_reason = None
-        # SL technique désactivé - Max Loss gère la protection
-        if trade["take_profit2"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit2"]: close_reason = "TP2"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit2"]: close_reason = "TP2"
-        elif trade["take_profit1"]:
-            if trade["action"] == "LONG" and cur >= trade["take_profit1"]: close_reason = "TP1"
-            elif trade["action"] == "SHORT" and cur <= trade["take_profit1"]: close_reason = "TP1"
-        if close_reason:
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-                closed_at=?, close_reason=? WHERE id=?""",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-                 datetime.utcnow().isoformat(), close_reason, trade["id"]))
-            conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                        (trade["size_usdc"], round(pnl,2), user_id))
-        else:
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                        (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
     conn.commit()
     conn.close()
     return {"message": "Trades mis à jour"}
@@ -2845,6 +2854,10 @@ async def update_paper_trades(user_id: int = Depends(get_current_user)):
 @app.post("/api/reset-all")
 def reset_all(user_id: int = Depends(get_current_user)):
     conn = get_db()
+    open_live = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_live=1", (user_id,)).fetchone()[0]
+    if open_live > 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"{open_live} trade(s) LIVE encore ouvert(s) sur Hyperliquid — fermez-les d'abord")
     # Fermer tous les trades paper ouverts
     conn.execute("UPDATE paper_trades SET status='CLOSED', close_reason='RESET', closed_at=? WHERE user_id=? AND status='OPEN'",
                 (datetime.utcnow().isoformat(), user_id))
