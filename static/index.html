@@ -1239,8 +1239,8 @@ Confirmer ?`
                     {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
                     {key:"btc_trend_threshold",label:"Seuil tendance BTC (%/8h)",def:2.0,step:0.1,min:0.5,max:10},
                     {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.0,step:0.1,min:1,max:5},
-                    {key:"trailing_gap_usd",label:"Écart trailing ($)",def:0.3,step:0.05,min:0.05,max:5},
-                    {key:"qp_lock_trigger_usd",label:"Plancher QP garanti dès pic ($)",def:1.5,step:0.1,min:0.5,max:10},
+                    {key:"trailing_gap_pct",label:"Écart trailing (% prix)",def:0.42,step:0.01,min:0.02,max:5},
+                    {key:"qp_lock_trigger_pct",label:"Plancher QP garanti dès (% prix)",def:0.63,step:0.01,min:0.05,max:10},
                     {key:"rsi_period",label:"RSI - période",def:14,step:1,min:5,max:30},
                     {key:"macd_fast",label:"MACD - rapide",def:12,step:1,min:2,max:30},
                     {key:"macd_slow",label:"MACD - lent",def:26,step:1,min:10,max:60},
@@ -1274,24 +1274,24 @@ Confirmer ?`
                   <div style={{fontSize:9,color:"#334155",marginTop:4}}>≈ {Math.round((config?.position_pct||5)*10)} USDC sur 1000 USDC · Adaptatif</div>
                 </div>
                 <div>
-                  <div style={{fontSize:10,color:"#f59e0b",marginBottom:6,fontWeight:700,letterSpacing:1}}>⚡ QUICK PROFIT (USDC)</div>
+                  <div style={{fontSize:10,color:"#f59e0b",marginBottom:6,fontWeight:700,letterSpacing:1}}>⚡ QUICK PROFIT (% PRIX)</div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <input type="number" min="0.5" max="10" step="0.5" defaultValue={config?.quick_profit_usd||1}
-                      onBlur={e=>{apiCall("/api/config","PUT",{quick_profit_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("qp");});}}
+                    <input type="number" min="0.05" max="5" step="0.01" defaultValue={config?.quick_profit_pct||0.46}
+                      onBlur={e=>{apiCall("/api/config","PUT",{quick_profit_pct:Number(e.target.value)},token).then(()=>{loadData();flashSave("qp");});}}
                       style={{flex:1,background:savedField==="qp"?"#1a2e0a":"#0a0e1a",border:savedField==="qp"?"1px solid #34d399":"1px solid #f59e0b",borderRadius:6,padding:"8px 10px",color:savedField==="qp"?"#34d399":"#f59e0b",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
-                    <span style={{color:"#f59e0b",fontWeight:700,fontSize:14}}>$</span>
+                    <span style={{color:"#f59e0b",fontWeight:700,fontSize:14}}>%</span>
                   </div>
-                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique dès ce profit atteint (frais inclus)</div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Arme le trailing dès ce % de mouvement de prix favorable (indépendant du levier)</div>
                 </div>
                 <div>
-                  <div style={{fontSize:10,color:"#f87171",marginBottom:6,fontWeight:700,letterSpacing:1}}>🛡️ MAX LOSS (USDC)</div>
+                  <div style={{fontSize:10,color:"#f87171",marginBottom:6,fontWeight:700,letterSpacing:1}}>🛡️ MAX LOSS (% PRIX)</div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <input type="number" min="0.25" max="5" step="0.25" defaultValue={config?.max_loss_usd||0.5}
-                      onBlur={e=>{apiCall("/api/config","PUT",{max_loss_usd:Number(e.target.value)},token).then(()=>{loadData();flashSave("ml");});}}
+                    <input type="number" min="0.05" max="5" step="0.01" defaultValue={config?.max_loss_pct||0.31}
+                      onBlur={e=>{apiCall("/api/config","PUT",{max_loss_pct:Number(e.target.value)},token).then(()=>{loadData();flashSave("ml");});}}
                       style={{flex:1,background:savedField==="ml"?"#1a0a0a":"#0a0e1a",border:savedField==="ml"?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"8px 10px",color:savedField==="ml"?"#34d399":"#f87171",fontFamily:"inherit",fontSize:12,transition:"all 0.3s"}}/>
-                    <span style={{color:"#f87171",fontWeight:700,fontSize:14}}>$</span>
+                    <span style={{color:"#f87171",fontWeight:700,fontSize:14}}>%</span>
                   </div>
-                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture automatique si perte dépasse ce montant</div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Fermeture si le prix bouge contre vous de ce % depuis l'entrée</div>
                 </div>
                 <div>
                   <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>TRADES SIMULTANES MAX</div>
