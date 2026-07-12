@@ -136,6 +136,25 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # ── Migration vers un système 100% en % du prix d'entrée (indépendant du levier/taille) ──
+        # Remplace quick_profit_usd/max_loss_usd/trailing_gap_usd/qp_lock_trigger_usd,
+        # retirés de l'interface. Défauts calculés à partir des anciennes valeurs $ (levier x3, position 8%/1000$).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN quick_profit_pct REAL DEFAULT 0.46")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_pct REAL DEFAULT 0.31")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_pct REAL DEFAULT 0.42")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_lock_trigger_pct REAL DEFAULT 0.63")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_period INTEGER DEFAULT 14")
         conn.commit()
     except: pass
@@ -234,6 +253,12 @@ def init_db():
     except: pass
     try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN peak_pnl REAL DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        # Pic du mouvement de prix brut (%, non-levierisé, ajusté selon la direction) —
+        # utilisé pour les décisions Trailing/Max Loss en % (indépendant de la taille et du levier).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN peak_price_pct REAL DEFAULT 0")
         conn.commit()
     except: pass
     try:
@@ -429,6 +454,10 @@ def init_db():
             trailing_activation_mult REAL DEFAULT 1.0,
             trailing_gap_usd REAL DEFAULT 0.3,
             qp_lock_trigger_usd REAL DEFAULT 1.5,
+            quick_profit_pct REAL DEFAULT 0.46,
+            max_loss_pct REAL DEFAULT 0.31,
+            trailing_gap_pct REAL DEFAULT 0.42,
+            qp_lock_trigger_pct REAL DEFAULT 0.63,
             rsi_period INTEGER DEFAULT 14,
             macd_fast INTEGER DEFAULT 12,
             macd_slow INTEGER DEFAULT 26,
@@ -666,7 +695,7 @@ def get_hl_account_value(account_address: str) -> float:
         return 0.0
 
 def hl_open_position(account_address: str, coin: str, action: str, size_usdc: float,
-                      leverage: int, cur_price: float, max_loss_usd: float):
+                      leverage: int, cur_price: float, max_loss_pct: float):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
     (trigger order, reduce_only) sur l'exchange — filet en cas de défaillance du bot.
     Retourne (coin_size, sl_oid) ou lève une exception."""
@@ -680,11 +709,10 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec ouverture position Hyperliquid: {result}")
 
-    # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss.
-    # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré.
-    safety_loss_usd = max(max_loss_usd, 0.5) * 3
-    price_move = safety_loss_usd / (size_usdc * leverage) * cur_price
-    sl_price = round(cur_price - price_move, 4) if is_buy else round(cur_price + price_move, 4)
+    # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss (en %).
+    # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré (en % de prix).
+    safety_move_pct = max(max_loss_pct, 0.1) * 3 / 100
+    sl_price = round(cur_price * (1 - safety_move_pct), 6) if is_buy else round(cur_price * (1 + safety_move_pct), 6)
 
     sl_oid = None
     try:
@@ -948,42 +976,53 @@ def cleanup_orphan_signals(user_id: int):
 def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
-    C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement."""
+    C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement.
+
+    Les seuils sont exprimés en % de mouvement de prix depuis l'entrée (indépendants
+    du levier et de la taille de position) — comme un stop/take-profit classique posé
+    sur le prix. Le PnL en $ reste calculé pour le portefeuille/les logs, mais toutes
+    les décisions de fermeture se basent sur price_move_pct."""
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
+    price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
-    cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd, qp_lock_trigger_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.0
-    max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() and cfg_qp["max_loss_usd"] else 0.75
+    cfg_qp = conn.execute("""SELECT quick_profit_pct, max_loss_pct, trailing_activation_mult,
+        trailing_gap_pct, qp_lock_trigger_pct FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+    quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
+    max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
-    trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.3
-    trail_trigger = quick_profit_target * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
-    qp_lock_trigger = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
+    trail_gap_pct = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
+    trail_trigger_pct = quick_profit_pct * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
+    qp_lock_trigger_pct = float(cfg_qp["qp_lock_trigger_pct"]) if cfg_qp and "qp_lock_trigger_pct" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_pct"] else 0.63
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
         peak_pnl = pnl
         conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+    peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
+    if price_move_pct > peak_pct:
+        peak_pct = price_move_pct
+        conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     close_reason = None
-    # Deux protections actives en parallèle, on retient toujours la plus protectrice (la plus haute) :
-    #  1. Trailing dynamique : pic - trail_gap, actif dès que le pic dépasse trail_trigger
-    #  2. Plancher Quick Profit : garantit quick_profit_usd de gain dès que le pic dépasse qp_lock_trigger
-    #     (utile quand trail_gap est large : évite de rendre plus que quick_profit_usd sur les pics modestes)
+    # Deux protections actives en parallèle (en % de prix), on retient toujours la plus protectrice (la plus haute) :
+    #  1. Trailing dynamique : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct
+    #  2. Plancher Quick Profit : garantit quick_profit_pct de mouvement dès que le pic% dépasse qp_lock_trigger_pct
+    #     (utile quand trail_gap_pct est large : évite de rendre plus que quick_profit_pct sur les pics modestes)
     candidate_stops = []
-    if peak_pnl >= trail_trigger:
-        candidate_stops.append(("TRAILING_PROFIT", peak_pnl - trail_gap))
-    if peak_pnl >= qp_lock_trigger:
-        candidate_stops.append(("TRAILING_PROFIT", quick_profit_target))
+    if peak_pct >= trail_trigger_pct:
+        candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
+    if peak_pct >= qp_lock_trigger_pct:
+        candidate_stops.append(("TRAILING_PROFIT", quick_profit_pct))
 
     if candidate_stops:
-        reason, stop_level = max(candidate_stops, key=lambda x: x[1])
-        if pnl <= stop_level:
+        reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
+        if price_move_pct <= stop_level_pct:
             close_reason = reason
-            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(stop_level,2)}$) !", "success")
-    if not close_reason and pnl <= -max_loss_target:
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%) !", "success")
+    if not close_reason and price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
-        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
+        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
 
     if not close_reason:
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
@@ -1469,10 +1508,10 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                     else:
                         try:
-                            cfg_ml = conn.execute("SELECT max_loss_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                            max_loss_target = float(cfg_ml["max_loss_usd"]) if cfg_ml and "max_loss_usd" in cfg_ml.keys() and cfg_ml["max_loss_usd"] else 0.75
+                            cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                            max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 0.31
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_target)
+                            coin_size, sl_oid = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
                             entry_price = ai.get("entry") or price
                             conn.execute("""
                                 INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
@@ -2282,6 +2321,10 @@ class UpdateConfigRequest(BaseModel):
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
+    quick_profit_pct: Optional[float] = None
+    max_loss_pct: Optional[float] = None
+    trailing_gap_pct: Optional[float] = None
+    qp_lock_trigger_pct: Optional[float] = None
     rsi_period: Optional[int] = None
     macd_fast: Optional[int] = None
     macd_slow: Optional[int] = None
@@ -2375,6 +2418,10 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.3,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
+        "quick_profit_pct": config["quick_profit_pct"] if "quick_profit_pct" in config.keys() and config["quick_profit_pct"] else 0.46,
+        "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 0.31,
+        "trailing_gap_pct": config["trailing_gap_pct"] if "trailing_gap_pct" in config.keys() and config["trailing_gap_pct"] else 0.42,
+        "qp_lock_trigger_pct": config["qp_lock_trigger_pct"] if "qp_lock_trigger_pct" in config.keys() and config["qp_lock_trigger_pct"] else 0.63,
         "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
         "macd_fast": config["macd_fast"] if "macd_fast" in config.keys() and config["macd_fast"] else 12,
         "macd_slow": config["macd_slow"] if "macd_slow" in config.keys() and config["macd_slow"] else 26,
@@ -2452,6 +2499,14 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
+    if req.quick_profit_pct is not None:
+        conn.execute("UPDATE bot_config SET quick_profit_pct=? WHERE user_id=?", (req.quick_profit_pct, user_id))
+    if req.max_loss_pct is not None:
+        conn.execute("UPDATE bot_config SET max_loss_pct=? WHERE user_id=?", (req.max_loss_pct, user_id))
+    if req.trailing_gap_pct is not None:
+        conn.execute("UPDATE bot_config SET trailing_gap_pct=? WHERE user_id=?", (req.trailing_gap_pct, user_id))
+    if req.qp_lock_trigger_pct is not None:
+        conn.execute("UPDATE bot_config SET qp_lock_trigger_pct=? WHERE user_id=?", (req.qp_lock_trigger_pct, user_id))
     if req.rsi_period is not None:
         conn.execute("UPDATE bot_config SET rsi_period=? WHERE user_id=?", (req.rsi_period, user_id))
     if req.macd_fast is not None:
