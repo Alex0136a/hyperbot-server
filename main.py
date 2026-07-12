@@ -127,6 +127,15 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plancher de protection : garantit qu'on ne rend jamais plus que
+        # (peak_pnl_atteint - trail_gap) UNE FOIS que le pic a dépassé ce seuil.
+        # Ex: qp_lock_trigger_usd=1.5 et quick_profit_usd=1.1 → dès que le pic
+        # dépasse 1.5$, le trade ne peut plus se fermer sous 1.1$ de PnL,
+        # même si le trailing_gap seul aurait autorisé une chute plus large.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_lock_trigger_usd REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN rsi_period INTEGER DEFAULT 14")
         conn.commit()
     except: pass
@@ -419,6 +428,7 @@ def init_db():
             btc_trend_threshold REAL DEFAULT 2.0,
             trailing_activation_mult REAL DEFAULT 1.0,
             trailing_gap_usd REAL DEFAULT 0.3,
+            qp_lock_trigger_usd REAL DEFAULT 1.5,
             rsi_period INTEGER DEFAULT 14,
             macd_fast INTEGER DEFAULT 12,
             macd_slow INTEGER DEFAULT 26,
@@ -942,12 +952,13 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
 
-    cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    cfg_qp = conn.execute("SELECT quick_profit_usd, max_loss_usd, trailing_activation_mult, trailing_gap_usd, qp_lock_trigger_usd FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     quick_profit_target = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.0
     max_loss_target = float(cfg_qp["max_loss_usd"]) if cfg_qp and "max_loss_usd" in cfg_qp.keys() and cfg_qp["max_loss_usd"] else 0.75
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
     trail_gap = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 0.3
     trail_trigger = quick_profit_target * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
+    qp_lock_trigger = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -955,12 +966,22 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
 
     close_reason = None
+    # Deux protections actives en parallèle, on retient toujours la plus protectrice (la plus haute) :
+    #  1. Trailing dynamique : pic - trail_gap, actif dès que le pic dépasse trail_trigger
+    #  2. Plancher Quick Profit : garantit quick_profit_usd de gain dès que le pic dépasse qp_lock_trigger
+    #     (utile quand trail_gap est large : évite de rendre plus que quick_profit_usd sur les pics modestes)
+    candidate_stops = []
     if peak_pnl >= trail_trigger:
-        trail_sl = peak_pnl - trail_gap
-        if pnl <= trail_sl:
-            close_reason = "TRAILING_PROFIT"
-            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(trail_sl,2)}$) !", "success")
-    elif pnl <= -max_loss_target:
+        candidate_stops.append(("TRAILING_PROFIT", peak_pnl - trail_gap))
+    if peak_pnl >= qp_lock_trigger:
+        candidate_stops.append(("TRAILING_PROFIT", quick_profit_target))
+
+    if candidate_stops:
+        reason, stop_level = max(candidate_stops, key=lambda x: x[1])
+        if pnl <= stop_level:
+            close_reason = reason
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic: +{round(peak_pnl,2)}$, seuil: {round(stop_level,2)}$) !", "success")
+    if not close_reason and pnl <= -max_loss_target:
         close_reason = "MAX_LOSS"
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC — protection activée", "warning")
 
@@ -2159,9 +2180,10 @@ async def update_prices_display(user_id: int):
         pass
 
 async def update_open_positions(user_id: int):
-    """Rafraîchit uniquement l'affichage (prix courant / PnL) des positions ouvertes.
-    NE FERME AUCUN TRADE — la fermeture est gérée exclusivement par manage_open_trade
-    (appelée depuis scan_markets et depuis le WebSocket)."""
+    """Filet de secours (toutes les 5s, uniquement si le WebSocket est déconnecté) :
+    appelle EXACTEMENT la même fonction que le WebSocket et scan_markets — manage_open_trade —
+    pour que le Trailing Profit / Max Loss continue à s'appliquer même pendant une coupure WS.
+    Aucune logique de fermeture propre ici : un seul cerveau, plusieurs déclencheurs."""
     conn = get_db()
     paper_trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
@@ -2181,9 +2203,9 @@ async def update_open_positions(user_id: int):
         cur = prices.get(trade["coin"])
         if not cur:
             continue
-        pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] if trade["action"] == "LONG" else (trade["entry_price"] - cur) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"]
-        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-            (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        result = manage_open_trade(user_id, trade, cur, conn)
+        if result:
+            await finalize_closed_trade(user_id, trade, result["pnl"], conn)
     conn.commit()
     conn.close()
 
@@ -2259,6 +2281,7 @@ class UpdateConfigRequest(BaseModel):
     btc_trend_threshold: Optional[float] = None
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
+    qp_lock_trigger_usd: Optional[float] = None
     rsi_period: Optional[int] = None
     macd_fast: Optional[int] = None
     macd_slow: Optional[int] = None
@@ -2351,6 +2374,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.3,
+        "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
         "macd_fast": config["macd_fast"] if "macd_fast" in config.keys() and config["macd_fast"] else 12,
         "macd_slow": config["macd_slow"] if "macd_slow" in config.keys() and config["macd_slow"] else 26,
@@ -2426,6 +2450,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
     if req.trailing_gap_usd is not None:
         conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
+    if req.qp_lock_trigger_usd is not None:
+        conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.rsi_period is not None:
         conn.execute("UPDATE bot_config SET rsi_period=? WHERE user_id=?", (req.rsi_period, user_id))
     if req.macd_fast is not None:
