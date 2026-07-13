@@ -1185,6 +1185,14 @@ Confirmer ?`
                       <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
                       <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                      {trade.peak_price_pct != null && (
+                        <span style={{color:"#64748b",fontSize:9}} title="Pic de mouvement de prix atteint pendant le trade">
+                          pic {trade.peak_price_pct.toFixed(3)}%
+                          {config?.qp_lock_trigger_usd && trade.size_usdc && trade.leverage && (
+                            ` / armé ${(config.qp_lock_trigger_usd / (trade.size_usdc * trade.leverage) * 100).toFixed(3)}%`
+                          )}
+                        </span>
+                      )}
                     </div>
                     <div style={{display:"flex",gap:12,alignItems:"center"}}>
                       <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
@@ -1266,6 +1274,7 @@ Confirmer ?`
                     {key:"max_same_direction_trend",label:"Max même direction (tendance confirmée)",def:3,step:1,min:1,max:10},
                     {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.0,step:0.1,min:1,max:5},
                     {key:"trailing_gap_pct",label:"Écart trailing (% prix)",def:0.42,step:0.01,min:0.02,max:5},
+                    {key:"trailing_gap_usd",label:"Plafond écart trailing ($)",def:1.0,step:0.1,min:0.1,max:20},
                     {key:"qp_lock_trigger_usd",label:"Plancher QP - seuil d'armement ($)",def:1.5,step:0.1,min:0.1,max:20},
                     {key:"quick_profit_usd",label:"Plancher QP - montant garanti ($)",def:1.1,step:0.1,min:0.1,max:20},
                     {key:"rsi_period",label:"RSI - période",def:14,step:1,min:5,max:30},
