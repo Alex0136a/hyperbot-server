@@ -1186,11 +1186,10 @@ Confirmer ?`
                       <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
                       <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
                       {trade.peak_price_pct != null && (
-                        <span style={{color:"#64748b",fontSize:9}} title="Pic de mouvement de prix atteint pendant le trade">
+                        <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
                           pic {trade.peak_price_pct.toFixed(3)}%
-                          {config?.qp_lock_trigger_usd && trade.size_usdc && trade.leverage && (
-                            ` / armé ${(config.qp_lock_trigger_usd / (trade.size_usdc * trade.leverage) * 100).toFixed(3)}%`
-                          )}
+                          {trade.close_qp_arm_pct != null && ` / armé ${trade.close_qp_arm_pct.toFixed(3)}%`}
+                          {trade.close_stop_level_pct != null && ` / seuil ${trade.close_stop_level_pct.toFixed(3)}%`}
                         </span>
                       )}
                     </div>
