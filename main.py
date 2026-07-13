@@ -161,6 +161,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN last_data_cleanup TEXT")
+        conn.commit()
+    except: pass
+    try:
         # ── Migration vers un système 100% en % du prix d'entrée (indépendant du levier/taille) ──
         # Remplace quick_profit_usd/max_loss_usd/trailing_gap_usd/qp_lock_trigger_usd,
         # retirés de l'interface. Défauts calculés à partir des anciennes valeurs $ (levier x3, position 8%/1000$).
@@ -255,9 +259,19 @@ def init_db():
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0,
             net_pnl REAL DEFAULT 0,
+            gains_usdc REAL DEFAULT 0,
+            losses_usdc REAL DEFAULT 0,
             capital_start REAL DEFAULT 1000.0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )""")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE trading_sessions ADD COLUMN gains_usdc REAL DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE trading_sessions ADD COLUMN losses_usdc REAL DEFAULT 0")
         conn.commit()
     except: pass
     try:
@@ -284,6 +298,17 @@ def init_db():
         # Pic du mouvement de prix brut (%, non-levierisé, ajusté selon la direction) —
         # utilisé pour les décisions Trailing/Max Loss en % (indépendant de la taille et du levier).
         conn.execute("ALTER TABLE paper_trades ADD COLUMN peak_price_pct REAL DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        # Valeurs FIGÉES au moment exact de la fermeture (immunisées contre un changement
+        # ultérieur des réglages) — permet de vérifier n'importe quand après coup pourquoi
+        # un trade a fermé à tel niveau, sans dépendre des logs (purgés au bout de 500 lignes).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN close_stop_level_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN close_qp_arm_pct REAL")
         conn.commit()
     except: pass
     try:
@@ -1154,12 +1179,14 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     close_reason = None
+    close_stop_level_pct = None
     # Max Loss vérifié EN PREMIER : sans ça, une fois le trailing/plancher armé, une chute
     # brutale (saut de prix entre deux vérifications) pouvait être mal étiquetée TRAILING_PROFIT
     # ou QP_FLOOR au lieu de MAX_LOSS, car ces conditions ("prix <= seuil") sont trivialement
     # vraies pour n'importe quelle valeur très négative, pas seulement "revenu près du seuil".
     if price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
+        close_stop_level_pct = -max_loss_pct
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
     # QP a la PRIORITÉ tant que le PnL courant reste dans sa "zone" (≤ qp_arm_pct, ≈1.5$) :
     # une fois le plancher armé (le pic a dépassé qp_arm_pct au moins une fois), tant que le
@@ -1171,6 +1198,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         # Zone QP : priorité absolue au plancher, le trailing est ignoré ici
         if price_move_pct <= qp_floor_pct:
             close_reason = "QP_FLOOR"
+            close_stop_level_pct = qp_floor_pct
             add_bot_log(user_id, f"🎯 {trade['coin']}: Plancher QP +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(qp_floor_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
     elif not close_reason:
         # PnL courant encore au-dessus de qp_arm_pct (ou plancher pas encore armé) :
@@ -1184,6 +1212,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
             if price_move_pct <= stop_level_pct:
                 close_reason = reason
+                close_stop_level_pct = stop_level_pct
                 label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
                 add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
 
@@ -1204,9 +1233,9 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — vérifiez manuellement sur l'exchange !", "error")
 
     conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
-        closed_at=?, close_reason=? WHERE id=?""",
+        closed_at=?, close_reason=?, close_stop_level_pct=?, close_qp_arm_pct=? WHERE id=?""",
         (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2),
-         datetime.utcnow().isoformat(), close_reason, trade["id"]))
+         datetime.utcnow().isoformat(), close_reason, close_stop_level_pct, qp_arm_pct, trade["id"]))
     if not is_live:
         # Le solde réel vit sur Hyperliquid pour les trades live — on ne touche pas paper_portfolio
         conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
@@ -1226,17 +1255,20 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn):
             SELECT COUNT(*) as total,
                 SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
-                SUM(pnl) as net
+                SUM(pnl) as net,
+                SUM(CASE WHEN pnl>0 THEN pnl ELSE 0 END) as gains_usdc,
+                SUM(CASE WHEN pnl<=0 THEN pnl ELSE 0 END) as losses_usdc
             FROM paper_trades
             WHERE user_id=? AND status='CLOSED'
             AND COALESCE(session_date, date(opened_at), date(closed_at))=?
         """, (user_id, trade_date)).fetchone()
         if session_stats:
             conn.execute("""UPDATE trading_sessions
-                SET total_trades=?, wins=?, losses=?, net_pnl=?
+                SET total_trades=?, wins=?, losses=?, net_pnl=?, gains_usdc=?, losses_usdc=?
                 WHERE user_id=? AND session_date=?""",
                 (session_stats["total"] or 0, session_stats["wins"] or 0,
                  session_stats["losses"] or 0, round(session_stats["net"] or 0, 2),
+                 round(session_stats["gains_usdc"] or 0, 2), round(session_stats["losses_usdc"] or 0, 2),
                  user_id, trade_date))
             conn.commit()
     except Exception:
@@ -2533,6 +2565,39 @@ async def update_open_positions(user_id: int):
     conn.commit()
     conn.close()
 
+DATA_RETENTION_HOURS = 72  # rétention limitée — contrainte mémoire/disque sur Railway
+
+def cleanup_old_data(user_id: int):
+    """Purge les trades fermés (et signaux orphelins associés) de plus de DATA_RETENTION_HOURS.
+    Une fois par jour seulement. Nécessaire vu les contraintes mémoire/disque sur Railway —
+    les rapports de performance (Bilan, actifs pénalisants) ne porteront donc plus que sur
+    la fenêtre glissante de rétention, plus assez pour le volume de trading actuel."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = get_db()
+    cfg = conn.execute("SELECT last_data_cleanup FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    if cfg and cfg["last_data_cleanup"] == today:
+        conn.close()
+        return
+    # paper_trades.closed_at est écrit via datetime.utcnow().isoformat() (format ISO, 'T') —
+    # comparaison directe avec un cutoff Python dans le même format, cohérent partout ailleurs
+    # dans ce fichier pour cette colonne (opened_at/closed_at).
+    cutoff = (datetime.utcnow() - timedelta(hours=DATA_RETENTION_HOURS)).isoformat()
+    deleted_trades = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='CLOSED' AND closed_at < ?",
+        (user_id, cutoff)
+    ).fetchone()[0]
+    conn.execute("DELETE FROM paper_trades WHERE user_id=? AND status='CLOSED' AND closed_at < ?", (user_id, cutoff))
+    # signals.created_at utilise le défaut SQLite CURRENT_TIMESTAMP (format 'YYYY-MM-DD HH:MM:SS',
+    # PAS le format ISO 'T' de Python) — on utilise datetime('now', ...) natif SQLite pour éviter
+    # tout décalage de format entre les deux (comme fait ailleurs dans ce fichier pour cette table).
+    conn.execute("DELETE FROM signals WHERE user_id=? AND created_at < datetime('now', ?)",
+                 (user_id, f"-{DATA_RETENTION_HOURS} hours"))
+    conn.execute("UPDATE bot_config SET last_data_cleanup=? WHERE user_id=?", (today, user_id))
+    conn.commit()
+    conn.close()
+    if deleted_trades:
+        add_bot_log(user_id, f"🧹 Nettoyage quotidien : {deleted_trades} trade(s) fermé(s) de plus de {DATA_RETENTION_HOURS}h supprimé(s)", "info")
+
 def check_and_log_penalizing_coins(user_id: int):
     """Signalement UNIQUEMENT (ne bloque rien) — une fois par jour, journalise les actifs
     dont les stats cumulées sont pénalisantes : ≥10 trades, winrate <35% ET net <-3$ (combinés)."""
@@ -2574,6 +2639,7 @@ async def run_bot_loop(user_id: int):
             try:
                 await scan_markets(user_id)
                 check_and_log_penalizing_coins(user_id)
+                cleanup_old_data(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3430,36 +3496,35 @@ def get_bilan(user_id: int = Depends(get_current_user)):
     """, (user_id, today)).fetchone()
     
     # Stats totales depuis le début
+    # "Depuis le début" et "7 derniers jours" utilisent trading_sessions (agrégats quotidiens
+    # mis à jour en temps réel à chaque clôture) et PAS paper_trades directement — ces agrégats
+    # ne sont jamais purgés par le nettoyage à 72h, contrairement aux lignes de trades individuelles.
     total_stats = conn.execute("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gains,
-            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
-            SUM(pnl + COALESCE(tp1_pnl,0)) as net
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED'
+        SELECT
+            SUM(total_trades) as total,
+            SUM(wins) as wins,
+            SUM(losses) as losses,
+            SUM(CASE WHEN net_pnl > 0 THEN net_pnl ELSE 0 END) as gains,
+            SUM(CASE WHEN net_pnl < 0 THEN net_pnl ELSE 0 END) as pertes,
+            SUM(net_pnl) as net
+        FROM trading_sessions
+        WHERE user_id=?
     """, (user_id,)).fetchone()
-    
+
     # Trades ouverts PnL
     open_pnl = conn.execute("""
         SELECT SUM(pnl) as open_pnl, COUNT(*) as open_count, SUM(size_usdc) as open_margin
         FROM paper_trades WHERE user_id=? AND status='OPEN'
     """, (user_id,)).fetchone()
-    
-    # Stats par jour (7 derniers) basé sur date de FERMETURE = performance cash du jour
+
+    # Stats par jour (7 derniers) — directement depuis trading_sessions (agrégats persistants,
+    # jamais purgés), pas depuis paper_trades (dont les lignes de plus de 72h sont supprimées)
     daily = conn.execute("""
-        SELECT date(pt.closed_at) as day,
-            COUNT(*) as total,
-            SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(pt.pnl) as net,
-            1000 as capital_start
-        FROM paper_trades pt
-        WHERE pt.user_id=? AND pt.status='CLOSED' AND pt.closed_at IS NOT NULL
-        GROUP BY date(pt.closed_at)
-        ORDER BY day DESC LIMIT 7
+        SELECT session_date as day, total_trades as total, wins, losses, net_pnl as net,
+            capital_start
+        FROM trading_sessions
+        WHERE user_id=?
+        ORDER BY session_date DESC LIMIT 7
     """, (user_id,)).fetchall()
     
     # Stats par actif
@@ -3583,25 +3648,28 @@ def get_bilan(user_id: int = Depends(get_current_user)):
 @app.get("/api/stats/daily")
 def get_daily_stats(user_id: int = Depends(get_current_user)):
     conn = get_db()
-    # Stats par jour - trades gagnants et perdants
+    # Stats par jour — depuis trading_sessions (agrégats persistants, jamais purgés),
+    # pas depuis paper_trades directement (dont les lignes de plus de 72h sont supprimées)
     rows = conn.execute("""
-        SELECT 
-            date(closed_at) as day,
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as total_wins_usdc,
-            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as total_losses_usdc,
-            SUM(pnl) as net_pnl,
-            close_reason
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED'
-        GROUP BY date(closed_at)
-        ORDER BY day DESC
+        SELECT session_date as day, total_trades as total, wins, losses,
+            gains_usdc as total_wins_usdc, losses_usdc as total_losses_usdc, net_pnl
+        FROM trading_sessions
+        WHERE user_id=?
+        ORDER BY session_date DESC
         LIMIT 30
     """, (user_id,)).fetchall()
-    
-    # Detail wins
+
+    # Sommaire global — depuis trading_sessions aussi, pour rester valable à vie
+    # (winrate, gain/perte moyen) même après purge des lignes de trades individuelles
+    lifetime = conn.execute("""
+        SELECT SUM(wins) as wins, SUM(losses) as losses,
+            SUM(gains_usdc) as total_wins_usdc, SUM(losses_usdc) as total_losses_usdc
+        FROM trading_sessions
+        WHERE user_id=?
+    """, (user_id,)).fetchone()
+
+    # Detail wins — nécessairement limité à la fenêtre de rétention (72h), le détail
+    # ligne par ligne ne peut pas survivre à la suppression des trades individuels
     wins = conn.execute("""
         SELECT coin, action, pnl, pnl_pct, entry_price, current_price, 
                close_reason, closed_at, leverage
@@ -3620,16 +3688,18 @@ def get_daily_stats(user_id: int = Depends(get_current_user)):
     """, (user_id,)).fetchall()
     
     conn.close()
+    lifetime_wins = lifetime["wins"] or 0
+    lifetime_losses = lifetime["losses"] or 0
     return {
         "daily": [dict(r) for r in rows],
         "wins": [dict(r) for r in wins],
         "losses": [dict(r) for r in losses],
         "summary": {
-            "total_wins": len(wins),
-            "total_losses": len(losses),
-            "total_wins_usdc": round(sum(r["pnl"] for r in wins), 2),
-            "total_losses_usdc": round(sum(r["pnl"] for r in losses), 2),
-            "win_rate": round(len(wins) / (len(wins) + len(losses)) * 100, 1) if (wins or losses) else 0
+            "total_wins": lifetime_wins,
+            "total_losses": lifetime_losses,
+            "total_wins_usdc": round(lifetime["total_wins_usdc"] or 0, 2),
+            "total_losses_usdc": round(lifetime["total_losses_usdc"] or 0, 2),
+            "win_rate": round(lifetime_wins / (lifetime_wins + lifetime_losses) * 100, 1) if (lifetime_wins or lifetime_losses) else 0
         }
     }
 
