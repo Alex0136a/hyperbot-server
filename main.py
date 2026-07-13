@@ -1036,10 +1036,11 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     close_reason = None
-    # Deux protections actives en parallèle (en % de prix), on retient toujours la plus protectrice (la plus haute) :
-    #  1. Trailing dynamique : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct
-    #  2. Plancher Quick Profit : garantit quick_profit_pct de mouvement dès que le pic% dépasse qp_lock_trigger_pct
-    #     (utile quand trail_gap_pct est large : évite de rendre plus que quick_profit_pct sur les pics modestes)
+    # Deux protections à deux seuils DISTINCTS, pour laisser le trade s'exprimer avant de verrouiller :
+    #  1. Trailing dynamique : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct (≈1.1$)
+    #     → suit le pic de près, mais ne verrouille rien de fixe, laisse le trade continuer à monter
+    #  2. Plancher Quick Profit : garantit quick_profit_pct (≈1.1$) dès que le pic% dépasse qp_lock_trigger_pct
+    #     (≈1.5$, seuil plus haut) → seulement une fois le trade nettement au-dessus de l'armement initial
     candidate_stops = []
     if peak_pct >= trail_trigger_pct:
         candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
