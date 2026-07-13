@@ -17,6 +17,7 @@ import json
 import asyncio
 import httpx
 import time
+import math
 import os
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -147,6 +148,10 @@ def init_db():
         # dépasse 1.5$, le trade ne peut plus se fermer sous 1.1$ de PnL,
         # même si le trailing_gap seul aurait autorisé une chute plus large.
         conn.execute("ALTER TABLE bot_config ADD COLUMN qp_lock_trigger_usd REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN last_penalizing_check TEXT")
         conn.commit()
     except: pass
     try:
@@ -1049,6 +1054,52 @@ def is_correlated_with_open_position(user_id: int, coin: str, action: str, conn,
             return other_coin
     return None
 
+def select_best_half_by_correlation(candidates: list, user_id: int, threshold: float = CORRELATION_THRESHOLD) -> list:
+    """Regroupe les candidats (même direction) en clusters de coins mutuellement corrélés
+    (≥ threshold, via union-find), et ne garde que la meilleure moitié de chaque cluster
+    (par confiance décroissante). Pas de fermeture de positions déjà ouvertes — filtre
+    appliqué uniquement AVANT ouverture, entre plusieurs signaux candidats du même cycle.
+    `candidates` : liste de dicts avec au moins 'coin' et 'confidence'."""
+    if len(candidates) <= 1:
+        return candidates
+
+    n = len(candidates)
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            corr = compute_correlation(candidates[i]["coin"], candidates[j]["coin"])
+            if corr is not None and corr >= threshold:
+                union(i, j)
+
+    clusters = {}
+    for i in range(n):
+        root = find(i)
+        clusters.setdefault(root, []).append(i)
+
+    selected = []
+    for indices in clusters.values():
+        if len(indices) == 1:
+            selected.append(candidates[indices[0]])
+            continue
+        group = sorted((candidates[i] for i in indices), key=lambda c: c["confidence"], reverse=True)
+        keep_n = math.ceil(len(group) / 2)
+        kept, dropped = group[:keep_n], group[keep_n:]
+        selected.extend(kept)
+        coin_names = ", ".join(f"{c['coin']}({c['confidence']}%)" for c in group)
+        for c in dropped:
+            add_bot_log(user_id, f"🔗 {c['coin']}: {c['action']} écarté — cluster corrélé [{coin_names}], gardé la meilleure moitié par confiance", "warning")
+    return selected
+
 def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
@@ -1089,23 +1140,31 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     close_reason = None
-    # Deux protections à deux seuils DISTINCTS, pour laisser le trade s'exprimer avant de verrouiller :
-    #  1. Trailing dynamique (%) : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct
-    #     → suit le pic de près, mais ne verrouille rien de fixe, laisse le trade continuer à monter
-    #  2. Plancher Quick Profit ($ fixe, reconverti en % pour ce trade) : garantit quick_profit_usd
-    #     dès que le pic dépasse l'équivalent % de qp_lock_trigger_usd pour CE trade précis
-    candidate_stops = []
-    if peak_pct >= trail_trigger_pct:
-        candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
-    if peak_pct >= qp_arm_pct:
-        candidate_stops.append(("QP_FLOOR", qp_floor_pct))
-
-    if candidate_stops:
-        reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
-        if price_move_pct <= stop_level_pct:
-            close_reason = reason
-            label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
-            add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
+    # QP a la PRIORITÉ tant que le PnL courant reste dans sa "zone" (≤ qp_arm_pct, ≈1.5$) :
+    # une fois le plancher armé (le pic a dépassé qp_arm_pct au moins une fois), tant que le
+    # PnL courant est ≤ qp_arm_pct, seul le plancher QP décide (le trailing est ignoré, même
+    # s'il aurait pu donner un seuil plus protecteur). Le trailing ne reprend la main que
+    # lorsque le PnL courant dépasse encore qp_arm_pct (le trade continue de monter fort).
+    qp_armed = peak_pct >= qp_arm_pct
+    if qp_armed and price_move_pct <= qp_arm_pct:
+        # Zone QP : priorité absolue au plancher, le trailing est ignoré ici
+        if price_move_pct <= qp_floor_pct:
+            close_reason = "QP_FLOOR"
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Plancher QP +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(qp_floor_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
+    else:
+        # PnL courant encore au-dessus de qp_arm_pct (ou plancher pas encore armé) :
+        # comparaison standard entre trailing et plancher, on retient le plus protecteur
+        candidate_stops = []
+        if peak_pct >= trail_trigger_pct:
+            candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
+        if qp_armed:
+            candidate_stops.append(("QP_FLOOR", qp_floor_pct))
+        if candidate_stops:
+            reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
+            if price_move_pct <= stop_level_pct:
+                close_reason = reason
+                label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
+                add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
     if not close_reason and price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
@@ -1314,6 +1373,8 @@ async def scan_markets(user_id: int):
         bb_period = config["bb_period"] if config and "bb_period" in config.keys() and config["bb_period"] else 20
         bb_stddev = config["bb_stddev"] if config and "bb_stddev" in config.keys() and config["bb_stddev"] else 2
         atr_period = config["atr_period"] if config and "atr_period" in config.keys() and config["atr_period"] else 14
+
+        pending_opens = []  # candidats de ce cycle en attente de sélection anti-corrélation (meilleure moitié)
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -1528,6 +1589,34 @@ async def scan_markets(user_id: int):
                 price, tech["rsi"], tech["atr"], tech["vwap"]
             ))
             sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.commit()
+            conn.close()
+
+            # Mise en attente : la décision d'ouverture est différée après la boucle complète,
+            # pour pouvoir comparer ce candidat aux autres signaux corrélés du même cycle
+            # (voir select_best_half_by_correlation — garde la meilleure moitié par confiance).
+            pending_opens.append({
+                "coin": coin, "action": ai["action"], "confidence": ai["confidence"],
+                "ai": ai, "price": price, "sig_id": sig_id,
+            })
+
+        # === Filtre anti-corrélation entre candidats de CE cycle (avant toute ouverture) ===
+        # Ne garde que la meilleure moitié (par confiance) de chaque cluster de coins
+        # mutuellement corrélés (≥ CORRELATION_THRESHOLD), séparément par direction.
+        selected_opens = []
+        for direction in ("LONG", "SHORT"):
+            group = [c for c in pending_opens if c["action"] == direction]
+            selected_opens.extend(select_best_half_by_correlation(group, user_id))
+
+        # Tri par confiance décroissante : si le plafond anti-corrélation (max_same_direction)
+        # est sur le point d'être atteint, les meilleurs candidats (toutes clusters confondus)
+        # consomment les places en priorité — évite qu'un candidat plus faible d'un cluster A
+        # ne bloque un meilleur candidat d'un cluster B traité plus tard.
+        selected_opens.sort(key=lambda c: c["confidence"], reverse=True)
+
+        for cand in selected_opens:
+            coin, ai, price, sig_id = cand["coin"], cand["ai"], cand["price"], cand["sig_id"]
+            conn = get_db()
 
             # Auto-execute en mode paper
             cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct, max_same_direction_neutral, max_same_direction_trend FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
@@ -1675,11 +1764,30 @@ REWARD_WIN_THRESHOLD = 3   # gains consécutifs avant que la confiance requise c
 REWARD_STEP_PCT = 5        # baisse en points de % par tranche de REWARD_WIN_THRESHOLD gains supplémentaires
 REWARD_FLOOR_PCT = 50      # plancher minimum, jamais en dessous même sur une longue série de gains
 
+def is_coin_penalizing(user_id: int, coin: str, conn) -> bool:
+    """Vérifie EN DIRECT (pas de durée fixe, recalculé à chaque appel) si un coin est
+    actuellement 'pénalisant' selon les mêmes seuils que le rapport Bilan :
+    ≥10 trades, winrate <35% ET net <-3$ (combinés). Se lève automatiquement dès que
+    les stats cumulées repassent au-dessus d'un seul des deux seuils."""
+    row = conn.execute("""
+        SELECT COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(pnl) as net
+        FROM paper_trades WHERE user_id=? AND coin=? AND status='CLOSED'
+    """, (user_id, coin)).fetchone()
+    if not row or (row["total"] or 0) < PENALIZING_MIN_TRADES:
+        return False
+    win_rate = (row["wins"] or 0) / max(row["total"] or 1, 1) * 100
+    return win_rate < PENALIZING_WINRATE_THRESHOLD and (row["net"] or 0) < PENALIZING_NET_THRESHOLD
+
 def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None) -> int:
     """Retourne la confiance requise selon l'historique récent du coin/direction :
     - pertes consécutives → paliers réglables à la hausse (défaut 60/72/82/90), plus dur à déclencher
     - gains consécutifs (≥3) → baisse symétrique sous la base (5%/3 gains, plancher 50%), plus facile
-      à déclencher pour un actif qui a démontré qu'il fonctionne dans cette direction récemment"""
+      à déclencher pour un actif qui a démontré qu'il fonctionne dans cette direction récemment
+      — SAUF si le coin est actuellement 'pénalisant' au global (bilan cumulé mauvais), auquel cas
+      la récompense est ignorée et la confiance de base normale s'applique (recalculé à chaque appel,
+      se lève automatiquement dès que le bilan cumulé s'améliore)"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses, consecutive_wins FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
@@ -1689,16 +1797,22 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
         "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
         (user_id,)
     ).fetchone()
-    conn.close()
     losses = row["consecutive_losses"] if row else 0
     wins = row["consecutive_wins"] if row and "consecutive_wins" in row.keys() else 0
     steps = get_confidence_steps(cfg)
     if losses > 0:
+        conn.close()
         return steps[min(losses, len(steps) - 1)]
     if wins >= REWARD_WIN_THRESHOLD:
+        if is_coin_penalizing(user_id, coin, conn):
+            conn.close()
+            add_bot_log(user_id, f"⚠️ {coin} {action}: récompense ignorée — bilan cumulé pénalisant malgré {wins} gains récents", "warning")
+            return steps[0]
+        conn.close()
         base = steps[0]
         reward_tiers = wins // REWARD_WIN_THRESHOLD
         return max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT)
+    conn.close()
     return steps[0]
 
 def get_confidence_steps(cfg) -> list:
@@ -1745,15 +1859,24 @@ def is_coin_paused(user_id: int, coin: str) -> bool:
     if datetime.utcnow() < paused_until:
         conn.close()
         return True
-    # Pause expirée → nettoyer, et exiger 82% de confiance (palier 2) au retour, par précaution
+    # Pause expirée → nettoyer, et reprendre au palier juste EN DESSOUS de celui qui a
+    # déclenché la pause (cohérent avec loss_streak_size configuré, pas un palier fixe)
     conn.execute("DELETE FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin))
+    cfg_streak = conn.execute("SELECT loss_streak_size FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    streak_size = cfg_streak["loss_streak_size"] if cfg_streak and "loss_streak_size" in cfg_streak.keys() and cfg_streak["loss_streak_size"] else 3
+    resume_losses = max(0, min(int(streak_size) - 1, 3))  # palier juste sous celui qui a déclenché la pause
+    cfg_steps = conn.execute(
+        "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    resume_conf = get_confidence_steps(cfg_steps)[resume_losses]
     conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
-        VALUES (?,?,'LONG',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
+        VALUES (?,?,'LONG',?,?)""", (user_id, coin, resume_losses, datetime.utcnow().isoformat()))
     conn.execute("""INSERT OR REPLACE INTO coin_confidence (user_id, coin, action, consecutive_losses, updated_at)
-        VALUES (?,?,'SHORT',2,?)""", (user_id, coin, datetime.utcnow().isoformat()))
+        VALUES (?,?,'SHORT',?,?)""", (user_id, coin, resume_losses, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
-    add_bot_log(user_id, f"▶️ {coin}: pause terminée — confiance requise fixée à 82% pour la reprise", "info")
+    add_bot_log(user_id, f"▶️ {coin}: pause terminée — confiance requise fixée à {resume_conf}% pour la reprise", "info")
     return False
 
 async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
@@ -2392,6 +2515,35 @@ async def update_open_positions(user_id: int):
     conn.commit()
     conn.close()
 
+def check_and_log_penalizing_coins(user_id: int):
+    """Signalement UNIQUEMENT (ne bloque rien) — une fois par jour, journalise les actifs
+    dont les stats cumulées sont pénalisantes : ≥10 trades, winrate <35% ET net <-3$ (combinés)."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = get_db()
+    cfg = conn.execute("SELECT last_penalizing_check FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    if cfg and cfg["last_penalizing_check"] == today:
+        conn.close()
+        return
+    by_coin = conn.execute("""
+        SELECT coin, COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(pnl) as net
+        FROM paper_trades WHERE user_id=? AND status='CLOSED'
+        GROUP BY coin
+    """, (user_id,)).fetchall()
+    penalizing = [
+        r for r in by_coin
+        if (r["total"] or 0) >= PENALIZING_MIN_TRADES
+        and ((r["wins"] or 0) / max(r["total"] or 1, 1) * 100) < PENALIZING_WINRATE_THRESHOLD
+        and (r["net"] or 0) < PENALIZING_NET_THRESHOLD
+    ]
+    if penalizing:
+        coins_str = ", ".join(f"{r['coin']} ({round((r['wins'] or 0)/max(r['total'] or 1,1)*100,1)}%, {round(r['net'] or 0,2)}$ sur {r['total']} trades)" for r in penalizing)
+        add_bot_log(user_id, f"📉 Actifs pénalisants détectés (signalement, aucun blocage auto) : {coins_str} — envisagez de les retirer d'Actifs actifs", "warning")
+    conn.execute("UPDATE bot_config SET last_penalizing_check=? WHERE user_id=?", (today, user_id))
+    conn.commit()
+    conn.close()
+
 async def run_bot_loop(user_id: int):
     """Boucle principale 3min - analyse IA et nouveaux signaux"""
     try:
@@ -2403,6 +2555,7 @@ async def run_bot_loop(user_id: int):
                 break
             try:
                 await scan_markets(user_id)
+                check_and_log_penalizing_coins(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3233,6 +3386,11 @@ def get_sessions(user_id: int = Depends(get_current_user)):
     conn.close()
     return {"sessions": result}
 
+# Actifs pénalisants — seuils de signalement (semi-automatique, ne bloque rien seul)
+PENALIZING_MIN_TRADES = 10       # échantillon minimum avant de tirer une conclusion
+PENALIZING_WINRATE_THRESHOLD = 35  # % — sous ce winrate, signalé
+PENALIZING_NET_THRESHOLD = -3.0    # $ — net cumulé sous ce montant, signalé
+
 @app.get("/api/bilan")
 def get_bilan(user_id: int = Depends(get_current_user)):
     conn = get_db()
@@ -3301,7 +3459,34 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         GROUP BY coin
         ORDER BY net DESC
     """, (user_id,)).fetchall()
-    
+
+    # Stats par heure de la journée (UTC, heure d'OUVERTURE du trade) — quelles heures sont productives
+    by_hour = conn.execute("""
+        SELECT CAST(strftime('%H', opened_at) AS INTEGER) as hour,
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as net
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED' AND opened_at IS NOT NULL
+        GROUP BY hour
+        ORDER BY hour ASC
+    """, (user_id,)).fetchall()
+
+    # Croisement actif × heure — uniquement pour les paires avec au moins 3 trades (évite le bruit
+    # statistique sur des échantillons trop petits)
+    by_coin_hour = conn.execute("""
+        SELECT coin, CAST(strftime('%H', opened_at) AS INTEGER) as hour,
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(pnl) as net
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED' AND opened_at IS NOT NULL
+        GROUP BY coin, hour
+        HAVING COUNT(*) >= 3
+        ORDER BY net DESC
+    """, (user_id,)).fetchall()
+
     conn.close()
     
     balance = portfolio["balance"] if portfolio else 1000
@@ -3347,7 +3532,34 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             "avg_loss": round(r["avg_loss"] or 0, 2),
             "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
             "total_minutes": int(r["total_minutes"] or 0)
-        } for r in by_coin]
+        } for r in by_coin],
+        "by_hour": [{
+            "hour": r["hour"],
+            "total": r["total"],
+            "wins": r["wins"],
+            "losses": r["losses"],
+            "net": round(r["net"] or 0, 2),
+            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1)
+        } for r in by_hour],
+        "by_coin_hour": [{
+            "coin": r["coin"],
+            "hour": r["hour"],
+            "total": r["total"],
+            "wins": r["wins"],
+            "net": round(r["net"] or 0, 2),
+            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1)
+        } for r in by_coin_hour],
+        # Actifs pénalisants — SIGNALEMENT UNIQUEMENT, ne bloque rien automatiquement.
+        # Seuils : minimum 10 trades (évite le bruit statistique), winrate <35% ET net <-3$ (combinés).
+        "penalizing_coins": [{
+            "coin": r["coin"],
+            "total": r["total"],
+            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
+            "net": round(r["net"] or 0, 2)
+        } for r in by_coin
+          if (r["total"] or 0) >= PENALIZING_MIN_TRADES
+          and ((r["wins"] or 0) / max(r["total"] or 1, 1) * 100) < PENALIZING_WINRATE_THRESHOLD
+          and (r["net"] or 0) < PENALIZING_NET_THRESHOLD]
     }
 
 @app.get("/api/stats/daily")
