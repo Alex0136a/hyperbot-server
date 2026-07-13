@@ -965,6 +965,7 @@ async def analyze_with_ai(client, user_id, coin, tech, ob, price, api_key):
 # ── MOTEUR DE SCAN ───────────────────────────────────────────
 scanning_tasks = {}   # user_id -> asyncio Task (scan IA)
 positions_tasks = {}  # user_id -> asyncio Task (suivi positions)
+coin_recent_closes = {}  # coin -> liste des N derniers closes (pour calcul de corrélation anti-corrélation)
 
 def check_losing_streak(user_id: int, streak_size: int = 3) -> bool:
     """Détecte X pertes consécutives (tous actifs confondus, les plus récentes fermées)"""
@@ -1004,27 +1005,79 @@ def cleanup_orphan_signals(user_id: int):
 # de trading (les fermetures manuelles utilisateur et le reset restent à part).
 # Le SL de sécurité réel posé sur Hyperliquid (mode live) est le seul autre
 # déclencheur possible, côté exchange, en cas de défaillance du bot.
+CORRELATION_LOOKBACK = 20      # nombre de bougies récentes utilisées pour le calcul
+CORRELATION_THRESHOLD = 0.7    # au-delà, deux coins sont considérés comme "le même pari"
+
+def compute_correlation(coin_a: str, coin_b: str) -> Optional[float]:
+    """Corrélation de Pearson entre les rendements récents (% de variation bougie à bougie)
+    de deux coins, à partir du cache coin_recent_closes. Retourne None si données insuffisantes."""
+    closes_a = coin_recent_closes.get(coin_a)
+    closes_b = coin_recent_closes.get(coin_b)
+    if not closes_a or not closes_b or len(closes_a) < 5 or len(closes_b) < 5:
+        return None
+    n = min(len(closes_a), len(closes_b))
+    closes_a, closes_b = closes_a[-n:], closes_b[-n:]
+    # Rendements % bougie à bougie (indépendant de l'échelle de prix de chaque coin)
+    returns_a = [(closes_a[i] - closes_a[i-1]) / closes_a[i-1] for i in range(1, n) if closes_a[i-1]]
+    returns_b = [(closes_b[i] - closes_b[i-1]) / closes_b[i-1] for i in range(1, n) if closes_b[i-1]]
+    m = min(len(returns_a), len(returns_b))
+    if m < 4:
+        return None
+    returns_a, returns_b = returns_a[-m:], returns_b[-m:]
+    mean_a = sum(returns_a) / m
+    mean_b = sum(returns_b) / m
+    cov = sum((returns_a[i] - mean_a) * (returns_b[i] - mean_b) for i in range(m))
+    var_a = sum((r - mean_a) ** 2 for r in returns_a)
+    var_b = sum((r - mean_b) ** 2 for r in returns_b)
+    if var_a == 0 or var_b == 0:
+        return None
+    return cov / (var_a ** 0.5 * var_b ** 0.5)
+
+def is_correlated_with_open_position(user_id: int, coin: str, action: str, conn, threshold: float = CORRELATION_THRESHOLD) -> Optional[str]:
+    """Vérifie si `coin` est fortement corrélé (> threshold) à une position déjà ouverte
+    dans la même direction. Retourne le coin en conflit si oui, sinon None."""
+    open_same_dir = conn.execute(
+        "SELECT DISTINCT coin FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?",
+        (user_id, action)
+    ).fetchall()
+    for row in open_same_dir:
+        other_coin = row["coin"]
+        if other_coin == coin:
+            continue
+        corr = compute_correlation(coin, other_coin)
+        if corr is not None and corr >= threshold:
+            return other_coin
+    return None
+
 def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
     C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement.
 
-    Les seuils sont exprimés en % de mouvement de prix depuis l'entrée (indépendants
-    du levier et de la taille de position) — comme un stop/take-profit classique posé
-    sur le prix. Le PnL en $ reste calculé pour le portefeuille/les logs, mais toutes
-    les décisions de fermeture se basent sur price_move_pct."""
+    Le trailing (activation + écart) est exprimé en % de mouvement de prix depuis
+    l'entrée (indépendant du levier/taille) — ça évite le bruit de prix normal de
+    déclencher des clôtures prématurées. Le plancher Quick Profit (son seuil d'armement
+    ET le montant garanti), lui, est exprimé en $ FIXES et reconverti dynamiquement en %
+    selon la taille × levier réels de CE trade — pour garantir toujours le même montant
+    en dollars, peu importe le levier utilisé."""
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
     cfg_qp = conn.execute("""SELECT quick_profit_pct, max_loss_pct, trailing_activation_mult,
-        trailing_gap_pct, qp_lock_trigger_pct FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+        trailing_gap_pct, qp_lock_trigger_usd, quick_profit_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
     quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
     max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
     trail_gap_pct = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
     trail_trigger_pct = quick_profit_pct * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
-    qp_lock_trigger_pct = float(cfg_qp["qp_lock_trigger_pct"]) if cfg_qp and "qp_lock_trigger_pct" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_pct"] else 0.63
+
+    # Plancher Quick Profit en $ FIXES, converti dynamiquement en % pour CE trade précis
+    qp_lock_trigger_usd = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
+    quick_profit_usd = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.1
+    notional = trade["size_usdc"] * trade["leverage"]
+    qp_arm_pct = (qp_lock_trigger_usd / notional * 100) if notional > 0 else 999
+    qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -1037,21 +1090,22 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
     close_reason = None
     # Deux protections à deux seuils DISTINCTS, pour laisser le trade s'exprimer avant de verrouiller :
-    #  1. Trailing dynamique : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct (≈1.1$)
+    #  1. Trailing dynamique (%) : pic% - trail_gap_pct, actif dès que le pic% dépasse trail_trigger_pct
     #     → suit le pic de près, mais ne verrouille rien de fixe, laisse le trade continuer à monter
-    #  2. Plancher Quick Profit : garantit quick_profit_pct (≈1.1$) dès que le pic% dépasse qp_lock_trigger_pct
-    #     (≈1.5$, seuil plus haut) → seulement une fois le trade nettement au-dessus de l'armement initial
+    #  2. Plancher Quick Profit ($ fixe, reconverti en % pour ce trade) : garantit quick_profit_usd
+    #     dès que le pic dépasse l'équivalent % de qp_lock_trigger_usd pour CE trade précis
     candidate_stops = []
     if peak_pct >= trail_trigger_pct:
         candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
-    if peak_pct >= qp_lock_trigger_pct:
-        candidate_stops.append(("TRAILING_PROFIT", quick_profit_pct))
+    if peak_pct >= qp_arm_pct:
+        candidate_stops.append(("QP_FLOOR", qp_floor_pct))
 
     if candidate_stops:
         reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
         if price_move_pct <= stop_level_pct:
             close_reason = reason
-            add_bot_log(user_id, f"🎯 {trade['coin']}: Trailing Profit +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%) !", "success")
+            label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
+            add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
     if not close_reason and price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
@@ -1278,6 +1332,7 @@ async def scan_markets(user_id: int):
             candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
             closes = [cd["c"] for cd in candles]
             vols = [cd["v"] for cd in candles]
+            coin_recent_closes[coin] = closes[-CORRELATION_LOOKBACK:]  # cache pour anti-corrélation, avant tout 'continue'
 
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
@@ -1493,6 +1548,9 @@ async def scan_markets(user_id: int):
                 same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
                 max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                 same_dir_blocked = same_dir_count >= max_same_dir
+                # Anti-corrélation réelle : bloque même sous le plafond si fortement corrélé (≥0.7)
+                # à une position déjà ouverte dans la même direction (même pari déguisé)
+                correlated_coin = is_correlated_with_open_position(user_id, coin, ai["action"], conn)
                 # Logs de diagnostic
                 if not portfolio:
                     add_bot_log(user_id, f"⚠️ {coin}: Pas de portefeuille trouvé", "warning")
@@ -1504,7 +1562,9 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                 elif same_dir_blocked:
                     add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — {same_dir_count} trades {ai['action']} déjà ouverts (max {max_same_dir}, anti-corrélation)", "warning")
-                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open and not same_dir_blocked:
+                elif correlated_coin:
+                    add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — corrélé à {correlated_coin} déjà ouvert (≥{CORRELATION_THRESHOLD}, même pari)", "warning")
+                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open and not same_dir_blocked and not correlated_coin:
                     # Rafraîchir le prix juste avant l'exécution : le "price" du snapshot de début
                     # de scan peut être périmé de plusieurs secondes pour les derniers coins traités
                     # (chaque itération fait un appel réseau fetch_candles). On repioche la dernière
@@ -1545,6 +1605,7 @@ async def scan_markets(user_id: int):
                     same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                     same_dir_blocked = same_dir_count >= max_same_dir
+                    correlated_coin = is_correlated_with_open_position(user_id, coin, ai["action"], conn)
                     net_env = "TESTNET" if HL_USE_TESTNET else "MAINNET ⚠️ ARGENT RÉEL"
                     if capital <= 0:
                         add_bot_log(user_id, f"⛔ {coin}: Impossible de récupérer le capital réel Hyperliquid ({net_env})", "error")
@@ -1556,6 +1617,8 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                     elif same_dir_blocked:
                         add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — {same_dir_count} trades {ai['action']} déjà ouverts (max {max_same_dir}, anti-corrélation)", "warning")
+                    elif correlated_coin:
+                        add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — corrélé à {correlated_coin} déjà ouvert (≥{CORRELATION_THRESHOLD}, même pari)", "warning")
                     else:
                         try:
                             cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
@@ -2520,7 +2583,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
         "position_pct": config["position_pct"] if config and "position_pct" in config.keys() else 5.0,
-        "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() else 1.0,
+        "quick_profit_usd": config["quick_profit_usd"] if config and "quick_profit_usd" in config.keys() and config["quick_profit_usd"] else 1.1,
         "max_loss_usd": config["max_loss_usd"] if config and "max_loss_usd" in config.keys() else 0.75,
         "max_open_trades": config["max_open_trades"] or 5,
         "last_scan": config["last_scan"],
