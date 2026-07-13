@@ -105,7 +105,31 @@ function generateBilan(bilan, paper) {
   (bilan.daily||[]).forEach(d=>{
     t += `  ${d.day} | ✅${d.wins} ❌${d.losses} | ${d.net>=0?"+":""}${Math.round(d.net*100)/100} USDC\n`;
   });
-  
+
+  t += `\n[ PERFORMANCE PAR ACTIF ]\n${thin}\n`;
+  (bilan.by_coin||[]).forEach(c=>{
+    t += `  ${c.coin.padEnd(8)} | ${c.total} trades | WR ${c.win_rate}% | moy +${c.avg_gain}/-${Math.abs(c.avg_loss)} | NET ${c.net>=0?"+":""}${c.net} USDC\n`;
+  });
+
+  t += `\n[ PERFORMANCE PAR HEURE (UTC, heure d'ouverture) ]\n${thin}\n`;
+  (bilan.by_hour||[]).forEach(h=>{
+    t += `  ${String(h.hour).padStart(2,"0")}h-${String((h.hour+1)%24).padStart(2,"0")}h | ${h.total} trades | WR ${h.win_rate}% | NET ${h.net>=0?"+":""}${h.net} USDC\n`;
+  });
+
+  if((bilan.by_coin_hour||[]).length){
+    t += `\n[ MEILLEURES COMBINAISONS ACTIF × HEURE (min. 3 trades) ]\n${thin}\n`;
+    bilan.by_coin_hour.slice(0,10).forEach(ch=>{
+      t += `  ${ch.coin.padEnd(8)} @ ${String(ch.hour).padStart(2,"0")}h UTC | ${ch.total} trades | WR ${ch.win_rate}% | NET ${ch.net>=0?"+":""}${ch.net} USDC\n`;
+    });
+  }
+
+  if((bilan.penalizing_coins||[]).length){
+    t += `\n[ ⚠️ ACTIFS PÉNALISANTS (signalement, aucun blocage auto) ]\n${thin}\n`;
+    bilan.penalizing_coins.forEach(p=>{
+      t += `  ${p.coin.padEnd(8)} | ${p.total} trades | WR ${p.win_rate}% | NET ${p.net} USDC — envisager de retirer d'Actifs actifs\n`;
+    });
+  }
+
   if(paper) {
     t += `\n[ TRADES OUVERTS ]\n${thin}\n`;
     (paper.open_trades||[]).forEach(tr=>{
