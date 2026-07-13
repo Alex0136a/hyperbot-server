@@ -709,10 +709,20 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec ouverture position Hyperliquid: {result}")
 
+    # Prix de fill réel (si l'exchange le renvoie) — plus fiable qu'une estimation locale
+    # potentiellement périmée. Fallback sur cur_price si la structure est inattendue.
+    fill_price = cur_price
+    try:
+        statuses = result["response"]["data"]["statuses"]
+        if statuses and "filled" in statuses[0]:
+            fill_price = float(statuses[0]["filled"]["avgPx"])
+    except Exception:
+        pass
+
     # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss (en %).
     # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré (en % de prix).
     safety_move_pct = max(max_loss_pct, 0.1) * 3 / 100
-    sl_price = round(cur_price * (1 - safety_move_pct), 6) if is_buy else round(cur_price * (1 + safety_move_pct), 6)
+    sl_price = round(fill_price * (1 - safety_move_pct), 6) if is_buy else round(fill_price * (1 + safety_move_pct), 6)
 
     sl_oid = None
     try:
@@ -728,7 +738,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     except Exception as e:
         print(f"⚠️ SL de sécurité Hyperliquid non posé pour {coin}: {e}")
 
-    return coin_size, sl_oid
+    return coin_size, sl_oid, fill_price
 
 def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
     """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé."""
@@ -1467,12 +1477,19 @@ async def scan_markets(user_id: int):
                 elif coin_open:
                     add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                 if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
-                    entry_price = ai.get("entry") or price
+                    # Rafraîchir le prix juste avant l'exécution : le "price" du snapshot de début
+                    # de scan peut être périmé de plusieurs secondes pour les derniers coins traités
+                    # (chaque itération fait un appel réseau fetch_candles). On repioche la dernière
+                    # valeur WebSocket en direct pour que l'entrée reflète le marché réel au moment T.
+                    exec_price = ws_prices.get(coin) if (ws_connected and ws_prices and coin in ws_prices) else price
+                    # entry_price = prix d'exécution réel au moment T (ordre marché simulé),
+                    # pas le prix "entry" suggéré par l'analyse (potentiellement périmé de plusieurs secondes)
+                    entry_price = exec_price
                     conn.execute("""
                         INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
                         size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at, session_date)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, (user_id, coin, ai["action"], entry_price, price, size,
+                    """, (user_id, coin, ai["action"], entry_price, exec_price, size,
                            ai.get("leverage") or 1, ai.get("stopLoss"),
                            ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                            datetime.utcnow().isoformat(),
@@ -1511,14 +1528,16 @@ async def scan_markets(user_id: int):
                             cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 0.31
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
-                            entry_price = ai.get("entry") or price
+                            coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
+                            # entry_price = prix de fill réel renvoyé par Hyperliquid (pas une estimation locale
+                            # potentiellement périmée) — capital réel en jeu, la précision compte.
+                            entry_price = fill_price
                             conn.execute("""
                                 INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
                                 size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at,
                                 session_date, is_live, hl_sl_oid, hl_size)
                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
-                            """, (user_id, coin, ai["action"], entry_price, price, size,
+                            """, (user_id, coin, ai["action"], entry_price, fill_price, size,
                                    leverage, ai.get("stopLoss"),
                                    ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                                    datetime.utcnow().isoformat(),
