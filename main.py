@@ -138,7 +138,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 0.3")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_usd REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
+        # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
+        conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
         conn.commit()
     except: pass
     try:
@@ -478,7 +484,7 @@ def init_db():
             max_same_direction_neutral INTEGER DEFAULT 2,
             max_same_direction_trend INTEGER DEFAULT 3,
             trailing_activation_mult REAL DEFAULT 1.0,
-            trailing_gap_usd REAL DEFAULT 0.3,
+            trailing_gap_usd REAL DEFAULT 1.0,
             qp_lock_trigger_usd REAL DEFAULT 1.5,
             quick_profit_pct REAL DEFAULT 0.46,
             max_loss_pct REAL DEFAULT 0.31,
@@ -1116,7 +1122,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
     cfg_qp = conn.execute("""SELECT quick_profit_pct, max_loss_pct, trailing_activation_mult,
-        trailing_gap_pct, qp_lock_trigger_usd, quick_profit_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+        trailing_gap_pct, qp_lock_trigger_usd, quick_profit_usd, trailing_gap_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
     quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
     max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
@@ -1129,6 +1135,14 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     notional = trade["size_usdc"] * trade["leverage"]
     qp_arm_pct = (qp_lock_trigger_usd / notional * 100) if notional > 0 else 999
     qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
+
+    # Plafond du recul du trailing fin en $ FIXES (1$ par défaut), converti dynamiquement en %
+    # pour CE trade précis — évite qu'un trade à fort levier ne rende beaucoup plus que 1$ avant
+    # que le trailing ne se déclenche (le % fixe seul donne un recul $ variable selon le levier).
+    # On garde toujours le plus protecteur des deux (le plus petit écart en %).
+    trailing_gap_usd = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 1.0
+    trail_gap_pct_dynamic = (trailing_gap_usd / notional * 100) if notional > 0 else trail_gap_pct
+    trail_gap_pct = min(trail_gap_pct, trail_gap_pct_dynamic)
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -2717,7 +2731,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "max_same_direction_neutral": config["max_same_direction_neutral"] if "max_same_direction_neutral" in config.keys() and config["max_same_direction_neutral"] else 2,
         "max_same_direction_trend": config["max_same_direction_trend"] if "max_same_direction_trend" in config.keys() and config["max_same_direction_trend"] else 3,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
-        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.3,
+        "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 1.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "quick_profit_pct": config["quick_profit_pct"] if "quick_profit_pct" in config.keys() and config["quick_profit_pct"] else 0.46,
         "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 0.31,
