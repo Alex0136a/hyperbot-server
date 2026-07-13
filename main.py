@@ -1154,18 +1154,25 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     close_reason = None
+    # Max Loss vérifié EN PREMIER : sans ça, une fois le trailing/plancher armé, une chute
+    # brutale (saut de prix entre deux vérifications) pouvait être mal étiquetée TRAILING_PROFIT
+    # ou QP_FLOOR au lieu de MAX_LOSS, car ces conditions ("prix <= seuil") sont trivialement
+    # vraies pour n'importe quelle valeur très négative, pas seulement "revenu près du seuil".
+    if price_move_pct <= -max_loss_pct:
+        close_reason = "MAX_LOSS"
+        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
     # QP a la PRIORITÉ tant que le PnL courant reste dans sa "zone" (≤ qp_arm_pct, ≈1.5$) :
     # une fois le plancher armé (le pic a dépassé qp_arm_pct au moins une fois), tant que le
     # PnL courant est ≤ qp_arm_pct, seul le plancher QP décide (le trailing est ignoré, même
     # s'il aurait pu donner un seuil plus protecteur). Le trailing ne reprend la main que
     # lorsque le PnL courant dépasse encore qp_arm_pct (le trade continue de monter fort).
     qp_armed = peak_pct >= qp_arm_pct
-    if qp_armed and price_move_pct <= qp_arm_pct:
+    if not close_reason and qp_armed and price_move_pct <= qp_arm_pct:
         # Zone QP : priorité absolue au plancher, le trailing est ignoré ici
         if price_move_pct <= qp_floor_pct:
             close_reason = "QP_FLOOR"
             add_bot_log(user_id, f"🎯 {trade['coin']}: Plancher QP +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(qp_floor_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
-    else:
+    elif not close_reason:
         # PnL courant encore au-dessus de qp_arm_pct (ou plancher pas encore armé) :
         # comparaison standard entre trailing et plancher, on retient le plus protecteur
         candidate_stops = []
@@ -1179,9 +1186,6 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 close_reason = reason
                 label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
                 add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(qp_arm_pct,3)}%) !", "success")
-    if not close_reason and price_move_pct <= -max_loss_pct:
-        close_reason = "MAX_LOSS"
-        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
 
     if not close_reason:
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
