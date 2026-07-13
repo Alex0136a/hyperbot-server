@@ -119,6 +119,20 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Anti-corrélation : plafond de trades ouverts simultanément dans LA MÊME direction
+        # (LONG ou SHORT), indépendant du plafond total max_open_trades. Les altcoins étant
+        # très corrélés entre eux, plusieurs signaux SHORT (ou LONG) simultanés sur des coins
+        # différents ne sont pas diversifiés — c'est le même pari répété. Plafond plus bas en
+        # mode neutre (BTC calme, le risque de faux-signaux corrélés est le plus élevé),
+        # plus haut en tendance BTC confirmée (le filtre de tendance bloque déjà la direction opposée).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN max_same_direction_neutral INTEGER DEFAULT 2")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN max_same_direction_trend INTEGER DEFAULT 3")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_activation_mult REAL DEFAULT 1.0")
         conn.commit()
     except: pass
@@ -332,9 +346,14 @@ def init_db():
             coin TEXT,
             action TEXT,
             consecutive_losses INTEGER DEFAULT 0,
+            consecutive_wins INTEGER DEFAULT 0,
             updated_at TEXT,
             PRIMARY KEY (user_id, coin, action)
         )""")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE coin_confidence ADD COLUMN consecutive_wins INTEGER DEFAULT 0")
         conn.commit()
     except: pass
     try:
@@ -451,6 +470,8 @@ def init_db():
             rsi_overbought REAL DEFAULT 65,
             volume_spike_mult REAL DEFAULT 1.5,
             btc_trend_threshold REAL DEFAULT 2.0,
+            max_same_direction_neutral INTEGER DEFAULT 2,
+            max_same_direction_trend INTEGER DEFAULT 3,
             trailing_activation_mult REAL DEFAULT 1.0,
             trailing_gap_usd REAL DEFAULT 0.3,
             qp_lock_trigger_usd REAL DEFAULT 1.5,
@@ -1453,7 +1474,7 @@ async def scan_markets(user_id: int):
             sig_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             # Auto-execute en mode paper
-            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct, max_same_direction_neutral, max_same_direction_trend FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             if cfg and cfg["trading_mode"] == "paper":
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
@@ -1467,6 +1488,10 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({position_pct}% de {round(capital,2)} USDC)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                # Anti-corrélation : plafond de trades ouverts dans la même direction
+                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
+                max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
+                same_dir_blocked = same_dir_count >= max_same_dir
                 # Logs de diagnostic
                 if not portfolio:
                     add_bot_log(user_id, f"⚠️ {coin}: Pas de portefeuille trouvé", "warning")
@@ -1476,7 +1501,9 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"⛔ {coin}: Solde insuffisant ({round(portfolio['balance'],2)} < {size} USDC)", "warning")
                 elif coin_open:
                     add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
-                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open:
+                elif same_dir_blocked:
+                    add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — {same_dir_count} trades {ai['action']} déjà ouverts (max {max_same_dir}, anti-corrélation)", "warning")
+                if portfolio and open_count < max_trades and portfolio["balance"] >= size and not coin_open and not same_dir_blocked:
                     # Rafraîchir le prix juste avant l'exécution : le "price" du snapshot de début
                     # de scan peut être périmé de plusieurs secondes pour les derniers coins traités
                     # (chaque itération fait un appel réseau fetch_candles). On repioche la dernière
@@ -1514,6 +1541,9 @@ async def scan_markets(user_id: int):
                     size = round(capital * position_pct / 100, 2)
                     size = max(10.0, min(size, capital * 0.5)) if capital > 0 else 0.0
                     coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
+                    max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
+                    same_dir_blocked = same_dir_count >= max_same_dir
                     net_env = "TESTNET" if HL_USE_TESTNET else "MAINNET ⚠️ ARGENT RÉEL"
                     if capital <= 0:
                         add_bot_log(user_id, f"⛔ {coin}: Impossible de récupérer le capital réel Hyperliquid ({net_env})", "error")
@@ -1523,6 +1553,8 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"⛔ {coin}: Solde insuffisant ({round(capital,2)} < {size} USDC)", "warning")
                     elif coin_open:
                         add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
+                    elif same_dir_blocked:
+                        add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — {same_dir_count} trades {ai['action']} déjà ouverts (max {max_same_dir}, anti-corrélation)", "warning")
                     else:
                         try:
                             cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
@@ -1575,11 +1607,18 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
+REWARD_WIN_THRESHOLD = 3   # gains consécutifs avant que la confiance requise commence à baisser
+REWARD_STEP_PCT = 5        # baisse en points de % par tranche de REWARD_WIN_THRESHOLD gains supplémentaires
+REWARD_FLOOR_PCT = 50      # plancher minimum, jamais en dessous même sur une longue série de gains
+
 def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None) -> int:
-    """Retourne la confiance requise selon les pertes consécutives — paliers réglables (défaut 60/72/82/90)"""
+    """Retourne la confiance requise selon l'historique récent du coin/direction :
+    - pertes consécutives → paliers réglables à la hausse (défaut 60/72/82/90), plus dur à déclencher
+    - gains consécutifs (≥3) → baisse symétrique sous la base (5%/3 gains, plancher 50%), plus facile
+      à déclencher pour un actif qui a démontré qu'il fonctionne dans cette direction récemment"""
     conn = get_db()
     row = conn.execute(
-        "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
+        "SELECT consecutive_losses, consecutive_wins FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
         (user_id, coin, action)
     ).fetchone()
     cfg = conn.execute(
@@ -1588,8 +1627,15 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
     ).fetchone()
     conn.close()
     losses = row["consecutive_losses"] if row else 0
+    wins = row["consecutive_wins"] if row and "consecutive_wins" in row.keys() else 0
     steps = get_confidence_steps(cfg)
-    return steps[min(losses, len(steps) - 1)]
+    if losses > 0:
+        return steps[min(losses, len(steps) - 1)]
+    if wins >= REWARD_WIN_THRESHOLD:
+        base = steps[0]
+        reward_tiers = wins // REWARD_WIN_THRESHOLD
+        return max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT)
+    return steps[0]
 
 def get_confidence_steps(cfg) -> list:
     """Construit la liste des paliers [base, step1, step2, step3] à partir de la config utilisateur,
@@ -1647,19 +1693,34 @@ def is_coin_paused(user_id: int, coin: str) -> bool:
     return False
 
 async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool):
-    """Met à jour le compteur de pertes consécutives — paliers 60/72/82/90 — et déclenche
-    la pause automatique de l'actif à la 3e perte consécutive"""
+    """Met à jour les compteurs de pertes ET de gains consécutifs (mutuellement exclusifs) :
+    - pertes consécutives → paliers 60/72/82/90 à la hausse, pause auto à la 3e perte
+    - gains consécutifs → confiance requise abaissée symétriquement (5%/3 gains, plancher 50%)"""
     conn = get_db()
     if won:
-        # Victoire → reset compteur
+        # Victoire → incrémenter la série de gains, reset la série de pertes
+        current = conn.execute(
+            "SELECT consecutive_wins FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
+            (user_id, coin, action)
+        ).fetchone()
+        wins = ((current["consecutive_wins"] or 0) + 1) if current and "consecutive_wins" in current.keys() else 1
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
-            (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,0,?)""",
-            (user_id, coin, action, datetime.utcnow().isoformat()))
-        add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à 60% (gain)", "info")
+            (user_id, coin, action, consecutive_losses, consecutive_wins, updated_at) VALUES (?,?,?,0,?,?)""",
+            (user_id, coin, action, wins, datetime.utcnow().isoformat()))
+        if wins >= REWARD_WIN_THRESHOLD:
+            cfg_steps = conn.execute(
+                "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
+                (user_id,)
+            ).fetchone()
+            base = get_confidence_steps(cfg_steps)[0]
+            reward_conf = max(REWARD_FLOOR_PCT, base - (wins // REWARD_WIN_THRESHOLD) * REWARD_STEP_PCT)
+            add_bot_log(user_id, f"🏆 {coin} {action}: Confiance requise → {reward_conf}% ({wins} gains consécutifs, actif favorisé)", "success")
+        else:
+            add_bot_log(user_id, f"✅ {coin} {action}: Confiance reset à {get_confidence_steps(None)[0]}% (gain, série: {wins})", "info")
         conn.commit()
         conn.close()
     else:
-        # Défaite → incrémenter
+        # Défaite → incrémenter la série de pertes, reset la série de gains
         current = conn.execute(
             "SELECT consecutive_losses FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
             (user_id, coin, action)
@@ -1672,7 +1733,7 @@ async def update_coin_confidence(user_id: int, coin: str, action: str, won: bool
         steps = get_confidence_steps(cfg_steps)
         new_conf = steps[min(losses, len(steps) - 1)]
         conn.execute("""INSERT OR REPLACE INTO coin_confidence 
-            (user_id, coin, action, consecutive_losses, updated_at) VALUES (?,?,?,?,?)""",
+            (user_id, coin, action, consecutive_losses, consecutive_wins, updated_at) VALUES (?,?,?,?,0,?)""",
             (user_id, coin, action, losses, datetime.utcnow().isoformat()))
         add_bot_log(user_id, f"📈 {coin} {action}: Confiance requise → {new_conf}% ({losses} pertes consécutives)", "warning")
         conn.commit()
@@ -2337,6 +2398,8 @@ class UpdateConfigRequest(BaseModel):
     rsi_overbought: Optional[float] = None
     volume_spike_mult: Optional[float] = None
     btc_trend_threshold: Optional[float] = None
+    max_same_direction_neutral: Optional[int] = None
+    max_same_direction_trend: Optional[int] = None
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
@@ -2434,6 +2497,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "rsi_overbought": config["rsi_overbought"] if "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65,
         "volume_spike_mult": config["volume_spike_mult"] if "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5,
         "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
+        "max_same_direction_neutral": config["max_same_direction_neutral"] if "max_same_direction_neutral" in config.keys() and config["max_same_direction_neutral"] else 2,
+        "max_same_direction_trend": config["max_same_direction_trend"] if "max_same_direction_trend" in config.keys() and config["max_same_direction_trend"] else 3,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 0.3,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
@@ -2512,6 +2577,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET volume_spike_mult=? WHERE user_id=?", (req.volume_spike_mult, user_id))
     if req.btc_trend_threshold is not None:
         conn.execute("UPDATE bot_config SET btc_trend_threshold=? WHERE user_id=?", (req.btc_trend_threshold, user_id))
+    if req.max_same_direction_neutral is not None:
+        conn.execute("UPDATE bot_config SET max_same_direction_neutral=? WHERE user_id=?", (req.max_same_direction_neutral, user_id))
+    if req.max_same_direction_trend is not None:
+        conn.execute("UPDATE bot_config SET max_same_direction_trend=? WHERE user_id=?", (req.max_same_direction_trend, user_id))
     if req.trailing_activation_mult is not None:
         conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
     if req.trailing_gap_usd is not None:
