@@ -179,6 +179,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN last_recovery_check TEXT")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN last_data_cleanup TEXT")
         conn.commit()
     except: pass
@@ -1639,34 +1643,6 @@ async def scan_markets(user_id: int):
                 if own_ema_align != "MIXED":
                     add_bot_log(user_id, f"📈 {coin}: Structure EMA {own_ema_align} confirmée — trade dans le sens de tendance", "success")
 
-            # === MODE TENDANCE HAUSSIERE (BTC +2%) ===
-            if btc_trend == "bullish" and coin != "PAXG":
-                # En tendance haussiere: chercher LONG sur pullbacks
-                if action == "SHORT":
-                    add_bot_log(user_id, f"↩️ {coin}: SHORT ignoré - marché haussier", "info")
-                    continue
-                if action == "LONG" and rsi_now > 75:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} haut en tendance - IA juge", "info")
-                    continue
-                # Autoriser LONG meme avec RSI entre 50-75 en tendance haussiere
-                add_bot_log(user_id, f"✅ {coin}: LONG autorisé - tendance haussière (RSI {rsi_now:.1f})", "success")
-
-            # === MODE TENDANCE BAISSIERE (BTC -2%) ===
-            elif btc_trend == "bearish" and coin != "PAXG":
-                # En tendance baissiere: chercher SHORT sur rebonds
-                if action == "LONG":
-                    add_bot_log(user_id, f"↩️ {coin}: LONG ignoré - marché baissier", "info")
-                    continue
-                if action == "SHORT" and rsi_now < 25:
-                    add_bot_log(user_id, f"📊 {coin}: RSI {rsi_now:.1f} bas en tendance - IA juge", "info")
-                    continue
-                add_bot_log(user_id, f"✅ {coin}: SHORT autorisé - tendance baissière (RSI {rsi_now:.1f})", "success")
-
-            # === MODE NEUTRE (retournements) ===
-            else:
-                # L'IA decide - on lui fait confiance sur le timing
-                add_bot_log(user_id, f"🤖 {coin}: Mode neutre - IA analyse (RSI {rsi_now:.1f})", "info")
-
             # Ignorer signaux contradictoires avec signal recent
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
                 add_bot_log(user_id, f"⚡ {coin}: Signal contradictoire ignoré (dernier: {last_action['action']})", "warning")
@@ -2697,6 +2673,47 @@ def check_and_log_penalizing_coins(user_id: int):
     conn.commit()
     conn.close()
 
+# Seuils de "retour à la normale" pour un coin sanctionné (plancher de confiance manuel)
+RECOVERY_MIN_TRADES = 5      # trades minimum depuis la sanction avant de signaler
+RECOVERY_WINRATE_THRESHOLD = 50  # % — winrate minimum depuis la sanction
+# net > 0 est vérifié directement (pas de constante séparée nécessaire)
+
+def check_recovering_sanctioned_coins(user_id: int):
+    """Signalement UNIQUEMENT (ne lève rien automatiquement) — une fois par jour, journalise
+    les coins actuellement sous plancher de confiance manuel (coin_min_confidence) dont les
+    stats DEPUIS la sanction (pas globales) sont redevenues bonnes : ≥5 trades, winrate ≥50%
+    ET net positif. Charge à l'utilisateur de décider s'il retire le plancher."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = get_db()
+    cfg = conn.execute("SELECT last_recovery_check FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    if cfg and cfg["last_recovery_check"] == today:
+        conn.close()
+        return
+    overrides = conn.execute(
+        "SELECT coin, min_confidence, updated_at FROM coin_min_confidence WHERE user_id=?", (user_id,)
+    ).fetchall()
+    recovering = []
+    for o in overrides:
+        stats = conn.execute("""
+            SELECT COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(pnl) as net
+            FROM paper_trades
+            WHERE user_id=? AND coin=? AND status='CLOSED' AND closed_at > ?
+        """, (user_id, o["coin"], o["updated_at"])).fetchone()
+        total = stats["total"] or 0
+        if total >= RECOVERY_MIN_TRADES:
+            win_rate = (stats["wins"] or 0) / total * 100
+            net = stats["net"] or 0
+            if win_rate >= RECOVERY_WINRATE_THRESHOLD and net > 0:
+                recovering.append((o["coin"], win_rate, net, total))
+    if recovering:
+        coins_str = ", ".join(f"{c} ({round(wr,1)}%, +{round(n,2)}$ sur {t} trades depuis la sanction)" for c,wr,n,t in recovering)
+        add_bot_log(user_id, f"🔓 Actifs sanctionnés en amélioration (signalement, rien de retiré automatiquement) : {coins_str} — envisagez de baisser leur plancher de confiance", "success")
+    conn.execute("UPDATE bot_config SET last_recovery_check=? WHERE user_id=?", (today, user_id))
+    conn.commit()
+    conn.close()
+
 async def run_bot_loop(user_id: int):
     """Boucle principale 3min - analyse IA et nouveaux signaux"""
     try:
@@ -2709,6 +2726,7 @@ async def run_bot_loop(user_id: int):
             try:
                 await scan_markets(user_id)
                 check_and_log_penalizing_coins(user_id)
+                check_recovering_sanctioned_coins(user_id)
                 cleanup_old_data(user_id)
             except asyncio.CancelledError:
                 raise
@@ -3749,7 +3767,28 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         } for r in by_coin
           if (r["total"] or 0) >= PENALIZING_MIN_TRADES
           and ((r["wins"] or 0) / max(r["total"] or 1, 1) * 100) < PENALIZING_WINRATE_THRESHOLD
-          and (r["net"] or 0) < PENALIZING_NET_THRESHOLD]
+          and (r["net"] or 0) < PENALIZING_NET_THRESHOLD],
+        # Coins sanctionnés (plancher de confiance manuel) dont les stats DEPUIS la sanction
+        # sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, rien n'est retiré automatiquement.
+        "recovering_sanctioned_coins": [r for r in [
+            {
+                "coin": o["coin"],
+                "min_confidence": o["min_confidence"],
+                "since": o["updated_at"],
+                **(lambda s: {
+                    "total": s["total"] or 0,
+                    "win_rate": round((s["wins"] or 0) / max(s["total"] or 1, 1) * 100, 1),
+                    "net": round(s["net"] or 0, 2)
+                })(conn.execute("""
+                    SELECT COUNT(*) as total,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                        SUM(pnl) as net
+                    FROM paper_trades
+                    WHERE user_id=? AND coin=? AND status='CLOSED' AND closed_at > ?
+                """, (user_id, o["coin"], o["updated_at"])).fetchone())
+            }
+            for o in conn.execute("SELECT coin, min_confidence, updated_at FROM coin_min_confidence WHERE user_id=?", (user_id,)).fetchall()
+        ] if r["total"] >= RECOVERY_MIN_TRADES and r["win_rate"] >= RECOVERY_WINRATE_THRESHOLD and r["net"] > 0]
     }
 
 @app.get("/api/stats/daily")
