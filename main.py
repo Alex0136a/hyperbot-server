@@ -2676,6 +2676,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 class RegisterRequest(BaseModel):
     email: str
     password: str
+    registration_code: str = ""
 
 class LoginRequest(BaseModel):
     email: str
@@ -2726,8 +2727,14 @@ class UpdateConfigRequest(BaseModel):
     max_loss_usd: Optional[float] = None
 
 # ── ROUTES AUTH ──────────────────────────────────────────────
+REGISTRATION_SECRET = os.environ.get("REGISTRATION_SECRET", "")
+
 @app.post("/api/register")
 def register(req: RegisterRequest):
+    # Sécurisé par défaut : si REGISTRATION_SECRET n'est pas configurée sur le serveur,
+    # l'inscription est bloquée entièrement plutôt que silencieusement ouverte.
+    if not REGISTRATION_SECRET or req.registration_code != REGISTRATION_SECRET:
+        raise HTTPException(status_code=403, detail="Code d'inscription invalide ou manquant")
     conn = get_db()
     try:
         conn.execute("INSERT INTO users (email, password_hash) VALUES (?,?)",
@@ -2764,6 +2771,38 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
     conn.commit()
     conn.close()
     return {"message": "Déconnecté"}
+
+class AdminDeleteUserRequest(BaseModel):
+    email: str
+    admin_secret: str
+
+@app.post("/api/admin/delete-user")
+def admin_delete_user(req: AdminDeleteUserRequest):
+    """Supprime un utilisateur et toutes ses données associées. Protégé par le même
+    secret que l'inscription (pas besoin d'un accès direct à la base de données)."""
+    if not REGISTRATION_SECRET or req.admin_secret != REGISTRATION_SECRET:
+        raise HTTPException(status_code=403, detail="Code administrateur invalide ou manquant")
+    conn = get_db()
+    user = conn.execute("SELECT id FROM users WHERE email=?", (req.email.lower(),)).fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    user_id = user["id"]
+
+    # Arrêter les tâches de fond en cours pour cet utilisateur avant suppression
+    for task_dict in (scanning_tasks, positions_tasks):
+        task = task_dict.pop(user_id, None)
+        if task:
+            task.cancel()
+
+    for table in ("trading_sessions", "coin_confidence", "coin_pause", "ai_usage",
+                  "sessions", "signals", "bot_config", "paper_portfolio",
+                  "bot_activity_log", "paper_trades"):
+        conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"message": f"Utilisateur {req.email} et toutes ses données supprimés"}
 
 # ── ROUTES BOT ───────────────────────────────────────────────
 @app.get("/api/config")
@@ -3079,7 +3118,7 @@ def get_signals_history(limit: int = 50, user_id: int = Depends(get_current_user
     return {"signals": signals, "total": len(signals)}
 
 @app.get("/api/prices")
-async def get_prices():
+async def get_prices(user_id: int = Depends(get_current_user)):
     conn = get_db()
     rows = conn.execute("SELECT coin, price FROM prices").fetchall()
     conn.close()
@@ -3342,49 +3381,6 @@ def reset_all(user_id: int = Depends(get_current_user)):
     return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
-@app.get("/api/sessions/debug")
-def debug_sessions():
-    conn = get_db()
-    sessions = conn.execute(
-        "SELECT session_date, length(session_date) as len, total_trades, net_pnl FROM trading_sessions ORDER BY session_date DESC"
-    ).fetchall()
-    trades = conn.execute(
-        """SELECT COALESCE(session_date, substr(opened_at,1,10), substr(closed_at,1,10)) as day,
-           COUNT(*) as total, SUM(pnl) as net
-           FROM paper_trades WHERE status='CLOSED'
-           GROUP BY day ORDER BY day DESC LIMIT 10"""
-    ).fetchall()
-    # Trades sans session_date valide
-    orphans = conn.execute(
-        """SELECT id, coin, action, pnl, session_date, substr(opened_at,1,10) as open_day,
-           substr(closed_at,1,10) as close_day
-           FROM paper_trades WHERE status='CLOSED' 
-           AND (session_date IS NULL OR session_date='')
-           ORDER BY closed_at DESC LIMIT 20"""
-    ).fetchall()
-    conn.close()
-    conn.close()
-    # Nouvelle connexion pour les stats portfolio
-    conn2 = get_db()
-    portfolio = conn2.execute("SELECT balance, initial_balance FROM paper_portfolio LIMIT 1").fetchone()
-    total_pnl = conn2.execute("SELECT SUM(pnl + COALESCE(tp1_pnl,0)) as total, COUNT(*) as cnt FROM paper_trades WHERE status='CLOSED'").fetchone()
-    conn2.close()
-    
-    bal = portfolio["balance"] if portfolio else 0
-    ini = portfolio["initial_balance"] if portfolio else 1000
-    pnl = round(total_pnl["total"] or 0, 2)
-    
-    return {
-        "sessions_table": [dict(s) for s in sessions],
-        "trades_by_date": [dict(t) for t in trades],
-        "balance": bal,
-        "initial_balance": ini,
-        "real_gain": round(bal - ini, 2),
-        "sum_pnl_closed": pnl,
-        "unexplained": round((bal - ini) - pnl, 2),
-        "total_closed_trades": total_pnl["cnt"]
-    }
-
 @app.post("/api/sessions/cleanup")
 def cleanup_sessions(user_id: int = Depends(get_current_user)):
     """Supprime toutes les sessions invalides et reconstruit"""
@@ -3430,7 +3426,7 @@ async def reconnect_websocket(user_id: int = Depends(get_current_user)):
     return {"message": "Reconnexion WebSocket lancée"}
 
 @app.get("/api/market-data")
-def get_market_data():
+def get_market_data(user_id: int = Depends(get_current_user)):
     """Retourne les données de marché pré-calculées depuis le cache"""
     return {"data": market_data_cache, "coins": len(market_data_cache)}
 
