@@ -1429,7 +1429,10 @@ async def scan_markets(user_id: int):
 
     async with httpx.AsyncClient() as client:
         # Liste complète des actifs disponibles (30) — scannés dans tous les cas
-        all_available_coins = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"]
+        all_available_coins = ["BTC","ETH","SOL","ARB","LINK","OP","INJ","TIA","BNB","HYPE","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX","POL"]
+        # Garde-fou : filtre tout coin retiré de la liste autorisée (ex: AVAX, PAXG) qui
+        # pourrait rester dans une sélection déjà sauvegardée en base avant ce changement.
+        active_coins = [c for c in active_coins if c in all_available_coins]
 
         # Prix : WebSocket temps réel en priorité (déjà en mémoire, gratuit), REST en fallback
         if ws_connected and ws_prices:
