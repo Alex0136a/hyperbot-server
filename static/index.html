@@ -347,6 +347,7 @@ function App() {
   const [paper, setPaper] = useState(null);
   const [aiContinuous, setAiContinuous] = useState(false);
   const [filterHours, setFilterHours] = useState(true);
+  const [filterExtraHours, setFilterExtraHours] = useState(true);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -410,6 +411,7 @@ function App() {
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
+      setFilterExtraHours(cfg?.filter_extra_hours !== 0);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -1016,7 +1018,7 @@ Confirmer ?`
             
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🌙 Session creuse (21h-23h UTC)</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🌙 Session creuse (21h-24h UTC)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Fin session USA — liquidité faible. Session Asie (00h-08h) reste active pour HYPE/SOL/INJ</div>
               </div>
               <button onClick={()=>{
@@ -1024,6 +1026,19 @@ Confirmer ?`
                 apiCall("/api/config/filters","PUT",{"filter_hours":v},token);
               }} style={{background:filterHours?"#1e3a5f22":"#0f1629",border:filterHours?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:filterHours?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
                 {filterHours?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🕐 Heures ponctuelles bloquées ({(config?.extra_blocked_hours||[12,14]).map(h=>`${h}h`).join(", ")} UTC)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Tranches identifiées comme négatives sur le Bilan — réglables dans "Réglages avancés"</div>
+              </div>
+              <button onClick={()=>{
+                const v=!filterExtraHours; setFilterExtraHours(v);
+                apiCall("/api/config/filters","PUT",{"filter_extra_hours":v},token);
+              }} style={{background:filterExtraHours?"#1e3a5f22":"#0f1629",border:filterExtraHours?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:filterExtraHours?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {filterExtraHours?"✅ ON":"⭕ OFF"}
               </button>
             </div>
 
