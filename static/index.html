@@ -255,15 +255,18 @@ function LoginPage({ onLogin }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [regCode, setRegCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
     if (!email || !password) { setError("Remplissez tous les champs"); return; }
+    if (mode === "register" && !regCode) { setError("Code d'inscription requis"); return; }
     setLoading(true); setError("");
     try {
       const path = mode === "login" ? "/api/login" : "/api/register";
-      const data = await apiCall(path, "POST", { email, password });
+      const body = mode === "login" ? { email, password } : { email, password, registration_code: regCode };
+      const data = await apiCall(path, "POST", body);
       if (mode === "register") { setMode("login"); setError("Compte créé ! Connectez-vous."); setLoading(false); return; }
       localStorage.setItem("hb_token", data.token);
       localStorage.setItem("hb_email", data.email);
@@ -302,6 +305,15 @@ function LoginPage({ onLogin }) {
             onKeyDown={e=>e.key==="Enter"&&submit()}
             style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
         </div>
+
+        {mode === "register" && (
+          <div style={{marginBottom:20}}>
+            <div style={{fontSize:10,color:"#475569",marginBottom:4,letterSpacing:1}}>CODE D'INSCRIPTION</div>
+            <input value={regCode} onChange={e=>setRegCode(e.target.value)} type="password" placeholder="Code fourni par l'administrateur"
+              onKeyDown={e=>e.key==="Enter"&&submit()}
+              style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:7,padding:"10px 12px",color:"#e2e8f0",fontSize:12}}/>
+          </div>
+        )}
 
         {error && <div style={{background:error.includes("créé")?"#052e16":"#2d0a0a",border:`1px solid ${error.includes("créé")?"#34d399":"#f87171"}`,borderRadius:6,padding:"8px 12px",marginBottom:12,fontSize:11,color:error.includes("créé")?"#34d399":"#f87171"}}>{error}</div>}
 
