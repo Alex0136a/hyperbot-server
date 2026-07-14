@@ -130,6 +130,13 @@ function generateBilan(bilan, paper) {
     });
   }
 
+  if((bilan.recovering_sanctioned_coins||[]).length){
+    t += `\n[ 🔓 ACTIFS SANCTIONNÉS EN AMÉLIORATION (signalement, rien de retiré auto) ]\n${thin}\n`;
+    bilan.recovering_sanctioned_coins.forEach(r=>{
+      t += `  ${r.coin.padEnd(8)} | plancher actuel ${r.min_confidence}% | ${r.total} trades | WR ${r.win_rate}% | NET +${r.net} USDC depuis la sanction — envisager de baisser le plancher\n`;
+    });
+  }
+
   if(paper) {
     t += `\n[ TRADES OUVERTS ]\n${thin}\n`;
     (paper.open_trades||[]).forEach(tr=>{
