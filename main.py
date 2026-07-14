@@ -227,7 +227,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_end INTEGER DEFAULT 23")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hours_creuses_end INTEGER DEFAULT 24")
+        conn.commit()
+    except: pass
+    try:
+        # Étend la fenêtre heures creuses jusqu'à minuit — la tranche 23h-00h UTC s'est révélée
+        # être la plus mauvaise sur le Bilan (analyse du 14/07/2026, NET -11.88$ sur 24 trades,
+        # WR 16.7%). Ne touche pas aux configs déjà personnalisées différemment.
+        conn.execute("UPDATE bot_config SET hours_creuses_end=24 WHERE hours_creuses_end=23")
         conn.commit()
     except: pass
     try:
@@ -404,6 +411,19 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plancher de confiance MINIMUM par actif — s'ajoute (max) au calcul normal
+        # (paliers de pertes/récompense de gains), sans jamais descendre en dessous
+        # pour les coins jugés plus risqués (ex: SUI, LINK, TAO, SEI).
+        conn.execute("""CREATE TABLE IF NOT EXISTS coin_min_confidence (
+            user_id INTEGER,
+            coin TEXT,
+            min_confidence INTEGER NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY (user_id, coin)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
             user_id INTEGER,
             coin TEXT,
@@ -536,7 +556,7 @@ def init_db():
             bb_stddev REAL DEFAULT 2,
             atr_period INTEGER DEFAULT 14,
             hours_creuses_start INTEGER DEFAULT 21,
-            hours_creuses_end INTEGER DEFAULT 23,
+            hours_creuses_end INTEGER DEFAULT 24,
             macro_blackout_before_min INTEGER DEFAULT 120,
             macro_blackout_after_min INTEGER DEFAULT 60,
             max_position_usdc REAL DEFAULT 50.0,
@@ -774,6 +794,17 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     coin_size = round((size_usdc * leverage) / cur_price, 4)
     if coin_size <= 0:
         raise ValueError("Taille de position calculée nulle ou négative")
+
+    # Régler explicitement le levier sur l'exchange AVANT d'ouvrir — sans ça, l'exchange
+    # utilise le levier précédemment configuré pour ce coin (souvent différent de celui
+    # décidé par l'IA/les règles), ce qui désynchronise la taille d'ordre calculée ici
+    # de la marge réellement engagée sur l'exchange.
+    try:
+        lev_result = exchange.update_leverage(int(leverage), coin, is_cross=True)
+        if lev_result.get("status") != "ok":
+            print(f"⚠️ update_leverage non confirmé pour {coin} (x{leverage}): {lev_result}")
+    except Exception as e:
+        raise RuntimeError(f"Échec réglage du levier x{leverage} pour {coin} sur Hyperliquid: {e}")
 
     result = exchange.market_open(coin, is_buy, coin_size, slippage=0.01)
     if result.get("status") != "ok":
@@ -1382,7 +1413,7 @@ async def scan_markets(user_id: int):
     weekday = now_utc.weekday()  # 0=lundi, 5=samedi, 6=dimanche
 
     hc_start = config["hours_creuses_start"] if config and "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21
-    hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23
+    hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24
     if filter_hours and hc_start <= hour_utc < hc_end:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
         return
@@ -1871,7 +1902,9 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
       à déclencher pour un actif qui a démontré qu'il fonctionne dans cette direction récemment
       — SAUF si le coin est actuellement 'pénalisant' au global (bilan cumulé mauvais), auquel cas
       la récompense est ignorée et la confiance de base normale s'applique (recalculé à chaque appel,
-      se lève automatiquement dès que le bilan cumulé s'améliore)"""
+      se lève automatiquement dès que le bilan cumulé s'améliore)
+    - plancher minimum par actif (coin_min_confidence) : s'applique en dernier via max(), ne descend
+      jamais en dessous peu importe le calcul ci-dessus (utile pour les coins jugés plus risqués)"""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses, consecutive_wins FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
@@ -1881,23 +1914,28 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
         "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
         (user_id,)
     ).fetchone()
+    min_row = conn.execute(
+        "SELECT min_confidence FROM coin_min_confidence WHERE user_id=? AND coin=?", (user_id, coin)
+    ).fetchone()
+    min_conf_floor = min_row["min_confidence"] if min_row else 0
+
     losses = row["consecutive_losses"] if row else 0
     wins = row["consecutive_wins"] if row and "consecutive_wins" in row.keys() else 0
     steps = get_confidence_steps(cfg)
     if losses > 0:
         conn.close()
-        return steps[min(losses, len(steps) - 1)]
+        return max(steps[min(losses, len(steps) - 1)], min_conf_floor)
     if wins >= REWARD_WIN_THRESHOLD:
         if is_coin_penalizing(user_id, coin, conn):
             conn.close()
             add_bot_log(user_id, f"⚠️ {coin} {action}: récompense ignorée — bilan cumulé pénalisant malgré {wins} gains récents", "warning")
-            return steps[0]
+            return max(steps[0], min_conf_floor)
         conn.close()
         base = steps[0]
         reward_tiers = wins // REWARD_WIN_THRESHOLD
-        return max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT)
+        return max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT, min_conf_floor)
     conn.close()
-    return steps[0]
+    return max(steps[0], min_conf_floor)
 
 def get_confidence_steps(cfg) -> list:
     """Construit la liste des paliers [base, step1, step2, step3] à partir de la config utilisateur,
@@ -2892,7 +2930,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "bb_stddev": config["bb_stddev"] if "bb_stddev" in config.keys() and config["bb_stddev"] else 2,
         "atr_period": config["atr_period"] if "atr_period" in config.keys() and config["atr_period"] else 14,
         "hours_creuses_start": config["hours_creuses_start"] if "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21,
-        "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 23,
+        "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24,
         "macro_blackout_before_min": config["macro_blackout_before_min"] if "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120,
         "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
@@ -3217,6 +3255,34 @@ def get_paused_coins(user_id: int = Depends(get_current_user)):
     ).fetchall()
     conn.close()
     return {"paused": [dict(r) for r in rows]}
+
+class MinConfidenceRequest(BaseModel):
+    coin: str
+    min_confidence: int
+
+@app.get("/api/coins/min-confidence")
+def get_min_confidence(user_id: int = Depends(get_current_user)):
+    """Liste des planchers de confiance minimum définis par actif"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT coin, min_confidence FROM coin_min_confidence WHERE user_id=?", (user_id,)
+    ).fetchall()
+    conn.close()
+    return {"overrides": [dict(r) for r in rows]}
+
+@app.put("/api/coins/min-confidence")
+def set_min_confidence(req: MinConfidenceRequest, user_id: int = Depends(get_current_user)):
+    """Définit (ou retire si min_confidence<=0) un plancher de confiance minimum pour un actif —
+    s'applique en plus (jamais en dessous) du calcul normal de confiance requise."""
+    conn = get_db()
+    if req.min_confidence <= 0:
+        conn.execute("DELETE FROM coin_min_confidence WHERE user_id=? AND coin=?", (user_id, req.coin))
+    else:
+        conn.execute("""INSERT OR REPLACE INTO coin_min_confidence (user_id, coin, min_confidence, updated_at)
+            VALUES (?,?,?,?)""", (user_id, req.coin.upper(), req.min_confidence, datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+    return {"message": f"Plancher de confiance pour {req.coin} mis à jour"}
 
 @app.get("/api/stats/ai-usage")
 def get_ai_usage(user_id: int = Depends(get_current_user)):
