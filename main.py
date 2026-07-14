@@ -251,6 +251,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN filter_extra_hours INTEGER DEFAULT 1")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN macro_blackout_before_min INTEGER DEFAULT 120")
         conn.commit()
     except: pass
@@ -571,6 +575,7 @@ def init_db():
             hours_creuses_start INTEGER DEFAULT 21,
             hours_creuses_end INTEGER DEFAULT 24,
             extra_blocked_hours TEXT DEFAULT '[12,14]',
+            filter_extra_hours INTEGER DEFAULT 1,
             macro_blackout_before_min INTEGER DEFAULT 120,
             macro_blackout_after_min INTEGER DEFAULT 60,
             max_position_usdc REAL DEFAULT 50.0,
@@ -1397,8 +1402,11 @@ async def scan_markets(user_id: int):
 
     # Tranches horaires supplémentaires bloquées, ponctuelles (pas forcément contiguës à
     # "heures creuses") — ex: 12h-13h et 14h-15h UTC, identifiées comme négatives sur le Bilan.
+    # Toggle indépendant (filter_extra_hours) : peut être désactivé sans toucher au filtre
+    # "Session creuse" principal.
+    filter_extra_hours = config["filter_extra_hours"] if config and "filter_extra_hours" in config.keys() and config["filter_extra_hours"] is not None else 1
     extra_blocked = json.loads(config["extra_blocked_hours"]) if config and "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else []
-    if filter_hours and hour_utc in extra_blocked:
+    if filter_extra_hours and hour_utc in extra_blocked:
         add_bot_log(user_id, f"🌙 Tranche horaire bloquée ({hour_utc}h UTC, historique négatif) — pas de nouveaux trades", "info")
         return
 
@@ -2935,6 +2943,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "filter_hours": config["filter_hours"] if config and "filter_hours" in config.keys() else 1,
         "filter_weekend": config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1,
         "filter_macro": config["filter_macro"] if config and "filter_macro" in config.keys() else 0,
+        "filter_extra_hours": config["filter_extra_hours"] if config and "filter_extra_hours" in config.keys() and config["filter_extra_hours"] is not None else 1,
     }
 
 @app.put("/api/config")
@@ -3120,7 +3129,7 @@ def update_filters(req: dict, user_id: int = Depends(get_current_user)):
     conn = get_db()
     updates = []
     values = []
-    for field in ["filter_hours", "filter_weekend", "filter_macro"]:
+    for field in ["filter_hours", "filter_weekend", "filter_macro", "filter_extra_hours"]:
         if field in req:
             updates.append(f"{field}=?")
             values.append(1 if req[field] else 0)
