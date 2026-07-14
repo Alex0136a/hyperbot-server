@@ -36,7 +36,7 @@ async function apiCall(path, method="GET", body=null, token=null) {
 }
 
 // ── CONSTANTES ───────────────────────────────────────────────
-const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX"];
+const ALL_COINS = ["BTC","ETH","SOL","ARB","AVAX","LINK","OP","INJ","TIA","BNB","HYPE","PAXG","TAO","WIF","JUP","PENDLE","EIGEN","RENDER","SUI","APT","SEI","DOGE","XRP","NEAR","FTM","AAVE","UNI","CRV","SUSHI","GMX","POL"];
 const confColor = c => c>=75?"#34d399":c>=60?"#fbbf24":"#f87171";
 const formatDuration = (openedAt) => {
   if(!openedAt) return "--";
@@ -365,6 +365,7 @@ function App() {
   const [liveW, setLiveW] = useState("");
   const [liveK, setLiveK] = useState("");
   const [activeCoins, setActiveCoins] = useState(ALL_COINS);
+  const [minConfidence, setMinConfidence] = useState({});
   const [saved, setSaved] = useState(false);
   const [savedField, setSavedField] = useState("");
   const [loading, setLoading] = useState(false);
@@ -394,7 +395,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -404,6 +405,7 @@ function App() {
         apiCall("/api/stats/ai-usage","GET",null,token),
         apiCall("/api/signals/history?limit=50","GET",null,token),
         apiCall("/api/coins/paused","GET",null,token),
+        apiCall("/api/coins/min-confidence","GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -421,6 +423,7 @@ function App() {
       if(aiUse) setAiUsage(aiUse);
       setSignalsHistory(sigsHist?.signals||[]);
       setPausedCoins(pausedRes?.paused||[]);
+      const mc = {}; (minConfRes?.overrides||[]).forEach(o=>{ mc[o.coin]=o.min_confidence; }); setMinConfidence(mc);
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
@@ -870,6 +873,33 @@ Confirmer ?`
             <button onClick={saveConfig} style={{width:"100%",background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,fontSize:12}}>
               💾 Sauvegarder la sélection
             </button>
+            <div style={{marginTop:20,paddingTop:16,borderTop:"1px solid #1e2d4a"}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:4}}>🎚️ Plancher de confiance minimum par actif</div>
+              <div style={{fontSize:10,color:"#475569",marginBottom:12}}>
+                Force une confiance minimum pour un actif précis, quel que soit le calcul normal
+                (paliers de pertes/récompense de gains) — utile pour les coins jugés plus risqués.
+                0 ou vide = pas de plancher spécifique.
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                {activeCoins.map(coin=>(
+                  <div key={coin} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"6px 8px"}}>
+                    <div style={{fontSize:10,color:"#94a3b8",marginBottom:4}}>{coin}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:4}}>
+                      <input type="number" min="0" max="100" step="1"
+                        defaultValue={minConfidence[coin]||""}
+                        placeholder="—"
+                        onBlur={e=>{
+                          const val=Number(e.target.value)||0;
+                          apiCall("/api/coins/min-confidence","PUT",{coin, min_confidence:val},token)
+                            .then(()=>setMinConfidence(p=>({...p,[coin]:val})));
+                        }}
+                        style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"4px 6px",color:"#e2e8f0",fontSize:11}}/>
+                      <span style={{color:"#64748b",fontSize:10}}>%</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1298,7 +1328,7 @@ Confirmer ?`
                     {key:"bb_stddev",label:"Bollinger - écart-type",def:2,step:0.1,min:1,max:4},
                     {key:"atr_period",label:"ATR - période",def:14,step:1,min:5,max:30},
                     {key:"hours_creuses_start",label:"Heures creuses - début (UTC)",def:21,step:1,min:0,max:23},
-                    {key:"hours_creuses_end",label:"Heures creuses - fin (UTC)",def:23,step:1,min:0,max:23},
+                    {key:"hours_creuses_end",label:"Heures creuses - fin (UTC)",def:24,step:1,min:0,max:24},
                     {key:"macro_blackout_before_min",label:"Blackout macro - avant (min)",def:120,step:5,min:0,max:1440},
                     {key:"macro_blackout_after_min",label:"Blackout macro - après (min)",def:60,step:5,min:0,max:1440},
                   ].map(f=>(
