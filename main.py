@@ -160,11 +160,18 @@ def init_db():
         # Palier bas du plancher QP : entre qp_arm_low_usd et qp_lock_trigger_usd (1.5$),
         # garantit un montant intermédiaire (qp_floor_low_usd) plutôt qu'aucune protection.
         # Ex: pic entre 1$ et 1.49$ → garanti 0.9$ (au lieu de rien avant le palier haut à 1.5$/1.1$).
-        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_arm_low_usd REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_arm_low_usd REAL DEFAULT 1.1")
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_floor_low_usd REAL DEFAULT 0.9")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN qp_floor_low_usd REAL DEFAULT 0.6")
+        conn.commit()
+    except: pass
+    try:
+        # Nouveaux seuils du palier bas (armé 1.1$, garanti 0.6$) — migre les configs encore
+        # sur les anciennes valeurs (armé 1.0$, garanti 0.9$), sans toucher aux personnalisations
+        conn.execute("UPDATE bot_config SET qp_arm_low_usd=1.1 WHERE qp_arm_low_usd=1.0")
+        conn.execute("UPDATE bot_config SET qp_floor_low_usd=0.6 WHERE qp_floor_low_usd=0.9")
         conn.commit()
     except: pass
     try:
@@ -235,6 +242,12 @@ def init_db():
         # être la plus mauvaise sur le Bilan (analyse du 14/07/2026, NET -11.88$ sur 24 trades,
         # WR 16.7%). Ne touche pas aux configs déjà personnalisées différemment.
         conn.execute("UPDATE bot_config SET hours_creuses_end=24 WHERE hours_creuses_end=23")
+        conn.commit()
+    except: pass
+    try:
+        # Tranches horaires ponctuelles bloquées (hors "heures creuses" contiguës) — 12h et 14h
+        # UTC identifiées comme négatives sur le Bilan du 14/07/2026 (NET -1.57$/-1.42$).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN extra_blocked_hours TEXT DEFAULT '[12,14]'")
         conn.commit()
     except: pass
     try:
@@ -542,8 +555,8 @@ def init_db():
             trailing_activation_mult REAL DEFAULT 1.0,
             trailing_gap_usd REAL DEFAULT 1.0,
             qp_lock_trigger_usd REAL DEFAULT 1.5,
-            qp_arm_low_usd REAL DEFAULT 1.0,
-            qp_floor_low_usd REAL DEFAULT 0.9,
+            qp_arm_low_usd REAL DEFAULT 1.1,
+            qp_floor_low_usd REAL DEFAULT 0.6,
             quick_profit_pct REAL DEFAULT 0.46,
             max_loss_pct REAL DEFAULT 0.31,
             trailing_gap_pct REAL DEFAULT 0.42,
@@ -557,6 +570,7 @@ def init_db():
             atr_period INTEGER DEFAULT 14,
             hours_creuses_start INTEGER DEFAULT 21,
             hours_creuses_end INTEGER DEFAULT 24,
+            extra_blocked_hours TEXT DEFAULT '[12,14]',
             macro_blackout_before_min INTEGER DEFAULT 120,
             macro_blackout_after_min INTEGER DEFAULT 60,
             max_position_usdc REAL DEFAULT 50.0,
@@ -1190,36 +1204,25 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
-    cfg_qp = conn.execute("""SELECT quick_profit_pct, max_loss_pct, trailing_activation_mult,
-        trailing_gap_pct, qp_lock_trigger_usd, quick_profit_usd, trailing_gap_usd,
+    cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
-    quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
     max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
-    trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
-    trail_gap_pct = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
-    trail_trigger_pct = quick_profit_pct * trail_mult  # réglable via "Réglages avancés" (Activation trailing × QP)
 
-    # Plancher Quick Profit à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade :
+    # Plancher QP à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade.
+    # PRIORITÉ ABSOLUE dès qu'un palier est armé : aucune comparaison avec un trailing —
+    # toute clôture profitable se fait strictement à la garantie du palier actif.
     #  - Palier haut : armé à qp_lock_trigger_usd (1.5$), garantit quick_profit_usd (1.1$)
-    #  - Palier bas : armé à qp_arm_low_usd (1$), garantit qp_floor_low_usd (0.9$) — pour les pics
-    #    modestes qui n'atteignent jamais le palier haut (ex: pic entre 1$ et 1.49$)
+    #  - Palier bas : armé à qp_arm_low_usd (1.1$), garantit qp_floor_low_usd (0.6$) — pour les
+    #    pics qui n'atteignent jamais le palier haut (plus de trailing en dessous de 1$ du tout)
     qp_lock_trigger_usd = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
     quick_profit_usd = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.1
-    qp_arm_low_usd = float(cfg_qp["qp_arm_low_usd"]) if cfg_qp and "qp_arm_low_usd" in cfg_qp.keys() and cfg_qp["qp_arm_low_usd"] else 1.0
-    qp_floor_low_usd = float(cfg_qp["qp_floor_low_usd"]) if cfg_qp and "qp_floor_low_usd" in cfg_qp.keys() and cfg_qp["qp_floor_low_usd"] else 0.9
+    qp_arm_low_usd = float(cfg_qp["qp_arm_low_usd"]) if cfg_qp and "qp_arm_low_usd" in cfg_qp.keys() and cfg_qp["qp_arm_low_usd"] else 1.1
+    qp_floor_low_usd = float(cfg_qp["qp_floor_low_usd"]) if cfg_qp and "qp_floor_low_usd" in cfg_qp.keys() and cfg_qp["qp_floor_low_usd"] else 0.6
     notional = trade["size_usdc"] * trade["leverage"]
     qp_arm_pct = (qp_lock_trigger_usd / notional * 100) if notional > 0 else 999
     qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
     qp_arm_low_pct = (qp_arm_low_usd / notional * 100) if notional > 0 else 999
     qp_floor_low_pct = (qp_floor_low_usd / notional * 100) if notional > 0 else 0
-
-    # Plafond du recul du trailing fin en $ FIXES (1$ par défaut), converti dynamiquement en %
-    # pour CE trade précis — évite qu'un trade à fort levier ne rende beaucoup plus que 1$ avant
-    # que le trailing ne se déclenche (le % fixe seul donne un recul $ variable selon le levier).
-    # On garde toujours le plus protecteur des deux (le plus petit écart en %).
-    trailing_gap_usd = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 1.0
-    trail_gap_pct_dynamic = (trailing_gap_usd / notional * 100) if notional > 0 else trail_gap_pct
-    trail_gap_pct = min(trail_gap_pct, trail_gap_pct_dynamic)
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -1232,54 +1235,28 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
     close_reason = None
     close_stop_level_pct = None
-    # Max Loss vérifié EN PREMIER : sans ça, une fois le trailing/plancher armé, une chute
-    # brutale (saut de prix entre deux vérifications) pouvait être mal étiquetée TRAILING_PROFIT
-    # ou QP_FLOOR au lieu de MAX_LOSS, car ces conditions ("prix <= seuil") sont trivialement
-    # vraies pour n'importe quelle valeur très négative, pas seulement "revenu près du seuil".
+    active_arm_pct = None
+    # Max Loss vérifié EN PREMIER : sans ça, une fois le plancher armé, une chute brutale
+    # (saut de prix entre deux vérifications) pouvait être mal étiquetée QP_FLOOR au lieu
+    # de MAX_LOSS, car "prix <= seuil" est trivialement vrai pour toute valeur très négative.
     if price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
         close_stop_level_pct = -max_loss_pct
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
-
-    # Détermine quel palier du plancher QP est actif selon le pic atteint (le pic ne redescend
-    # jamais, donc une fois le palier haut atteint, il reste actif pour toujours sur ce trade) :
-    #  - Palier haut armé (pic ≥ qp_arm_pct, 1.5$) → arme=qp_arm_pct, garantit=qp_floor_pct (1.1$)
-    #  - Sinon palier bas armé (pic ≥ qp_arm_low_pct, 1$) → arme=qp_arm_low_pct, garantit=qp_floor_low_pct (0.9$)
-    #  - Sinon aucun palier armé → seul le trailing fin protège (si lui-même armé)
-    if peak_pct >= qp_arm_pct:
-        active_arm_pct, active_floor_pct = qp_arm_pct, qp_floor_pct
-    elif peak_pct >= qp_arm_low_pct:
-        active_arm_pct, active_floor_pct = qp_arm_low_pct, qp_floor_low_pct
     else:
-        active_arm_pct, active_floor_pct = None, None
-    qp_armed = active_arm_pct is not None
+        # Le pic ne redescend jamais : une fois le palier haut atteint, il reste actif pour
+        # toujours sur ce trade. Sinon, le palier bas prend le relais s'il est armé.
+        if peak_pct >= qp_arm_pct:
+            active_arm_pct, active_floor_pct = qp_arm_pct, qp_floor_pct
+        elif peak_pct >= qp_arm_low_pct:
+            active_arm_pct, active_floor_pct = qp_arm_low_pct, qp_floor_low_pct
+        else:
+            active_arm_pct, active_floor_pct = None, None
 
-    # QP a la PRIORITÉ tant que le PnL courant reste dans la "zone" du palier actif (≤ son
-    # seuil d'armement) : une fois un palier armé, tant que le PnL courant est ≤ ce seuil,
-    # seul ce palier décide (le trailing est ignoré, même s'il aurait pu donner un seuil plus
-    # protecteur). Le trailing ne reprend la main que si le PnL courant dépasse encore ce seuil
-    # (le trade continue de monter fort au-delà du palier actif).
-    if not close_reason and qp_armed and price_move_pct <= active_arm_pct:
-        # Zone QP : priorité absolue au palier actif, le trailing est ignoré ici
-        if price_move_pct <= active_floor_pct:
+        if active_arm_pct is not None and price_move_pct <= active_floor_pct:
             close_reason = "QP_FLOOR"
             close_stop_level_pct = active_floor_pct
             add_bot_log(user_id, f"🎯 {trade['coin']}: Plancher QP +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(active_floor_pct,3)}%, armé: {round(active_arm_pct,3)}%) !", "success")
-    elif not close_reason:
-        # PnL courant encore au-dessus du seuil du palier actif (ou aucun palier armé) :
-        # comparaison standard entre trailing et palier actif, on retient le plus protecteur
-        candidate_stops = []
-        if peak_pct >= trail_trigger_pct:
-            candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
-        if qp_armed:
-            candidate_stops.append(("QP_FLOOR", active_floor_pct))
-        if candidate_stops:
-            reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
-            if price_move_pct <= stop_level_pct:
-                close_reason = reason
-                close_stop_level_pct = stop_level_pct
-                label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
-                add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
 
     if not close_reason:
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
@@ -1416,6 +1393,13 @@ async def scan_markets(user_id: int):
     hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24
     if filter_hours and hc_start <= hour_utc < hc_end:
         add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
+        return
+
+    # Tranches horaires supplémentaires bloquées, ponctuelles (pas forcément contiguës à
+    # "heures creuses") — ex: 12h-13h et 14h-15h UTC, identifiées comme négatives sur le Bilan.
+    extra_blocked = json.loads(config["extra_blocked_hours"]) if config and "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else []
+    if filter_hours and hour_utc in extra_blocked:
+        add_bot_log(user_id, f"🌙 Tranche horaire bloquée ({hour_utc}h UTC, historique négatif) — pas de nouveaux trades", "info")
         return
 
     if filter_weekend and weekday >= 5:
@@ -1780,17 +1764,20 @@ async def scan_markets(user_id: int):
                     # entry_price = prix d'exécution réel au moment T (ordre marché simulé),
                     # pas le prix "entry" suggéré par l'analyse (potentiellement périmé de plusieurs secondes)
                     entry_price = exec_price
+                    # Levier fixé à 2 en permanence en mode Paper (ignore la suggestion IA/règles,
+                    # qui variait 2-5x) — pour un notionnel plus homogène entre tous les trades.
+                    paper_leverage = 2
                     conn.execute("""
                         INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
                         size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at, session_date)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (user_id, coin, ai["action"], entry_price, exec_price, size,
-                           ai.get("leverage") or 1, ai.get("stopLoss"),
+                           paper_leverage, ai.get("stopLoss"),
                            ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                            datetime.utcnow().isoformat(),
                            datetime.utcnow().strftime("%Y-%m-%d")))
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
-                    add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC", "success")
+                    add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC (levier x{paper_leverage})", "success")
 
             elif cfg and cfg["trading_mode"] == "live":
                 user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
@@ -2795,6 +2782,7 @@ class UpdateConfigRequest(BaseModel):
     atr_period: Optional[int] = None
     hours_creuses_start: Optional[int] = None
     hours_creuses_end: Optional[int] = None
+    extra_blocked_hours: Optional[List[int]] = None
     macro_blackout_before_min: Optional[int] = None
     macro_blackout_after_min: Optional[int] = None
     max_position_usdc: Optional[float] = None
@@ -2919,8 +2907,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 1.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
-        "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.0,
-        "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.9,
+        "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
+        "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
         "quick_profit_pct": config["quick_profit_pct"] if "quick_profit_pct" in config.keys() and config["quick_profit_pct"] else 0.46,
         "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 0.31,
         "trailing_gap_pct": config["trailing_gap_pct"] if "trailing_gap_pct" in config.keys() and config["trailing_gap_pct"] else 0.42,
@@ -2934,6 +2922,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "atr_period": config["atr_period"] if "atr_period" in config.keys() and config["atr_period"] else 14,
         "hours_creuses_start": config["hours_creuses_start"] if "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21,
         "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24,
+        "extra_blocked_hours": json.loads(config["extra_blocked_hours"]) if "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else [12,14],
         "macro_blackout_before_min": config["macro_blackout_before_min"] if "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120,
         "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
@@ -3036,6 +3025,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET hours_creuses_start=? WHERE user_id=?", (req.hours_creuses_start, user_id))
     if req.hours_creuses_end is not None:
         conn.execute("UPDATE bot_config SET hours_creuses_end=? WHERE user_id=?", (req.hours_creuses_end, user_id))
+    if req.extra_blocked_hours is not None:
+        conn.execute("UPDATE bot_config SET extra_blocked_hours=? WHERE user_id=?", (json.dumps(req.extra_blocked_hours), user_id))
     if req.macro_blackout_before_min is not None:
         conn.execute("UPDATE bot_config SET macro_blackout_before_min=? WHERE user_id=?", (req.macro_blackout_before_min, user_id))
     if req.macro_blackout_after_min is not None:
