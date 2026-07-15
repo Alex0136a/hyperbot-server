@@ -3695,6 +3695,29 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         ORDER BY net DESC
     """, (user_id,)).fetchall()
 
+    # Coins sanctionnés (plancher de confiance manuel) dont les stats DEPUIS la sanction
+    # sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, rien n'est retiré automatiquement.
+    # (calculé AVANT conn.close() plus bas, sans quoi ces requêtes échoueraient)
+    recovering_sanctioned_coins = []
+    overrides = conn.execute("SELECT coin, min_confidence, updated_at FROM coin_min_confidence WHERE user_id=?", (user_id,)).fetchall()
+    for o in overrides:
+        s = conn.execute("""
+            SELECT COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(pnl) as net
+            FROM paper_trades
+            WHERE user_id=? AND coin=? AND status='CLOSED' AND closed_at > ?
+        """, (user_id, o["coin"], o["updated_at"])).fetchone()
+        total = s["total"] or 0
+        if total >= RECOVERY_MIN_TRADES:
+            win_rate = round((s["wins"] or 0) / max(total, 1) * 100, 1)
+            net = round(s["net"] or 0, 2)
+            if win_rate >= RECOVERY_WINRATE_THRESHOLD and net > 0:
+                recovering_sanctioned_coins.append({
+                    "coin": o["coin"], "min_confidence": o["min_confidence"], "since": o["updated_at"],
+                    "total": total, "win_rate": win_rate, "net": net
+                })
+
     conn.close()
     
     balance = portfolio["balance"] if portfolio else 1000
@@ -3770,25 +3793,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
           and (r["net"] or 0) < PENALIZING_NET_THRESHOLD],
         # Coins sanctionnés (plancher de confiance manuel) dont les stats DEPUIS la sanction
         # sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, rien n'est retiré automatiquement.
-        "recovering_sanctioned_coins": [r for r in [
-            {
-                "coin": o["coin"],
-                "min_confidence": o["min_confidence"],
-                "since": o["updated_at"],
-                **(lambda s: {
-                    "total": s["total"] or 0,
-                    "win_rate": round((s["wins"] or 0) / max(s["total"] or 1, 1) * 100, 1),
-                    "net": round(s["net"] or 0, 2)
-                })(conn.execute("""
-                    SELECT COUNT(*) as total,
-                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                        SUM(pnl) as net
-                    FROM paper_trades
-                    WHERE user_id=? AND coin=? AND status='CLOSED' AND closed_at > ?
-                """, (user_id, o["coin"], o["updated_at"])).fetchone())
-            }
-            for o in conn.execute("SELECT coin, min_confidence, updated_at FROM coin_min_confidence WHERE user_id=?", (user_id,)).fetchall()
-        ] if r["total"] >= RECOVERY_MIN_TRADES and r["win_rate"] >= RECOVERY_WINRATE_THRESHOLD and r["net"] > 0]
+        "recovering_sanctioned_coins": recovering_sanctioned_coins
     }
 
 @app.get("/api/stats/daily")
