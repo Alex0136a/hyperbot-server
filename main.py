@@ -1710,13 +1710,14 @@ async def scan_markets(user_id: int):
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
-                # Taille en % du capital disponible
-                position_pct = cfg["position_pct"] if cfg and "position_pct" in cfg.keys() else 8.0
+                # Taille = capital total ÷ nombre de trades simultanés max — pour engager
+                # tout le capital disponible si tous les slots sont utilisés, en compound
+                # sur le solde courant (pas un capital initial fixe). Sans plafond de
+                # sécurité supplémentaire (Max Loss/QP + arrêt manuel jugés suffisants).
                 portfolio_now = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 capital = portfolio_now["balance"] if portfolio_now else 1000.0
-                size = round(capital * position_pct / 100, 2)
-                size = max(10.0, min(size, capital * 0.5))  # min 10 USDC, max 50% du capital
-                add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({position_pct}% de {round(capital,2)} USDC)", "info")
+                size = round(capital / max_trades, 2)
+                add_bot_log(user_id, f"📐 Taille trade: {size} USDC (capital {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
@@ -1775,10 +1776,10 @@ async def scan_markets(user_id: int):
                 else:
                     open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
-                    position_pct = cfg["position_pct"] if "position_pct" in cfg.keys() and cfg["position_pct"] else 8.0
+                    # Taille = capital réel (Hyperliquid) ÷ nombre de trades simultanés max —
+                    # même formule qu'en paper, sans plafond de sécurité supplémentaire.
                     capital = get_hl_account_value(account_address)
-                    size = round(capital * position_pct / 100, 2)
-                    size = max(10.0, min(size, capital * 0.5)) if capital > 0 else 0.0
+                    size = round(capital / max_trades, 2) if capital > 0 else 0.0
                     coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                     same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
