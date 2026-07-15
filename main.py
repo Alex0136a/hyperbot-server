@@ -3704,6 +3704,23 @@ def get_bilan(user_id: int = Depends(get_current_user)):
         ORDER BY net DESC
     """, (user_id,)).fetchall()
 
+    # Décision par actif : winrate/loss-rate + confiance moyenne du signal d'origine,
+    # séparément pour les trades gagnants et perdants — pour voir si la confiance est
+    # réellement prédictive pour ce coin (gagnants avec confiance nettement plus haute
+    # que les perdants = bon signe ; confiances similaires ou inversées = mauvais signe).
+    by_coin_confidence = conn.execute("""
+        SELECT pt.coin,
+            COUNT(*) as total,
+            SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
+            AVG(CASE WHEN pt.pnl > 0 THEN s.confidence ELSE NULL END) as avg_conf_wins,
+            AVG(CASE WHEN pt.pnl <= 0 THEN s.confidence ELSE NULL END) as avg_conf_losses
+        FROM paper_trades pt
+        LEFT JOIN signals s ON pt.signal_id = s.id
+        WHERE pt.user_id=? AND pt.status='CLOSED'
+        GROUP BY pt.coin
+    """, (user_id,)).fetchall()
+
     # Stats par heure de la journée (UTC, heure d'OUVERTURE du trade) — quelles heures sont productives
     by_hour = conn.execute("""
         SELECT CAST(strftime('%H', opened_at) AS INTEGER) as hour,
@@ -3803,6 +3820,14 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
             "total_minutes": int(r["total_minutes"] or 0)
         } for r in by_coin],
+        "decision_matrix": [{
+            "coin": r["coin"],
+            "total": r["total"],
+            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
+            "loss_rate": round((r["losses"] or 0) / max(r["total"] or 1, 1) * 100, 1),
+            "avg_conf_wins": round(r["avg_conf_wins"], 1) if r["avg_conf_wins"] is not None else None,
+            "avg_conf_losses": round(r["avg_conf_losses"], 1) if r["avg_conf_losses"] is not None else None
+        } for r in by_coin_confidence],
         "by_hour": [{
             "hour": r["hour"],
             "total": r["total"],
