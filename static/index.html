@@ -787,7 +787,7 @@ Confirmer ?`
                   <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8,paddingBottom:6,borderBottom:"1px solid #1e2d4a"}}>
                     {coin}/USDC <span style={{color:"#475569",fontWeight:400,fontSize:11}}>({sigs.length} trade{sigs.length>1?"s":""})</span>
                   </div>
-                  {sigs.sort((a,b)=>new Date(b.trade_closed_at)-new Date(a.trade_closed_at)).map(sig=>(
+                  {sigs.sort((a,b)=>(b.confidence||0)-(a.confidence||0)).map(sig=>(
               <div key={sig.id} style={{background:"#0f1629",border:`1px solid ${sig.trade_pnl>=0?"#14532d":"#450a0a"}`,borderRadius:10,padding:14,marginBottom:12}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -795,6 +795,7 @@ Confirmer ?`
                     <span style={{fontSize:15,fontWeight:700,color:"#f1f5f9"}}>{sig.coin}/USDC</span>
                     <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 7px",borderRadius:4,fontSize:10}}>x{sig.leverage}</span>
                     <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 7px",borderRadius:4,fontSize:10}}>{sig.trade_close_reason}</span>
+                    <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 7px",borderRadius:4,fontSize:10}} title="Confiance de l'actif au moment de la prise du signal">🎯 {sig.confidence}%</span>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{fontSize:18,fontWeight:700,color:sig.trade_pnl>=0?"#34d399":"#f87171"}}>{sig.trade_pnl>=0?"+":""}{sig.trade_pnl?.toFixed(2)}$</div>
