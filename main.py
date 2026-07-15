@@ -3267,9 +3267,10 @@ def get_stats(user_id: int = Depends(get_current_user)):
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
 
 @app.get("/api/coins/max-confidence")
-def get_max_confidence_by_coin(user_id: int = Depends(get_current_user)):
+def get_max_confidence_by_coin(threshold: int = 95, user_id: int = Depends(get_current_user)):
     """Maximum de confiance jamais atteint par actif, sur tout l'historique des signaux
-    (LONG/SHORT uniquement, pas les WAIT) — calculé à vie, pas limité aux 50 derniers trades."""
+    (LONG/SHORT uniquement, pas les WAIT) — calculé à vie, pas limité aux 50 derniers trades.
+    `threshold` : seuil pour le calcul de fréquence empirique (défaut 95, mais réglable)."""
     conn = get_db()
     rows = conn.execute("""
         SELECT s1.coin, s1.confidence as max_confidence, s1.action, s1.created_at
@@ -3282,21 +3283,22 @@ def get_max_confidence_by_coin(user_id: int = Depends(get_current_user)):
         GROUP BY s1.coin
         ORDER BY max_confidence DESC
     """, (user_id,)).fetchall()
-    # Fréquence empirique d'atteinte du plafond 95% (mode Règles) — sur tous les signaux
-    # LONG/SHORT jamais générés, pas seulement ceux tradés.
+    # Fréquence empirique d'atteinte du seuil demandé — sur tous les signaux LONG/SHORT
+    # jamais générés, pas seulement ceux tradés.
     freq = conn.execute("""
-        SELECT COUNT(*) as total, SUM(CASE WHEN confidence >= 95 THEN 1 ELSE 0 END) as at_cap
+        SELECT COUNT(*) as total, SUM(CASE WHEN confidence >= ? THEN 1 ELSE 0 END) as at_threshold
         FROM signals WHERE user_id=? AND action != 'WAIT'
-    """, (user_id,)).fetchone()
+    """, (threshold, user_id)).fetchone()
     conn.close()
     total = freq["total"] or 0
-    at_cap = freq["at_cap"] or 0
+    at_threshold = freq["at_threshold"] or 0
     return {
         "max_confidence": [dict(r) for r in rows],
         "cap_95_frequency": {
+            "threshold": threshold,
             "total_signals": total,
-            "signals_at_95": at_cap,
-            "probability_pct": round(at_cap / total * 100, 2) if total else 0
+            "signals_at_95": at_threshold,
+            "probability_pct": round(at_threshold / total * 100, 2) if total else 0
         }
     }
 
