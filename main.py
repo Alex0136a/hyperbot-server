@@ -3752,7 +3752,10 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             "net": round(total_stats["net"] or 0, 2),
             "win_rate": round((total_stats["wins"] or 0) / max(total_stats["total"] or 1, 1) * 100, 1)
         },
-        "daily": [dict(r) for r in daily],
+        "daily": [{
+            **dict(r),
+            "pct": round((r["net"] or 0) / r["capital_start"] * 100, 2) if r["capital_start"] else 0
+        } for r in daily],
         "by_coin": [{
             "coin": r["coin"],
             "total": r["total"],
