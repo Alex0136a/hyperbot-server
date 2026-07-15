@@ -3266,6 +3266,40 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
 
+@app.get("/api/coins/max-confidence")
+def get_max_confidence_by_coin(user_id: int = Depends(get_current_user)):
+    """Maximum de confiance jamais atteint par actif, sur tout l'historique des signaux
+    (LONG/SHORT uniquement, pas les WAIT) — calculé à vie, pas limité aux 50 derniers trades."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s1.coin, s1.confidence as max_confidence, s1.action, s1.created_at
+        FROM signals s1
+        WHERE s1.user_id=? AND s1.action != 'WAIT'
+        AND s1.confidence = (
+            SELECT MAX(s2.confidence) FROM signals s2
+            WHERE s2.user_id = s1.user_id AND s2.coin = s1.coin AND s2.action != 'WAIT'
+        )
+        GROUP BY s1.coin
+        ORDER BY max_confidence DESC
+    """, (user_id,)).fetchall()
+    # Fréquence empirique d'atteinte du plafond 95% (mode Règles) — sur tous les signaux
+    # LONG/SHORT jamais générés, pas seulement ceux tradés.
+    freq = conn.execute("""
+        SELECT COUNT(*) as total, SUM(CASE WHEN confidence >= 95 THEN 1 ELSE 0 END) as at_cap
+        FROM signals WHERE user_id=? AND action != 'WAIT'
+    """, (user_id,)).fetchone()
+    conn.close()
+    total = freq["total"] or 0
+    at_cap = freq["at_cap"] or 0
+    return {
+        "max_confidence": [dict(r) for r in rows],
+        "cap_95_frequency": {
+            "total_signals": total,
+            "signals_at_95": at_cap,
+            "probability_pct": round(at_cap / total * 100, 2) if total else 0
+        }
+    }
+
 @app.get("/api/coins/paused")
 def get_paused_coins(user_id: int = Depends(get_current_user)):
     """Liste des actifs actuellement en pause automatique (3 pertes consécutives)"""
