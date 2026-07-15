@@ -374,6 +374,8 @@ function App() {
   const [liveK, setLiveK] = useState("");
   const [activeCoins, setActiveCoins] = useState(ALL_COINS);
   const [minConfidence, setMinConfidence] = useState({});
+  const [maxConfidence, setMaxConfidence] = useState({});
+  const [cap95Freq, setCap95Freq] = useState(null);
   const [saved, setSaved] = useState(false);
   const [savedField, setSavedField] = useState("");
   const [loading, setLoading] = useState(false);
@@ -403,7 +405,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -414,6 +416,7 @@ function App() {
         apiCall("/api/signals/history?limit=50","GET",null,token),
         apiCall("/api/coins/paused","GET",null,token),
         apiCall("/api/coins/min-confidence","GET",null,token),
+        apiCall("/api/coins/max-confidence","GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -433,6 +436,8 @@ function App() {
       setSignalsHistory(sigsHist?.signals||[]);
       setPausedCoins(pausedRes?.paused||[]);
       const mc = {}; (minConfRes?.overrides||[]).forEach(o=>{ mc[o.coin]=o.min_confidence; }); setMinConfidence(mc);
+      const mxc = {}; (maxConfRes?.max_confidence||[]).forEach(o=>{ mxc[o.coin]=o.max_confidence; }); setMaxConfidence(mxc);
+      setCap95Freq(maxConfRes?.cap_95_frequency||null);
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
@@ -773,6 +778,12 @@ Confirmer ?`
       {/* HISTORIQUE — signaux tradés ET fermés, groupés par actif (ordre alphabétique) */}
       {tab==="historique" && (
         <div style={{padding:16}}>
+          {cap95Freq && cap95Freq.total_signals > 0 && (
+            <div style={{background:"#1a0f2e",border:"1px solid #7c3aed",borderRadius:8,padding:12,marginBottom:16,fontSize:11,color:"#c084fc"}}>
+              🎯 Probabilité empirique d'atteindre 95% de confiance : <b>{cap95Freq.probability_pct}%</b>
+              {" "}({cap95Freq.signals_at_95} sur {cap95Freq.total_signals} signaux LONG/SHORT générés, tout l'historique)
+            </div>
+          )}
           {signalsHistory.filter(s=>s.action!=="WAIT").length===0
             ? <div style={{textAlign:"center",padding:50,color:"#475569"}}>Aucun trade fermé pour l'instant</div>
             : Object.entries(
@@ -786,6 +797,9 @@ Confirmer ?`
                 <div key={coin} style={{marginBottom:20}}>
                   <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8,paddingBottom:6,borderBottom:"1px solid #1e2d4a"}}>
                     {coin}/USDC <span style={{color:"#475569",fontWeight:400,fontSize:11}}>({sigs.length} trade{sigs.length>1?"s":""})</span>
+                    {maxConfidence[coin] != null && (
+                      <span style={{color:"#c084fc",fontWeight:400,fontSize:11,marginLeft:8}} title="Maximum de confiance jamais atteint pour ce coin, sur tout l'historique">🎯 max {maxConfidence[coin]}%</span>
+                    )}
                   </div>
                   {sigs.sort((a,b)=>(b.confidence||0)-(a.confidence||0)).map(sig=>(
               <div key={sig.id} style={{background:"#0f1629",border:`1px solid ${sig.trade_pnl>=0?"#14532d":"#450a0a"}`,borderRadius:10,padding:14,marginBottom:12}}>
