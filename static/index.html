@@ -472,18 +472,23 @@ function App() {
       // Statut marché
       const day = now.getUTCDay(); // 0=dim, 6=sam
       const isWeekend = day === 0 || day === 6;
-      const isQuiet = utcH >= 21 && utcH < 23;
+      const hcStart = config?.hours_creuses_start ?? 21;
+      const hcEnd = config?.hours_creuses_end ?? 24;
+      const isQuiet = filterHours && utcH >= hcStart && utcH < hcEnd;
+      const extraBlocked = config?.extra_blocked_hours || [12,14];
+      const isExtraBlocked = filterExtraHours && extraBlocked.includes(utcH);
       let market = "🟢 MARCHÉ OUVERT";
       let marketColor = "#34d399";
       if(filterMacro) { market = "🔴 PAUSE MACRO"; marketColor = "#f87171"; }
       else if(isWeekend) { market = "🟢 WEEK-END CRYPTO"; marketColor = "#34d399"; }
       else if(isQuiet) { market = "🌙 SESSION CREUSE"; marketColor = "#94a3b8"; }
+      else if(isExtraBlocked) { market = "🕐 HEURE BLOQUÉE"; marketColor = "#94a3b8"; }
       setClock({utc: utcStr, local: localStr, market, marketColor});
     };
     updateClock();
     const id = setInterval(updateClock, 1000);
     return () => clearInterval(id);
-  }, [filterMacro]);
+  }, [filterMacro, filterHours, filterExtraHours, config]);
 
   const startBot = async () => {
     setLoading(true);
