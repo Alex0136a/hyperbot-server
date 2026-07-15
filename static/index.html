@@ -417,7 +417,7 @@ function App() {
         apiCall("/api/signals/history?limit=50","GET",null,token),
         apiCall("/api/coins/paused","GET",null,token),
         apiCall("/api/coins/min-confidence","GET",null,token),
-        apiCall("/api/coins/max-confidence","GET",null,token),
+        apiCall(`/api/coins/max-confidence?threshold=${confThreshold}`,"GET",null,token),
       ]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
@@ -442,7 +442,7 @@ function App() {
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
-  }, [token]);
+  }, [token, confThreshold]);
 
   useEffect(() => {
     if(token) {
