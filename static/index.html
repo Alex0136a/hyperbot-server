@@ -111,6 +111,11 @@ function generateBilan(bilan, paper) {
     t += `  ${c.coin.padEnd(8)} | ${c.total} trades | WR ${c.win_rate}% | moy +${c.avg_gain}/-${Math.abs(c.avg_loss)} | NET ${c.net>=0?"+":""}${c.net} USDC\n`;
   });
 
+  t += `\n[ CLASSEMENT PAR TAUX DE RÉUSSITE (meilleur -> pire) ]\n${thin}\n`;
+  [...(bilan.by_coin||[])].sort((a,b)=>b.win_rate-a.win_rate).forEach((c,i)=>{
+    t += `  #${i+1} ${c.coin.padEnd(8)} | WR ${c.win_rate}% | ${c.total} trades\n`;
+  });
+
   t += `\n[ PERFORMANCE PAR HEURE (UTC, heure d'ouverture) ]\n${thin}\n`;
   (bilan.by_hour||[]).forEach(h=>{
     t += `  ${String(h.hour).padStart(2,"0")}h-${String((h.hour+1)%24).padStart(2,"0")}h | ${h.total} trades | WR ${h.win_rate}% | NET ${h.net>=0?"+":""}${h.net} USDC\n`;
@@ -1781,6 +1786,19 @@ Confirmer ?`
                 </div>
               );
             })}
+          </div>
+
+          {/* CLASSEMENT PAR TAUX DE RÉUSSITE */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginTop:12}}>
+            <div style={{fontSize:11,color:"#475569",marginBottom:8,letterSpacing:1}}>🏆 CLASSEMENT PAR TAUX DE RÉUSSITE (meilleur en haut, pire — échecs — en bas)</div>
+            {[...(bilan.by_coin||[])].sort((a,b)=>b.win_rate-a.win_rate).map((coin,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0f1629"}}>
+                <span style={{fontSize:11,color:"#94a3b8",width:24}}>#{i+1}</span>
+                <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0",flex:1}}>{coin.coin}</span>
+                <span style={{fontSize:10,color:"#475569",marginRight:10}}>{coin.total} trades</span>
+                <span style={{fontSize:13,fontWeight:800,color:coin.win_rate>=50?"#34d399":"#f87171",width:50,textAlign:"right"}}>{coin.win_rate}%</span>
+              </div>
+            ))}
           </div>
           </>)}
         </div>
