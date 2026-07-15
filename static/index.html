@@ -376,6 +376,7 @@ function App() {
   const [minConfidence, setMinConfidence] = useState({});
   const [maxConfidence, setMaxConfidence] = useState({});
   const [cap95Freq, setCap95Freq] = useState(null);
+  const [confThreshold, setConfThreshold] = useState(95);
   const [saved, setSaved] = useState(false);
   const [savedField, setSavedField] = useState("");
   const [loading, setLoading] = useState(false);
@@ -778,12 +779,27 @@ Confirmer ?`
       {/* HISTORIQUE — signaux tradés ET fermés, groupés par actif (ordre alphabétique) */}
       {tab==="historique" && (
         <div style={{padding:16}}>
-          {cap95Freq && cap95Freq.total_signals > 0 && (
-            <div style={{background:"#1a0f2e",border:"1px solid #7c3aed",borderRadius:8,padding:12,marginBottom:16,fontSize:11,color:"#c084fc"}}>
-              🎯 Probabilité empirique d'atteindre 95% de confiance : <b>{cap95Freq.probability_pct}%</b>
-              {" "}({cap95Freq.signals_at_95} sur {cap95Freq.total_signals} signaux LONG/SHORT générés, tout l'historique)
+          <div style={{background:"#1a0f2e",border:"1px solid #7c3aed",borderRadius:8,padding:12,marginBottom:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:cap95Freq?8:0}}>
+              <span style={{fontSize:11,color:"#c084fc"}}>🎯 Probabilité empirique d'atteindre</span>
+              <input type="number" min="0" max="100" step="1" value={confThreshold}
+                onChange={e=>setConfThreshold(Number(e.target.value))}
+                style={{width:60,background:"#0f1629",border:"1px solid #7c3aed",borderRadius:4,color:"#c084fc",fontSize:11,padding:"3px 6px",textAlign:"center"}}/>
+              <span style={{fontSize:11,color:"#c084fc"}}>% de confiance</span>
+              <button onClick={()=>{
+                apiCall(`/api/coins/max-confidence?threshold=${confThreshold}`,"GET",null,token)
+                  .then(r=>setCap95Freq(r?.cap_95_frequency||null));
+              }} style={{background:"#7c3aed",border:"none",borderRadius:4,color:"#fff",fontSize:10,fontWeight:700,padding:"4px 10px",cursor:"pointer"}}>
+                Calculer
+              </button>
             </div>
-          )}
+            {cap95Freq && cap95Freq.total_signals > 0 && (
+              <div style={{fontSize:11,color:"#c084fc"}}>
+                <b>{cap95Freq.probability_pct}%</b> des signaux atteignent ≥{cap95Freq.threshold}%
+                {" "}({cap95Freq.signals_at_95} sur {cap95Freq.total_signals} signaux LONG/SHORT générés, tout l'historique)
+              </div>
+            )}
+          </div>
           {signalsHistory.filter(s=>s.action!=="WAIT").length===0
             ? <div style={{textAlign:"center",padding:50,color:"#475569"}}>Aucun trade fermé pour l'instant</div>
             : Object.entries(
