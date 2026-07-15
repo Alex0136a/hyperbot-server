@@ -103,7 +103,7 @@ function generateBilan(bilan, paper) {
   
   t += `[ 7 DERNIERS JOURS ]\n${thin}\n`;
   (bilan.daily||[]).forEach(d=>{
-    t += `  ${d.day} | ✅${d.wins} ❌${d.losses} | ${d.net>=0?"+":""}${Math.round(d.net*100)/100} USDC\n`;
+    t += `  ${d.day} | ✅${d.wins} ❌${d.losses} | ${d.net>=0?"+":""}${Math.round(d.net*100)/100} USDC (${d.pct>=0?"+":""}${d.pct}%)\n`;
   });
 
   t += `\n[ PERFORMANCE PAR ACTIF ]\n${thin}\n`;
