@@ -1800,6 +1800,35 @@ Confirmer ?`
               </div>
             ))}
           </div>
+
+          {/* MATRICE DE DÉCISION : winrate / loss-rate / confiance moyenne succès vs échec */}
+          <div style={{background:"#0a1628",border:"1px solid #7c3aed",borderRadius:12,padding:16,marginTop:12}}>
+            <div style={{fontSize:11,color:"#c084fc",marginBottom:4,letterSpacing:1}}>🧭 MATRICE DE DÉCISION — trier priorité vs pénalité de confiance</div>
+            <div style={{fontSize:9,color:"#475569",marginBottom:10}}>
+              Confiance moyenne des signaux gagnants nettement au-dessus de celle des perdants = la confiance est prédictive pour ce coin (bon candidat à prioriser).
+              Confiances similaires ou inversées = la confiance ne prédit rien pour ce coin (bon candidat à pénaliser).
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1.3fr 0.7fr 0.7fr 0.9fr 0.9fr",gap:4,fontSize:9,color:"#64748b",marginBottom:6,paddingBottom:6,borderBottom:"1px solid #1e2d4a"}}>
+              <span>ACTIF</span><span style={{textAlign:"right"}}>% VICTOIRE</span><span style={{textAlign:"right"}}>% PERTE</span><span style={{textAlign:"right"}}>CONF. SI GAGNE</span><span style={{textAlign:"right"}}>CONF. SI PERD</span>
+            </div>
+            {[...(bilan.decision_matrix||[])].sort((a,b)=>b.win_rate-a.win_rate).map((d,i)=>{
+              const gap = (d.avg_conf_wins!=null && d.avg_conf_losses!=null) ? d.avg_conf_wins - d.avg_conf_losses : null;
+              return (
+                <div key={i} style={{display:"grid",gridTemplateColumns:"1.3fr 0.7fr 0.7fr 0.9fr 0.9fr",gap:4,padding:"5px 0",borderBottom:"1px solid #0f1629",alignItems:"center"}}>
+                  <span style={{fontSize:11,fontWeight:700,color:"#e2e8f0"}}>{d.coin}</span>
+                  <span style={{fontSize:11,textAlign:"right",color:d.win_rate>=50?"#34d399":"#f87171"}}>{d.win_rate}%</span>
+                  <span style={{fontSize:11,textAlign:"right",color:d.loss_rate>=50?"#f87171":"#94a3b8"}}>{d.loss_rate}%</span>
+                  <span style={{fontSize:11,textAlign:"right",color:"#34d399"}}>{d.avg_conf_wins!=null?`${d.avg_conf_wins}%`:"—"}</span>
+                  <span style={{fontSize:11,textAlign:"right",color:"#f87171"}}>{d.avg_conf_losses!=null?`${d.avg_conf_losses}%`:"—"}</span>
+                  {gap!=null && (
+                    <span style={{gridColumn:"1 / -1",fontSize:9,color:gap>5?"#34d399":gap<-5?"#f87171":"#94a3b8",marginTop:2}}>
+                      {gap>5?`✅ écart +${gap.toFixed(1)}pt — confiance prédictive, à prioriser`:gap<-5?`⚠️ écart ${gap.toFixed(1)}pt — confiance inversée, à pénaliser`:`➖ écart ${gap.toFixed(1)}pt — confiance peu discriminante ici`}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
           </>)}
         </div>
       )}
