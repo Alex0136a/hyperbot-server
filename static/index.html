@@ -795,7 +795,7 @@ Confirmer ?`
                     <span style={{fontSize:15,fontWeight:700,color:"#f1f5f9"}}>{sig.coin}/USDC</span>
                     <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 7px",borderRadius:4,fontSize:10}}>x{sig.leverage}</span>
                     <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 7px",borderRadius:4,fontSize:10}}>{sig.trade_close_reason}</span>
-                    <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 7px",borderRadius:4,fontSize:10}} title="Confiance de l'actif au moment de la prise du signal">🎯 {sig.confidence}%</span>
+                    <span style={{background:"#2a1a3e",color:"#c084fc",padding:"2px 8px",borderRadius:4,fontSize:12,fontWeight:700}} title="Confiance de l'actif au moment de la prise du signal">🎯 {sig.confidence}%</span>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{fontSize:18,fontWeight:700,color:sig.trade_pnl>=0?"#34d399":"#f87171"}}>{sig.trade_pnl>=0?"+":""}{sig.trade_pnl?.toFixed(2)}$</div>
