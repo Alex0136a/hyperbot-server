@@ -1214,15 +1214,15 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
-        qp_arm_low_usd, qp_floor_low_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+        qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
+        trailing_gap_pct, trailing_gap_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
     max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
 
-    # Plancher QP à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade.
-    # PRIORITÉ ABSOLUE dès qu'un palier est armé : aucune comparaison avec un trailing —
-    # toute clôture profitable se fait strictement à la garantie du palier actif.
+    # Plancher QP à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade —
+    # garantit un minimum fixe peu importe jusqu'où le pic est monté.
     #  - Palier haut : armé à qp_lock_trigger_usd (1.5$), garantit quick_profit_usd (1.1$)
     #  - Palier bas : armé à qp_arm_low_usd (1.1$), garantit qp_floor_low_usd (0.6$) — pour les
-    #    pics qui n'atteignent jamais le palier haut (plus de trailing en dessous de 1$ du tout)
+    #    pics qui n'atteignent jamais le palier haut
     qp_lock_trigger_usd = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
     quick_profit_usd = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.1
     qp_arm_low_usd = float(cfg_qp["qp_arm_low_usd"]) if cfg_qp and "qp_arm_low_usd" in cfg_qp.keys() and cfg_qp["qp_arm_low_usd"] else 1.1
@@ -1232,6 +1232,18 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
     qp_arm_low_pct = (qp_arm_low_usd / notional * 100) if notional > 0 else 999
     qp_floor_low_pct = (qp_floor_low_usd / notional * 100) if notional > 0 else 0
+
+    # TTP (Trailing Take Profit) — réintégré en PLUS des paliers QP (pas à leur place) :
+    # suit le pic et peut donner un seuil plus protecteur que le plancher QP fixe une fois
+    # le trade allé bien au-delà des paliers (laisse courir les gros gagnants). Écart plafonné
+    # en $ (trailing_gap_usd) converti dynamiquement, comme le plancher QP.
+    quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
+    trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
+    trail_trigger_pct = quick_profit_pct * trail_mult
+    trail_gap_pct_fixed = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
+    trailing_gap_usd = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 1.0
+    trail_gap_pct_dynamic = (trailing_gap_usd / notional * 100) if notional > 0 else trail_gap_pct_fixed
+    trail_gap_pct = min(trail_gap_pct_fixed, trail_gap_pct_dynamic)
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -1262,10 +1274,21 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         else:
             active_arm_pct, active_floor_pct = None, None
 
-        if active_arm_pct is not None and price_move_pct <= active_floor_pct:
-            close_reason = "QP_FLOOR"
-            close_stop_level_pct = active_floor_pct
-            add_bot_log(user_id, f"🎯 {trade['coin']}: Plancher QP +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(active_floor_pct,3)}%, armé: {round(active_arm_pct,3)}%) !", "success")
+        # On retient le plus protecteur entre le palier QP actif et le trailing (TTP) —
+        # le trailing prend naturellement le relais une fois le pic assez au-dessus des
+        # paliers QP fixes, laissant courir les gros gagnants au lieu de les plafonner à 1.1$.
+        candidate_stops = []
+        if active_arm_pct is not None:
+            candidate_stops.append(("QP_FLOOR", active_floor_pct))
+        if peak_pct >= trail_trigger_pct:
+            candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
+        if candidate_stops:
+            reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
+            if price_move_pct <= stop_level_pct:
+                close_reason = reason
+                close_stop_level_pct = stop_level_pct
+                label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
+                add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé QP: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
 
     if not close_reason:
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
