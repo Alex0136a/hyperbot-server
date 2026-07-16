@@ -351,6 +351,44 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Surcharges PAR TRADE pour la prise manuelle — NULL = utilise le réglage de compte
+        # par défaut (bot_config), sinon la valeur ici prime pour CE trade précis uniquement.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN is_manual INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_max_loss_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_qp_arm_low_usd REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_qp_floor_low_usd REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_qp_lock_trigger_usd REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_quick_profit_usd REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_trailing_gap_usd REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_trail_trigger_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_stop_loss_price REAL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN session_date TEXT")
         conn.commit()
     except: pass
@@ -1216,17 +1254,28 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
         trailing_gap_pct, trailing_gap_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
-    max_loss_pct = float(cfg_qp["max_loss_pct"]) if cfg_qp and "max_loss_pct" in cfg_qp.keys() and cfg_qp["max_loss_pct"] else 0.31
+
+    def pick(custom_key, cfg_key, fallback):
+        """Surcharge par trade (prise manuelle) si définie, sinon réglage de compte, sinon défaut codé."""
+        custom_val = trade.get(custom_key)
+        if custom_val is not None:
+            return float(custom_val)
+        if cfg_qp and cfg_key in cfg_qp.keys() and cfg_qp[cfg_key] is not None:
+            return float(cfg_qp[cfg_key])
+        return fallback
+
+    max_loss_pct = pick("custom_max_loss_pct", "max_loss_pct", 0.31)
 
     # Plancher QP à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade —
-    # garantit un minimum fixe peu importe jusqu'où le pic est monté.
+    # garantit un minimum fixe peu importe jusqu'où le pic est monté. Surchargeable par
+    # trade (prise manuelle) via custom_qp_*, sinon réglage de compte par défaut.
     #  - Palier haut : armé à qp_lock_trigger_usd (1.5$), garantit quick_profit_usd (1.1$)
     #  - Palier bas : armé à qp_arm_low_usd (1.1$), garantit qp_floor_low_usd (0.6$) — pour les
     #    pics qui n'atteignent jamais le palier haut
-    qp_lock_trigger_usd = float(cfg_qp["qp_lock_trigger_usd"]) if cfg_qp and "qp_lock_trigger_usd" in cfg_qp.keys() and cfg_qp["qp_lock_trigger_usd"] else 1.5
-    quick_profit_usd = float(cfg_qp["quick_profit_usd"]) if cfg_qp and "quick_profit_usd" in cfg_qp.keys() and cfg_qp["quick_profit_usd"] else 1.1
-    qp_arm_low_usd = float(cfg_qp["qp_arm_low_usd"]) if cfg_qp and "qp_arm_low_usd" in cfg_qp.keys() and cfg_qp["qp_arm_low_usd"] else 1.1
-    qp_floor_low_usd = float(cfg_qp["qp_floor_low_usd"]) if cfg_qp and "qp_floor_low_usd" in cfg_qp.keys() and cfg_qp["qp_floor_low_usd"] else 0.6
+    qp_lock_trigger_usd = pick("custom_qp_lock_trigger_usd", "qp_lock_trigger_usd", 1.5)
+    quick_profit_usd = pick("custom_quick_profit_usd", "quick_profit_usd", 1.1)
+    qp_arm_low_usd = pick("custom_qp_arm_low_usd", "qp_arm_low_usd", 1.1)
+    qp_floor_low_usd = pick("custom_qp_floor_low_usd", "qp_floor_low_usd", 0.6)
     notional = trade["size_usdc"] * trade["leverage"]
     qp_arm_pct = (qp_lock_trigger_usd / notional * 100) if notional > 0 else 999
     qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
@@ -1236,12 +1285,13 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     # TTP (Trailing Take Profit) — réintégré en PLUS des paliers QP (pas à leur place) :
     # suit le pic et peut donner un seuil plus protecteur que le plancher QP fixe une fois
     # le trade allé bien au-delà des paliers (laisse courir les gros gagnants). Écart plafonné
-    # en $ (trailing_gap_usd) converti dynamiquement, comme le plancher QP.
+    # en $ (trailing_gap_usd) converti dynamiquement, comme le plancher QP. Surchargeable
+    # par trade (prise manuelle) via custom_trail_trigger_pct/custom_trailing_gap_usd.
     quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
-    trail_trigger_pct = quick_profit_pct * trail_mult
+    trail_trigger_pct = pick("custom_trail_trigger_pct", None, quick_profit_pct * trail_mult)
     trail_gap_pct_fixed = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
-    trailing_gap_usd = float(cfg_qp["trailing_gap_usd"]) if cfg_qp and "trailing_gap_usd" in cfg_qp.keys() and cfg_qp["trailing_gap_usd"] else 1.0
+    trailing_gap_usd = pick("custom_trailing_gap_usd", "trailing_gap_usd", 1.0)
     trail_gap_pct_dynamic = (trailing_gap_usd / notional * 100) if notional > 0 else trail_gap_pct_fixed
     trail_gap_pct = min(trail_gap_pct_fixed, trail_gap_pct_dynamic)
 
@@ -1257,14 +1307,23 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     close_reason = None
     close_stop_level_pct = None
     active_arm_pct = None
-    # Max Loss vérifié EN PREMIER : sans ça, une fois le plancher armé, une chute brutale
+    # SL manuel (prix) — uniquement pour les trades qui en définissent un (prise manuelle) ;
+    # vérifié EN PREMIER, avant même Max Loss, car c'est un choix explicite de l'utilisateur
+    # sur CE trade précis, prioritaire sur les réglages de compte génériques.
+    custom_sl_price = trade.get("custom_stop_loss_price")
+    if custom_sl_price is not None:
+        sl_hit = (cur <= custom_sl_price) if direction == 1 else (cur >= custom_sl_price)
+        if sl_hit:
+            close_reason = "STOP_LOSS"
+            add_bot_log(user_id, f"🛑 {trade['coin']}: Stop Loss manuel touché à ${cur} (seuil: ${custom_sl_price}) — {round(pnl,2)} USDC", "warning")
+    # Max Loss vérifié ensuite : sans ça, une fois le plancher armé, une chute brutale
     # (saut de prix entre deux vérifications) pouvait être mal étiquetée QP_FLOOR au lieu
     # de MAX_LOSS, car "prix <= seuil" est trivialement vrai pour toute valeur très négative.
-    if price_move_pct <= -max_loss_pct:
+    if not close_reason and price_move_pct <= -max_loss_pct:
         close_reason = "MAX_LOSS"
         close_stop_level_pct = -max_loss_pct
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
-    else:
+    if not close_reason:
         # Le pic ne redescend jamais : une fois le palier haut atteint, il reste actif pour
         # toujours sur ce trade. Sinon, le palier bas prend le relais s'il est armé.
         if peak_pct >= qp_arm_pct:
@@ -3412,6 +3471,20 @@ class PaperTradeRequest(BaseModel):
     signal_id: int
     size_usdc: float = 50.0
 
+class ManualTradeRequest(BaseModel):
+    coin: str
+    action: str  # LONG ou SHORT
+    size_usdc: float
+    leverage: int = 1
+    custom_max_loss_pct: Optional[float] = None
+    custom_qp_arm_low_usd: Optional[float] = None
+    custom_qp_floor_low_usd: Optional[float] = None
+    custom_qp_lock_trigger_usd: Optional[float] = None
+    custom_quick_profit_usd: Optional[float] = None
+    custom_trailing_gap_usd: Optional[float] = None
+    custom_trail_trigger_pct: Optional[float] = None
+    custom_stop_loss_price: Optional[float] = None
+
 class PaperCloseRequest(BaseModel):
     trade_id: int
     reason: str = "MANUEL"
@@ -3451,6 +3524,78 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "open_trades": open_trades,
         "closed_trades": closed_trades,
     }
+
+@app.post("/api/paper/manual-open")
+def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
+    """Prise de trade manuelle libre — coin/direction/taille/levier au choix, indépendante
+    de tout signal généré par le bot. Utilise le mode (paper/live) actuellement configuré.
+    Les seuils custom_* écrasent les réglages de compte pour CE trade uniquement (None = défaut)."""
+    if req.action not in ("LONG", "SHORT"):
+        raise HTTPException(status_code=400, detail="Action invalide (LONG ou SHORT)")
+    if req.size_usdc <= 0 or req.leverage <= 0:
+        raise HTTPException(status_code=400, detail="Taille et levier doivent être positifs")
+    conn = get_db()
+    ensure_portfolio(user_id, conn)
+    cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
+
+    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (req.coin,)).fetchone()
+    if not price_row:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Prix non disponible pour {req.coin}")
+    price = price_row["price"]
+    now_iso = datetime.utcnow().isoformat()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    if trading_mode == "live":
+        user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+        account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+        if not account_address:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Aucune adresse wallet Hyperliquid configurée")
+        if not HL_SDK_AVAILABLE or not HL_AGENT_PRIVATE_KEY:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Mode live non configuré côté serveur (SDK/clé manquants)")
+        max_loss_for_sl = req.custom_max_loss_pct if req.custom_max_loss_pct is not None else 0.31
+        try:
+            coin_size, sl_oid, fill_price = hl_open_position(account_address, req.coin, req.action, req.size_usdc, req.leverage, price, max_loss_for_sl)
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Échec ouverture live: {e}")
+        conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
+            size_usdc, leverage, opened_at, session_date, is_live, is_manual, hl_sl_oid, hl_size,
+            custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
+            custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
+            VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?)""",
+            (user_id, req.coin, req.action, fill_price, fill_price, req.size_usdc, req.leverage,
+             now_iso, today, sl_oid, coin_size,
+             req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
+             req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
+             req.custom_trail_trigger_pct, req.custom_stop_loss_price))
+        conn.commit()
+        conn.close()
+        add_bot_log(user_id, f"👤🔴 Trade MANUEL LIVE: {req.action} {req.coin} @ ${fill_price} | {req.size_usdc} USDC (x{req.leverage})", "success")
+        return {"message": f"Trade manuel LIVE {req.action} {req.coin} ouvert à ${fill_price}"}
+
+    portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+    if not portfolio or portfolio["balance"] < req.size_usdc:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Solde insuffisant")
+    conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
+        size_usdc, leverage, opened_at, session_date, is_manual,
+        custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
+        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
+        VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)""",
+        (user_id, req.coin, req.action, price, price, req.size_usdc, req.leverage,
+         now_iso, today,
+         req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
+         req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
+         req.custom_trail_trigger_pct, req.custom_stop_loss_price))
+    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (req.size_usdc, user_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"👤 Trade MANUEL: {req.action} {req.coin} @ ${price} | {req.size_usdc} USDC (x{req.leverage})", "success")
+    return {"message": f"Trade manuel {req.action} {req.coin} ouvert à ${price}"}
 
 @app.post("/api/paper/trade")
 def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_user)):
