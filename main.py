@@ -1615,7 +1615,7 @@ async def scan_markets(user_id: int):
                 continue
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
             add_bot_log(user_id, f"{'📐' if use_rules_engine else '🤖'} {coin}: {'Règles' if use_rules_engine else 'IA'} → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
-            required_conf = get_required_confidence(user_id, coin, action_ia)
+            required_conf = get_required_confidence(user_id, coin, action_ia, btc_change=btc_change)
             if action_ia == "WAIT":
                 add_bot_log(user_id, f"⛔ {coin}: aucun signal net (WAIT) — ignoré", "info")
                 continue
@@ -1853,6 +1853,7 @@ async def scan_markets(user_id: int):
 REWARD_WIN_THRESHOLD = 3   # gains consécutifs avant que la confiance requise commence à baisser
 REWARD_STEP_PCT = 5        # baisse en points de % par tranche de REWARD_WIN_THRESHOLD gains supplémentaires
 REWARD_FLOOR_PCT = 50      # plancher minimum, jamais en dessous même sur une longue série de gains
+MARKET_CONTEXT_BONUS = 15  # points retirés au plancher manuel quand BTC bouge fort et dans le même sens
 
 def is_coin_penalizing(user_id: int, coin: str, conn) -> bool:
     """Vérifie EN DIRECT (pas de durée fixe, recalculé à chaque appel) si un coin est
@@ -1870,7 +1871,7 @@ def is_coin_penalizing(user_id: int, coin: str, conn) -> bool:
     win_rate = (row["wins"] or 0) / max(row["total"] or 1, 1) * 100
     return win_rate < PENALIZING_WINRATE_THRESHOLD and (row["net"] or 0) < PENALIZING_NET_THRESHOLD
 
-def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None) -> int:
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None, btc_change: float = 0.0) -> int:
     """Retourne la confiance requise selon l'historique récent du coin/direction :
     - pertes consécutives → paliers réglables à la hausse (défaut 60/72/82/90), plus dur à déclencher
     - gains consécutifs (≥3) → baisse symétrique sous la base (5%/3 gains, plancher 50%), plus facile
@@ -1879,20 +1880,32 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
       la récompense est ignorée et la confiance de base normale s'applique (recalculé à chaque appel,
       se lève automatiquement dès que le bilan cumulé s'améliore)
     - plancher minimum par actif (coin_min_confidence) : s'applique en dernier via max(), ne descend
-      jamais en dessous peu importe le calcul ci-dessus (utile pour les coins jugés plus risqués)"""
+      jamais en dessous peu importe le calcul ci-dessus (utile pour les coins jugés plus risqués)
+      — SAUF bonus de contexte marché : si BTC bouge fort (≥ btc_trend_threshold) dans le MÊME sens
+      que ce signal (SHORT pendant que BTC chute, LONG pendant qu'il monte), ce plancher manuel
+      est réduit de MARKET_CONTEXT_BONUS points — un mouvement BTC fort et aligné est une preuve
+      de marché indépendante des propres indicateurs du coin, qui justifie une exigence plus souple."""
     conn = get_db()
     row = conn.execute(
         "SELECT consecutive_losses, consecutive_wins FROM coin_confidence WHERE user_id=? AND coin=? AND action=?",
         (user_id, coin, action)
     ).fetchone()
     cfg = conn.execute(
-        "SELECT base_confidence, conf_step1, conf_step2, conf_step3 FROM bot_config WHERE user_id=?",
+        "SELECT base_confidence, conf_step1, conf_step2, conf_step3, btc_trend_threshold FROM bot_config WHERE user_id=?",
         (user_id,)
     ).fetchone()
     min_row = conn.execute(
         "SELECT min_confidence FROM coin_min_confidence WHERE user_id=? AND coin=?", (user_id, coin)
     ).fetchone()
     min_conf_floor = min_row["min_confidence"] if min_row else 0
+
+    # Bonus de contexte marché : BTC bouge fort et dans le même sens que ce signal
+    btc_thresh = cfg["btc_trend_threshold"] if cfg and "btc_trend_threshold" in cfg.keys() and cfg["btc_trend_threshold"] else 2.0
+    aligned_with_btc = (btc_change >= btc_thresh and action == "LONG") or (btc_change <= -btc_thresh and action == "SHORT")
+    if aligned_with_btc and min_conf_floor > 0:
+        old_floor = min_conf_floor
+        min_conf_floor = max(0, min_conf_floor - MARKET_CONTEXT_BONUS)
+        add_bot_log(user_id, f"📉📈 {coin} {action}: plancher manuel réduit {old_floor}%→{min_conf_floor}% (BTC {btc_change:+.1f}%, mouvement aligné)", "info")
 
     losses = row["consecutive_losses"] if row else 0
     wins = row["consecutive_wins"] if row and "consecutive_wins" in row.keys() else 0
