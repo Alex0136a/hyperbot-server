@@ -380,6 +380,15 @@ function App() {
   const [activeCoins, setActiveCoins] = useState(ALL_COINS);
   const [minConfidence, setMinConfidence] = useState({});
   const [maxConfidence, setMaxConfidence] = useState({});
+  const [marketData, setMarketData] = useState({});
+  const [manualCoin, setManualCoin] = useState("");
+  const [manualCoinSearch, setManualCoinSearch] = useState("");
+  const [manualAction, setManualAction] = useState("LONG");
+  const [manualSize, setManualSize] = useState(50);
+  const [manualLeverage, setManualLeverage] = useState(2);
+  const [manualAdvanced, setManualAdvanced] = useState(false);
+  const [manualCustom, setManualCustom] = useState({});
+  const [manualStatus, setManualStatus] = useState("");
   const [cap95Freq, setCap95Freq] = useState(null);
   const [confThreshold, setConfThreshold] = useState(95);
   const [saved, setSaved] = useState(false);
@@ -411,7 +420,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -423,7 +432,9 @@ function App() {
         apiCall("/api/coins/paused","GET",null,token),
         apiCall("/api/coins/min-confidence","GET",null,token),
         apiCall(`/api/coins/max-confidence?threshold=${confThreshold}`,"GET",null,token),
+        apiCall("/api/market-data","GET",null,token),
       ]);
+      setMarketData(mktData?.data||{});
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
@@ -552,6 +563,7 @@ Confirmer ?`
     {id:"parametres",label:"⚙️ Paramètres"},
     {id:"logs",label:"📋 Logs"},
     {id:"paper",label:`🎮 Paper Trading`},
+    {id:"manuel",label:`🕹️ Trading Manuel`},
     {id:"rapport",label:"📄 Rapport"},
     {id:"stats",label:"📊 Performance"},
     {id:"bilan",label:"💰 Bilan"},
@@ -1469,7 +1481,144 @@ Confirmer ?`
         </div>
       )}
 
-      {/* STATS PERFORMANCE */}
+      {/* TRADING MANUEL */}
+      {tab==="manuel" && (
+        <div style={{padding:16}}>
+          <div style={{background:"#0a1628",border:"1px solid #7c3aed",borderRadius:12,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>🕹️ Trading Manuel</div>
+            <div style={{fontSize:10,color:"#475569",marginBottom:14}}>
+              Prise de trade libre, indépendante du bot — mode actuel : <b style={{color:config?.trading_mode==="live"?"#f87171":"#60a5fa"}}>{config?.trading_mode==="live"?"🔴 LIVE (argent réel)":"🎮 PAPER"}</b>
+            </div>
+
+            {/* Recherche / sélection du coin */}
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:10,color:"#94a3b8",marginBottom:4}}>ACTIF</div>
+              <input type="text" value={manualCoinSearch} placeholder="Tapez un coin (ex: BTC)..."
+                onChange={e=>{setManualCoinSearch(e.target.value.toUpperCase()); setManualCoin("");}}
+                style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontSize:13}}/>
+              {manualCoinSearch && !manualCoin && (
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8,maxHeight:140,overflowY:"auto"}}>
+                  {ALL_COINS.filter(c=>c.includes(manualCoinSearch)).slice(0,20).map(c=>(
+                    <button key={c} onClick={()=>{setManualCoin(c); setManualCoinSearch(c);}}
+                      style={{background:"#1e2d4a",border:"1px solid #334155",borderRadius:5,padding:"4px 10px",color:"#e2e8f0",fontSize:11,cursor:"pointer"}}>
+                      {c} {prices[c]?<span style={{color:"#64748b"}}> ${prices[c]}</span>:null}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Menu contextuel : tendances de l'actif sélectionné */}
+            {manualCoin && (
+              <div style={{background:"#0f1629",border:"1px solid #1e3a5f",borderRadius:8,padding:12,marginBottom:14}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#60a5fa",marginBottom:8}}>📊 {manualCoin}/USDC — ${prices[manualCoin]||"?"}</div>
+                {marketData[manualCoin] ? (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,fontSize:10}}>
+                    <div><span style={{color:"#64748b"}}>RSI</span><br/><b style={{color:marketData[manualCoin].rsi<35?"#34d399":marketData[manualCoin].rsi>65?"#f87171":"#e2e8f0"}}>{marketData[manualCoin].rsi}</b></div>
+                    <div><span style={{color:"#64748b"}}>MACD</span><br/><b style={{color:marketData[manualCoin].macd_bull?"#34d399":marketData[manualCoin].macd_bear?"#f87171":"#94a3b8"}}>{marketData[manualCoin].macd_bull?"Haussier":marketData[manualCoin].macd_bear?"Baissier":"Neutre"}</b></div>
+                    <div><span style={{color:"#64748b"}}>Volume</span><br/><b style={{color:"#e2e8f0"}}>{marketData[manualCoin].volume_trend}</b></div>
+                    <div><span style={{color:"#64748b"}}>EMA20/50/200</span><br/><b style={{color:"#e2e8f0",fontSize:9}}>{marketData[manualCoin].ema20}/{marketData[manualCoin].ema50}/{marketData[manualCoin].ema200}</b></div>
+                    <div><span style={{color:"#64748b"}}>BTC tendance</span><br/><b style={{color:"#e2e8f0"}}>{marketData[manualCoin].btc_trend} ({marketData[manualCoin].btc_change}%)</b></div>
+                    <div><span style={{color:"#64748b"}}>Confiance max (à vie)</span><br/><b style={{color:"#c084fc"}}>{maxConfidence[manualCoin]!=null?`${maxConfidence[manualCoin]}%`:"—"}</b></div>
+                  </div>
+                ) : (
+                  <div style={{fontSize:10,color:"#475569"}}>Pas encore de données d'analyse en cache pour ce coin (le bot ne l'a peut-être pas scanné récemment).</div>
+                )}
+              </div>
+            )}
+
+            {/* Direction, taille, levier */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+              <div>
+                <div style={{fontSize:10,color:"#94a3b8",marginBottom:4}}>DIRECTION</div>
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>setManualAction("LONG")} style={{flex:1,background:manualAction==="LONG"?"#0f3d2e":"#0f1629",border:manualAction==="LONG"?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:6,padding:8,color:manualAction==="LONG"?"#34d399":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>LONG</button>
+                  <button onClick={()=>setManualAction("SHORT")} style={{flex:1,background:manualAction==="SHORT"?"#3d0f1a":"#0f1629",border:manualAction==="SHORT"?"1px solid #f87171":"1px solid #1e2d4a",borderRadius:6,padding:8,color:manualAction==="SHORT"?"#f87171":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>SHORT</button>
+                </div>
+              </div>
+              <div>
+                <div style={{fontSize:10,color:"#94a3b8",marginBottom:4}}>LEVIER</div>
+                <input type="number" min="1" max="20" value={manualLeverage} onChange={e=>setManualLeverage(Number(e.target.value))}
+                  style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontSize:13}}/>
+              </div>
+            </div>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:10,color:"#94a3b8",marginBottom:4}}>TAILLE (USDC)</div>
+              <input type="number" min="1" step="1" value={manualSize} onChange={e=>setManualSize(Number(e.target.value))}
+                style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontSize:13}}/>
+            </div>
+
+            {/* Réglages avancés (SL, Max Loss, QP, TTP) — défauts du compte, modifiables */}
+            <div style={{marginBottom:14}}>
+              <button onClick={()=>setManualAdvanced(!manualAdvanced)} style={{background:"transparent",border:"none",color:"#c084fc",fontSize:11,cursor:"pointer",padding:0}}>
+                {manualAdvanced?"▾":"▸"} SL / Max Loss / QP / TTP (défauts du compte, modifiables pour ce trade)
+              </button>
+              {manualAdvanced && (
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Stop Loss (prix, optionnel)</div>
+                    <input type="number" placeholder="Aucun par défaut" onChange={e=>setManualCustom(p=>({...p,custom_stop_loss_price:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Max Loss (% prix) — défaut {config?.max_loss_pct}</div>
+                    <input type="number" step="0.01" placeholder={config?.max_loss_pct} onChange={e=>setManualCustom(p=>({...p,custom_max_loss_pct:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP haut - armement ($) — défaut {config?.qp_lock_trigger_usd}</div>
+                    <input type="number" step="0.1" placeholder={config?.qp_lock_trigger_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_lock_trigger_usd:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP haut - garanti ($) — défaut {config?.quick_profit_usd}</div>
+                    <input type="number" step="0.1" placeholder={config?.quick_profit_usd} onChange={e=>setManualCustom(p=>({...p,custom_quick_profit_usd:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP bas - armement ($) — défaut {config?.qp_arm_low_usd}</div>
+                    <input type="number" step="0.1" placeholder={config?.qp_arm_low_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_arm_low_usd:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP bas - garanti ($) — défaut {config?.qp_floor_low_usd}</div>
+                    <input type="number" step="0.1" placeholder={config?.qp_floor_low_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_floor_low_usd:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>TTP - activation (× QP)</div>
+                    <input type="number" step="0.01" placeholder="défaut du compte" onChange={e=>setManualCustom(p=>({...p,custom_trail_trigger_pct:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>TTP - écart plafonné ($) — défaut {config?.trailing_gap_usd}</div>
+                    <input type="number" step="0.1" placeholder={config?.trailing_gap_usd} onChange={e=>setManualCustom(p=>({...p,custom_trailing_gap_usd:e.target.value?Number(e.target.value):null}))}
+                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <button onClick={async()=>{
+              if(!manualCoin){ setManualStatus("⛔ Choisissez un actif"); return; }
+              const isLive = config?.trading_mode==="live";
+              if(isLive && !confirm(`Confirmer l'ouverture d'un trade LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
+              setManualStatus("⏳ Ouverture en cours...");
+              try {
+                const res = await apiCall("/api/paper/manual-open","POST",{
+                  coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage, ...manualCustom
+                },token);
+                setManualStatus(`✅ ${res.message}`);
+                loadData();
+              } catch(e){ setManualStatus(`⛔ ${e.message}`); }
+            }} style={{width:"100%",background:config?.trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+              {config?.trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER"}
+            </button>
+            {manualStatus && <div style={{marginTop:8,fontSize:11,color:"#94a3b8"}}>{manualStatus}</div>}
+          </div>
+        </div>
+      )}
+
       {tab==="stats" && (
         <div style={{padding:14}}>
           {!dailyStats ? <div style={{color:"#475569",fontSize:12,textAlign:"center",padding:40}}>Chargement...</div> : (<>
