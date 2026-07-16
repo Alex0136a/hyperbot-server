@@ -3777,6 +3777,46 @@ def get_market_data(user_id: int = Depends(get_current_user)):
     """Retourne les données de marché pré-calculées depuis le cache"""
     return {"data": market_data_cache, "coins": len(market_data_cache)}
 
+@app.get("/api/market-data/{coin}/refresh")
+async def refresh_market_data_for_coin(coin: str, user_id: int = Depends(get_current_user)):
+    """Récupère et calcule les indicateurs EN DIRECT pour un coin précis, sans attendre le
+    prochain cycle de scan — utilisé par Trading Manuel pour ne jamais afficher 'données
+    indisponibles' (le cache market_data_cache est en mémoire, vidé à chaque redémarrage
+    serveur, et ne se remplit que progressivement au fil des cycles de scan sinon)."""
+    coin = coin.upper()
+    async with httpx.AsyncClient() as client:
+        candles_raw = await fetch_candles(client, coin)
+        all_prices = await fetch_all_metas(client)
+    if not candles_raw or len(candles_raw) < 50:
+        raise HTTPException(status_code=400, detail=f"Données insuffisantes pour {coin} (marché trop récent ou illiquide ?)")
+    price = all_prices.get(coin, candles_raw[-1]["c"])
+    candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
+    closes = [cd["c"] for cd in candles]
+    vols = [cd["v"] for cd in candles]
+    e20, e50, e200 = calc_ema(closes, 20), calc_ema(closes, 50), calc_ema(closes, 200)
+    macd = calc_macd(closes, 12, 26, 9)
+    bb = calc_bb(closes, 20, 2)
+    atr = calc_atr(candles, 14)
+    vwap = calc_vwap(candles)
+    rsi = calc_rsi(closes, 14)
+    vol_avg = sum(vols[-20:]) / 20
+    vol_cur = vols[-1]
+    tech = {
+        "rsi": round(rsi, 2) if rsi else None,
+        "macd_bull": macd["crossBull"] if macd else False,
+        "macd_bear": macd["crossBear"] if macd else False,
+        "ema20": round(e20[-1], 4) if e20 else None,
+        "ema50": round(e50[-1], 4) if e50 else None,
+        "ema200": round(e200[-1], 4) if e200 else None,
+        "bb_upper": round(bb["upper"], 4) if bb else None,
+        "bb_lower": round(bb["lower"], 4) if bb else None,
+        "atr": round(atr, 4) if atr else None,
+        "vwap": round(vwap, 4) if vwap else None,
+        "volume_trend": "SPIKE" if vol_cur > vol_avg*1.5 else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
+    }
+    cache_market_data(coin, tech, price)
+    return {"data": market_data_cache.get(coin, {})}
+
 @app.get("/api/sessions")
 def get_sessions(user_id: int = Depends(get_current_user)):
     conn = get_db()
