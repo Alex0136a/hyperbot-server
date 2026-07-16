@@ -1379,9 +1379,13 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
 async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn):
     """Bookkeeping post-fermeture (confiance dynamique + stats de session temps réel).
-    À appeler après un manage_open_trade qui a retourné un résultat non-None."""
+    À appeler après un manage_open_trade qui a retourné un résultat non-None.
+    Les trades MANUELS n'alimentent PAS la confiance/pause automatique du bot — une perte
+    ou un gain décidé manuellement ne reflète pas la qualité des signaux IA/règles, et ne
+    doit donc pas pénaliser (ou récompenser) le trading automatique sur ce coin/direction."""
     won = pnl > 0
-    await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
+    if not trade.get("is_manual"):
+        await update_coin_confidence(user_id, trade["coin"], trade["action"], won)
     try:
         trade_date = trade.get("session_date") or (trade.get("opened_at") or "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
         session_stats = conn.execute("""
@@ -3398,6 +3402,21 @@ def get_max_confidence_by_coin(threshold: int = 95, user_id: int = Depends(get_c
         }
     }
 
+@app.post("/api/coins/{coin}/reset-confidence")
+def reset_coin_confidence(coin: str, user_id: int = Depends(get_current_user)):
+    """Réinitialise manuellement la confiance dynamique (LONG et SHORT) et lève toute pause
+    automatique en cours pour ce coin — utile après des pertes manuelles qui ont faussé le
+    compteur de pertes consécutives du bot (les trades manuels n'y contribuent plus depuis
+    le correctif, mais ceci permet de corriger un état déjà faussé avant ce correctif)."""
+    coin = coin.upper()
+    conn = get_db()
+    conn.execute("DELETE FROM coin_confidence WHERE user_id=? AND coin=?", (user_id, coin))
+    conn.execute("DELETE FROM coin_pause WHERE user_id=? AND coin=?", (user_id, coin))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🔄 {coin}: confiance et pause réinitialisées manuellement", "success")
+    return {"message": f"Confiance et pause de {coin} réinitialisées"}
+
 @app.get("/api/coins/paused")
 def get_paused_coins(user_id: int = Depends(get_current_user)):
     """Liste des actifs actuellement en pause automatique (3 pertes consécutives)"""
@@ -3539,11 +3558,17 @@ def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_curren
     cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
 
-    price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (req.coin,)).fetchone()
-    if not price_row:
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"Prix non disponible pour {req.coin}")
-    price = price_row["price"]
+    # Prix temps réel via WebSocket en priorité — la table 'prices' n'est mise à jour que
+    # toutes les 3 minutes par le scan et peut être significativement périmée, causant un
+    # écart artificiel dès l'ouverture (même bug déjà corrigé pour l'auto-exécution du bot).
+    if ws_connected and ws_prices and req.coin in ws_prices:
+        price = ws_prices[req.coin]
+    else:
+        price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (req.coin,)).fetchone()
+        if not price_row:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Prix non disponible pour {req.coin}")
+        price = price_row["price"]
     now_iso = datetime.utcnow().isoformat()
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
