@@ -389,6 +389,7 @@ function App() {
   const [manualAdvanced, setManualAdvanced] = useState(false);
   const [manualCustom, setManualCustom] = useState({});
   const [manualStatus, setManualStatus] = useState("");
+  const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
   const [confThreshold, setConfThreshold] = useState(95);
   const [saved, setSaved] = useState(false);
@@ -469,6 +470,15 @@ function App() {
   }, [token, loadData]);
 
   useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
+
+  useEffect(() => {
+    if(!manualCoin || marketData[manualCoin] || !token) return;
+    setManualDataLoading(true);
+    apiCall(`/api/market-data/${manualCoin}/refresh`,"GET",null,token)
+      .then(r=>{ if(r?.data) setMarketData(p=>({...p,[manualCoin]:r.data})); })
+      .catch(e=>addLog(`❌ Impossible de récupérer les données pour ${manualCoin}: ${e.message}`,"error"))
+      .finally(()=>setManualDataLoading(false));
+  }, [manualCoin, token]);
 
   useEffect(() => {
     const updateClock = () => {
@@ -908,18 +918,34 @@ Confirmer ?`
             <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:12}}>Gestion des marchés</div>
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
               {[{l:"Tout activer",v:ALL_COINS},{l:"BTC + ETH",v:["BTC","ETH"]},{l:"Top 5",v:["BTC","ETH","SOL","BNB","HYPE"]}].map((x,i)=>(
-                <button key={i} onClick={()=>setActiveCoins(x.v)}
+                <button key={i} onClick={()=>{
+                  setActiveCoins(x.v);
+                  apiCall("/api/config","PUT",{active_coins:x.v},token)
+                    .then(()=>addLog(`✅ Sélection "${x.l}" appliquée et sauvegardée`, "system"))
+                    .catch(e=>addLog(`❌ Échec sauvegarde: ${e.message}`, "error"));
+                }}
                   style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#60a5fa",fontSize:11}}>
                   {x.l}
                 </button>
               ))}
-              <button onClick={()=>setActiveCoins([])} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#64748b",fontSize:11}}>Tout désactiver</button>
+              <button onClick={()=>{
+                setActiveCoins([]);
+                apiCall("/api/config","PUT",{active_coins:[]},token)
+                  .then(()=>addLog("⭕ Tous les actifs désactivés (sauvegardé)", "system"))
+                  .catch(e=>addLog(`❌ Échec sauvegarde: ${e.message}`, "error"));
+              }} style={{background:"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#64748b",fontSize:11}}>Tout désactiver</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
               {ALL_COINS.map(coin=>{
                 const on=activeCoins.includes(coin);
                 return (
-                  <div key={coin} onClick={()=>setActiveCoins(p=>on?p.filter(c=>c!==coin):[...p,coin])}
+                  <div key={coin} onClick={()=>{
+                    const updated = on ? activeCoins.filter(c=>c!==coin) : [...activeCoins, coin];
+                    setActiveCoins(updated);
+                    apiCall("/api/config","PUT",{active_coins:updated},token)
+                      .then(()=>addLog(`${on?"⭕ Désactivé":"✅ Activé"}: ${coin} (sauvegardé)`, "system"))
+                      .catch(e=>addLog(`❌ Échec sauvegarde ${coin}: ${e.message}`, "error"));
+                  }}
                     style={{background:on?"#0a0e1a":"transparent",border:`2px solid ${on?"#3b82f6":"#1e2d4a"}`,borderRadius:8,padding:"10px 12px",cursor:"pointer",opacity:on?1:0.4}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <span style={{fontWeight:700,color:on?"#60a5fa":"#64748b"}}>{coin}</span>
@@ -1521,8 +1547,10 @@ Confirmer ?`
                     <div><span style={{color:"#64748b"}}>BTC tendance</span><br/><b style={{color:"#e2e8f0"}}>{marketData[manualCoin].btc_trend} ({marketData[manualCoin].btc_change}%)</b></div>
                     <div><span style={{color:"#64748b"}}>Confiance max (à vie)</span><br/><b style={{color:"#c084fc"}}>{maxConfidence[manualCoin]!=null?`${maxConfidence[manualCoin]}%`:"—"}</b></div>
                   </div>
+                ) : manualDataLoading ? (
+                  <div style={{fontSize:10,color:"#60a5fa"}}>⏳ Récupération des indicateurs en direct pour {manualCoin}...</div>
                 ) : (
-                  <div style={{fontSize:10,color:"#475569"}}>Pas encore de données d'analyse en cache pour ce coin (le bot ne l'a peut-être pas scanné récemment).</div>
+                  <div style={{fontSize:10,color:"#475569"}}>Données indisponibles pour {manualCoin} (marché trop récent ou illiquide).</div>
                 )}
               </div>
             )}
