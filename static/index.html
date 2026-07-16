@@ -954,6 +954,17 @@ Confirmer ?`
                     <div style={{fontSize:10,color:on?"#94a3b8":"#334155",marginTop:2}}>
                       {prices[coin]?`$${prices[coin].toLocaleString("en-US",{maximumFractionDigits:2})}`:"---"}
                     </div>
+                    <button onClick={async(e)=>{
+                      e.stopPropagation();
+                      if(!confirm(`Réinitialiser la confiance et lever toute pause pour ${coin} ?`)) return;
+                      try {
+                        const res = await apiCall(`/api/coins/${coin}/reset-confidence`,"POST",null,token);
+                        addLog(`🔄 ${res.message}`, "system");
+                        loadData();
+                      } catch(err){ addLog(`❌ ${err.message}`, "error"); }
+                    }} style={{marginTop:6,width:"100%",background:"transparent",border:"1px solid #334155",borderRadius:4,padding:"3px 0",color:"#94a3b8",fontSize:9,cursor:"pointer"}}>
+                      🔄 Réinit. confiance
+                    </button>
                   </div>
                 );
               })}
@@ -1576,55 +1587,47 @@ Confirmer ?`
                 style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontSize:13}}/>
             </div>
 
-            {/* Réglages avancés (SL, Max Loss, QP, TTP) — défauts du compte, modifiables */}
+            {/* Réglages avancés simplifiés : 3 outils seulement — SL, QP, TTP */}
             <div style={{marginBottom:14}}>
               <button onClick={()=>setManualAdvanced(!manualAdvanced)}
                 style={{width:"100%",background:manualAdvanced?"#2a1a3e":"#0f1629",border:"1px solid #7c3aed",borderRadius:6,color:"#c084fc",fontSize:12,fontWeight:700,cursor:"pointer",padding:"10px 12px",textAlign:"left",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span>🛡️ SL / Max Loss / QP / TTP — personnaliser pour ce trade</span>
+                <span>🛡️ SL · QP · TTP — personnaliser pour ce trade</span>
                 <span>{manualAdvanced?"▾ Masquer":"▸ Afficher"}</span>
               </button>
               {manualAdvanced && (
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Stop Loss (prix, optionnel)</div>
-                    <input type="number" placeholder="Aucun par défaut" onChange={e=>setManualCustom(p=>({...p,custom_stop_loss_price:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                <div style={{marginTop:8}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#f87171",marginBottom:4}}>🛑 SL — Stop Loss</div>
+                  <input type="number" placeholder="Prix — aucun par défaut" onChange={e=>setManualCustom(p=>({...p,custom_stop_loss_price:e.target.value?Number(e.target.value):null}))}
+                    style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11,marginBottom:10}}/>
+
+                  <div style={{fontSize:10,fontWeight:700,color:"#f59e0b",marginBottom:4}}>⚡ QP — Quick Profit</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:9,color:"#64748b"}}>Armement ($) — défaut {config?.qp_lock_trigger_usd}</div>
+                      <input type="number" step="0.1" placeholder={config?.qp_lock_trigger_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_lock_trigger_usd:e.target.value?Number(e.target.value):null}))}
+                        style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:9,color:"#64748b"}}>Garanti ($) — défaut {config?.quick_profit_usd}</div>
+                      <input type="number" step="0.1" placeholder={config?.quick_profit_usd} onChange={e=>setManualCustom(p=>({...p,custom_quick_profit_usd:e.target.value?Number(e.target.value):null}))}
+                        style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                    </div>
                   </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Max Loss (% prix) — défaut {config?.max_loss_pct}</div>
-                    <input type="number" step="0.01" placeholder={config?.max_loss_pct} onChange={e=>setManualCustom(p=>({...p,custom_max_loss_pct:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+
+                  <div style={{fontSize:10,fontWeight:700,color:"#34d399",marginBottom:4}}>📈 TTP — Trailing Take Profit</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                    <div>
+                      <div style={{fontSize:9,color:"#64748b"}}>Activation (× QP)</div>
+                      <input type="number" step="0.01" placeholder="défaut du compte" onChange={e=>setManualCustom(p=>({...p,custom_trail_trigger_pct:e.target.value?Number(e.target.value):null}))}
+                        style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:9,color:"#64748b"}}>Écart plafonné ($) — défaut {config?.trailing_gap_usd}</div>
+                      <input type="number" step="0.1" placeholder={config?.trailing_gap_usd} onChange={e=>setManualCustom(p=>({...p,custom_trailing_gap_usd:e.target.value?Number(e.target.value):null}))}
+                        style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
+                    </div>
                   </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP haut - armement ($) — défaut {config?.qp_lock_trigger_usd}</div>
-                    <input type="number" step="0.1" placeholder={config?.qp_lock_trigger_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_lock_trigger_usd:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP haut - garanti ($) — défaut {config?.quick_profit_usd}</div>
-                    <input type="number" step="0.1" placeholder={config?.quick_profit_usd} onChange={e=>setManualCustom(p=>({...p,custom_quick_profit_usd:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP bas - armement ($) — défaut {config?.qp_arm_low_usd}</div>
-                    <input type="number" step="0.1" placeholder={config?.qp_arm_low_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_arm_low_usd:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>Plancher QP bas - garanti ($) — défaut {config?.qp_floor_low_usd}</div>
-                    <input type="number" step="0.1" placeholder={config?.qp_floor_low_usd} onChange={e=>setManualCustom(p=>({...p,custom_qp_floor_low_usd:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>TTP - activation (× QP)</div>
-                    <input type="number" step="0.01" placeholder="défaut du compte" onChange={e=>setManualCustom(p=>({...p,custom_trail_trigger_pct:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:9,color:"#64748b"}}>TTP - écart plafonné ($) — défaut {config?.trailing_gap_usd}</div>
-                    <input type="number" step="0.1" placeholder={config?.trailing_gap_usd} onChange={e=>setManualCustom(p=>({...p,custom_trailing_gap_usd:e.target.value?Number(e.target.value):null}))}
-                      style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 7px",color:"#e2e8f0",fontSize:11}}/>
-                  </div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:8}}>Max Loss (%) et plancher QP bas restent ceux du compte (non personnalisables ici) — champ laissé vide = valeur du compte utilisée.</div>
                 </div>
               )}
             </div>
