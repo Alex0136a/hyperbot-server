@@ -1578,8 +1578,10 @@ Confirmer ?`
 
             {/* Réglages avancés (SL, Max Loss, QP, TTP) — défauts du compte, modifiables */}
             <div style={{marginBottom:14}}>
-              <button onClick={()=>setManualAdvanced(!manualAdvanced)} style={{background:"transparent",border:"none",color:"#c084fc",fontSize:11,cursor:"pointer",padding:0}}>
-                {manualAdvanced?"▾":"▸"} SL / Max Loss / QP / TTP (défauts du compte, modifiables pour ce trade)
+              <button onClick={()=>setManualAdvanced(!manualAdvanced)}
+                style={{width:"100%",background:manualAdvanced?"#2a1a3e":"#0f1629",border:"1px solid #7c3aed",borderRadius:6,color:"#c084fc",fontSize:12,fontWeight:700,cursor:"pointer",padding:"10px 12px",textAlign:"left",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>🛡️ SL / Max Loss / QP / TTP — personnaliser pour ce trade</span>
+                <span>{manualAdvanced?"▾ Masquer":"▸ Afficher"}</span>
               </button>
               {manualAdvanced && (
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
