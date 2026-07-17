@@ -389,6 +389,10 @@ function App() {
   const [manualAdvanced, setManualAdvanced] = useState(false);
   const [manualCustom, setManualCustom] = useState({});
   const [manualStatus, setManualStatus] = useState("");
+  const [orderMode, setOrderMode] = useState("now"); // "now" ou "schedule"
+  const [conditionType, setConditionType] = useState("PRICE_BELOW");
+  const [conditionValue, setConditionValue] = useState("");
+  const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
   const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
   const [confThreshold, setConfThreshold] = useState(95);
@@ -421,7 +425,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -434,8 +438,10 @@ function App() {
         apiCall("/api/coins/min-confidence","GET",null,token),
         apiCall(`/api/coins/max-confidence?threshold=${confThreshold}`,"GET",null,token),
         apiCall("/api/market-data","GET",null,token),
+        apiCall("/api/pending-orders","GET",null,token),
       ]);
       setMarketData(mktData?.data||{});
+      setPendingOrders({pending:pendOrders?.pending||[], history:pendOrders?.history||[]});
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
@@ -1587,6 +1593,52 @@ Confirmer ?`
                 style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontSize:13}}/>
             </div>
 
+            {/* Ouvrir maintenant vs Programmer (ordre conditionnel) */}
+            <div style={{marginBottom:14}}>
+              <div style={{display:"flex",gap:6,marginBottom:8}}>
+                <button onClick={()=>setOrderMode("now")} style={{flex:1,background:orderMode==="now"?"#1e3a5f":"#0f1629",border:orderMode==="now"?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:8,color:orderMode==="now"?"#60a5fa":"#64748b",fontWeight:700,fontSize:11,cursor:"pointer"}}>⚡ Ouvrir maintenant</button>
+                <button onClick={()=>setOrderMode("schedule")} style={{flex:1,background:orderMode==="schedule"?"#1e3a5f":"#0f1629",border:orderMode==="schedule"?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:8,color:orderMode==="schedule"?"#60a5fa":"#64748b",fontWeight:700,fontSize:11,cursor:"pointer"}}>⏳ Programmer</button>
+              </div>
+              {orderMode==="schedule" && (
+                <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10}}>
+                  <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>CONDITION DE DÉCLENCHEMENT</div>
+                  <select value={conditionType} onChange={e=>setConditionType(e.target.value)}
+                    style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11,marginBottom:8}}>
+                    <option value="PRICE_BELOW">Prix passe sous...</option>
+                    <option value="PRICE_ABOVE">Prix passe au-dessus de...</option>
+                    <option value="RSI_BELOW">RSI passe sous...</option>
+                    <option value="RSI_ABOVE">RSI passe au-dessus de...</option>
+                    <option value="MACD_BULLISH">MACD devient haussier</option>
+                    <option value="MACD_BEARISH">MACD devient baissier</option>
+                  </select>
+                  {(conditionType==="PRICE_BELOW"||conditionType==="PRICE_ABOVE"||conditionType==="RSI_BELOW"||conditionType==="RSI_ABOVE") && (
+                    <input type="number" step="0.01" placeholder={conditionType.startsWith("PRICE")?"Prix cible (ex: 60000)":"RSI cible (ex: 30)"}
+                      value={conditionValue} onChange={e=>setConditionValue(e.target.value)}
+                      style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
+                  )}
+                  <div style={{fontSize:9,color:"#475569",marginTop:6}}>Aucune valeur renseignée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation.</div>
+                </div>
+              )}
+            </div>
+
+            {/* Liste des ordres programmés en attente */}
+            {pendingOrders.pending.length > 0 && (
+              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10,marginBottom:14}}>
+                <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:6}}>⏳ Ordres en attente ({pendingOrders.pending.length})</div>
+                {pendingOrders.pending.map(o=>(
+                  <div key={o.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <span style={{fontSize:10,color:"#e2e8f0"}}>
+                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {o.condition_type} {o.condition_value??""}
+                    </span>
+                    <button onClick={async()=>{
+                      await apiCall(`/api/pending-orders/${o.id}`,"DELETE",null,token);
+                      loadData();
+                    }} style={{background:"transparent",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",color:"#f87171",fontSize:9,cursor:"pointer"}}>Annuler</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Réglages avancés simplifiés : 3 outils seulement — SL, QP, TTP */}
             <div style={{marginBottom:14}}>
               <button onClick={()=>setManualAdvanced(!manualAdvanced)}
@@ -1635,17 +1687,29 @@ Confirmer ?`
             <button onClick={async()=>{
               if(!manualCoin){ setManualStatus("⛔ Choisissez un actif"); return; }
               const isLive = config?.trading_mode==="live";
-              if(isLive && !confirm(`Confirmer l'ouverture d'un trade LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
-              setManualStatus("⏳ Ouverture en cours...");
+              if(orderMode==="now" && isLive && !confirm(`Confirmer l'ouverture d'un trade LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
+              if(orderMode==="schedule" && isLive && !confirm(`Confirmer la programmation d'un ordre LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
+              setManualStatus(orderMode==="now" ? "⏳ Ouverture en cours..." : "⏳ Programmation en cours...");
               try {
-                const res = await apiCall("/api/paper/manual-open","POST",{
-                  coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage, ...manualCustom
-                },token);
-                setManualStatus(`✅ ${res.message}`);
+                if(orderMode==="now") {
+                  const res = await apiCall("/api/paper/manual-open","POST",{
+                    coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage, ...manualCustom
+                  },token);
+                  setManualStatus(`✅ ${res.message}`);
+                } else {
+                  const res = await apiCall("/api/pending-orders","POST",{
+                    coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
+                    condition_type:conditionType, condition_value:conditionValue?Number(conditionValue):null,
+                    ...manualCustom
+                  },token);
+                  setManualStatus(`✅ ${res.message}`);
+                }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
             }} style={{width:"100%",background:config?.trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
-              {config?.trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER"}
+              {orderMode==="now"
+                ? (config?.trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER")
+                : (config?.trading_mode==="live"?"🔴 PROGRAMMER EN LIVE (ARGENT RÉEL)":"⏳ PROGRAMMER L'ORDRE")}
             </button>
             {manualStatus && <div style={{marginTop:8,fontSize:11,color:"#94a3b8"}}>{manualStatus}</div>}
           </div>
