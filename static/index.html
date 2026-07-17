@@ -390,8 +390,9 @@ function App() {
   const [manualCustom, setManualCustom] = useState({});
   const [manualStatus, setManualStatus] = useState("");
   const [orderMode, setOrderMode] = useState("now"); // "now" ou "schedule"
-  const [conditionType, setConditionType] = useState("PRICE_BELOW");
-  const [conditionValue, setConditionValue] = useState("");
+  const [conditionsList, setConditionsList] = useState([]);
+  const [newCondType, setNewCondType] = useState("PRICE_BELOW");
+  const [newCondValue, setNewCondValue] = useState("");
   const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
   const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
@@ -1601,22 +1602,47 @@ Confirmer ?`
               </div>
               {orderMode==="schedule" && (
                 <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10}}>
-                  <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>CONDITION DE DÉCLENCHEMENT</div>
-                  <select value={conditionType} onChange={e=>setConditionType(e.target.value)}
-                    style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11,marginBottom:8}}>
-                    <option value="PRICE_BELOW">Prix passe sous...</option>
-                    <option value="PRICE_ABOVE">Prix passe au-dessus de...</option>
-                    <option value="RSI_BELOW">RSI passe sous...</option>
-                    <option value="RSI_ABOVE">RSI passe au-dessus de...</option>
-                    <option value="MACD_BULLISH">MACD devient haussier</option>
-                    <option value="MACD_BEARISH">MACD devient baissier</option>
-                  </select>
-                  {(conditionType==="PRICE_BELOW"||conditionType==="PRICE_ABOVE"||conditionType==="RSI_BELOW"||conditionType==="RSI_ABOVE") && (
-                    <input type="number" step="0.01" placeholder={conditionType.startsWith("PRICE")?"Prix cible (ex: 60000)":"RSI cible (ex: 30)"}
-                      value={conditionValue} onChange={e=>setConditionValue(e.target.value)}
-                      style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
+                  <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>CONDITIONS DE DÉCLENCHEMENT (combinables — toutes doivent être remplies)</div>
+
+                  {conditionsList.length > 0 && (
+                    <div style={{marginBottom:8}}>
+                      {conditionsList.map((c,i)=>(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"5px 8px",marginBottom:4}}>
+                          <span style={{fontSize:10,color:"#e2e8f0"}}>
+                            {i>0 && <b style={{color:"#c084fc"}}>ET </b>}
+                            {c.type}{c.value!=null?` ${c.value}`:""}
+                          </span>
+                          <button onClick={()=>setConditionsList(conditionsList.filter((_,j)=>j!==i))}
+                            style={{background:"transparent",border:"none",color:"#f87171",fontSize:11,cursor:"pointer"}}>✕</button>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                  <div style={{fontSize:9,color:"#475569",marginTop:6}}>Aucune valeur renseignée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation. En paper, l'entrée se fait exactement au prix programmé (pas d'ambiguïté) ; en live, le prix réel de l'exchange fait foi.</div>
+
+                  <div style={{display:"flex",gap:6}}>
+                    <select value={newCondType} onChange={e=>setNewCondType(e.target.value)}
+                      style={{flex:1,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}>
+                      <option value="PRICE_BELOW">Prix passe sous...</option>
+                      <option value="PRICE_ABOVE">Prix passe au-dessus de...</option>
+                      <option value="RSI_BELOW">RSI passe sous...</option>
+                      <option value="RSI_ABOVE">RSI passe au-dessus de...</option>
+                      <option value="MACD_BULLISH">MACD devient haussier</option>
+                      <option value="MACD_BEARISH">MACD devient baissier</option>
+                    </select>
+                    {(newCondType==="PRICE_BELOW"||newCondType==="PRICE_ABOVE"||newCondType==="RSI_BELOW"||newCondType==="RSI_ABOVE") && (
+                      <input type="number" step="0.01" placeholder={newCondType.startsWith("PRICE")?"Prix":"RSI"} value={newCondValue}
+                        onChange={e=>setNewCondValue(e.target.value)}
+                        style={{width:80,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
+                    )}
+                    <button onClick={()=>{
+                      const needsValue = newCondType.startsWith("PRICE")||newCondType.startsWith("RSI");
+                      if(needsValue && !newCondValue) return;
+                      setConditionsList([...conditionsList, {type:newCondType, value:needsValue?Number(newCondValue):null}]);
+                      setNewCondValue("");
+                    }} style={{background:"#7c3aed",border:"none",borderRadius:4,padding:"6px 12px",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>+ Ajouter</button>
+                  </div>
+
+                  <div style={{fontSize:9,color:"#475569",marginTop:8}}>Aucune condition ajoutée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation. En paper, l'entrée se fait exactement au prix programmé (pas d'ambiguïté) ; en live, le prix réel de l'exchange fait foi.</div>
                 </div>
               )}
             </div>
@@ -1628,7 +1654,7 @@ Confirmer ?`
                 {pendingOrders.pending.map(o=>(
                   <div key={o.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
                     <span style={{fontSize:10,color:"#e2e8f0"}}>
-                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {o.condition_type} {o.condition_value??""}
+                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {(o.conditions||[]).map(c=>`${c.type}${c.value!=null?` ${c.value}`:""}`).join(" ET ")}
                     </span>
                     <button onClick={async()=>{
                       await apiCall(`/api/pending-orders/${o.id}`,"DELETE",null,token);
@@ -1699,10 +1725,11 @@ Confirmer ?`
                 } else {
                   const res = await apiCall("/api/pending-orders","POST",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
-                    condition_type:conditionType, condition_value:conditionValue?Number(conditionValue):null,
+                    conditions:conditionsList,
                     ...manualCustom
                   },token);
                   setManualStatus(`✅ ${res.message}`);
+                  setConditionsList([]);
                 }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
