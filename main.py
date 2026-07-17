@@ -483,6 +483,34 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Ordres programmés (Trading Manuel) : surveillent un actif et ouvrent automatiquement
+        # dès qu'une condition (prix ou indicateur) est remplie. Pas d'expiration — restent
+        # actifs jusqu'à déclenchement ou annulation manuelle.
+        conn.execute("""CREATE TABLE IF NOT EXISTS pending_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            coin TEXT NOT NULL,
+            action TEXT NOT NULL,
+            size_usdc REAL NOT NULL,
+            leverage INTEGER NOT NULL,
+            condition_type TEXT NOT NULL,
+            condition_value REAL,
+            status TEXT DEFAULT 'PENDING',
+            created_at TEXT,
+            executed_at TEXT,
+            trading_mode TEXT,
+            custom_max_loss_pct REAL,
+            custom_qp_arm_low_usd REAL,
+            custom_qp_floor_low_usd REAL,
+            custom_qp_lock_trigger_usd REAL,
+            custom_quick_profit_usd REAL,
+            custom_trailing_gap_usd REAL,
+            custom_trail_trigger_pct REAL,
+            custom_stop_loss_price REAL
+        )""")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
             user_id INTEGER,
             coin TEXT,
@@ -2575,6 +2603,11 @@ async def connect_hyperliquid_ws():
                                 if coin in mids:
                                     cur = float(mids[coin])
                                     await process_trade_on_price(trade["user_id"], trade, cur, conn)
+
+                            # Ordres programmés à condition de PRIX — vérifiés à chaque tick temps
+                            # réel (pas seulement au cycle de scan ~3min), indépendamment de
+                            # is_running (une intention manuelle de l'utilisateur, pas de l'auto-trading)
+                            check_pending_price_orders(mids, conn)
                         except Exception as e:
                             print(f"WS trades error: {e}")
                         finally:
@@ -2827,6 +2860,7 @@ async def run_bot_loop(user_id: int):
                 await scan_markets(user_id)
                 check_and_log_penalizing_coins(user_id)
                 check_recovering_sanctioned_coins(user_id)
+                check_pending_indicator_orders(user_id)
                 cleanup_old_data(user_id)
             except asyncio.CancelledError:
                 raise
@@ -3504,6 +3538,22 @@ class ManualTradeRequest(BaseModel):
     custom_trail_trigger_pct: Optional[float] = None
     custom_stop_loss_price: Optional[float] = None
 
+class PendingOrderRequest(BaseModel):
+    coin: str
+    action: str  # LONG ou SHORT
+    size_usdc: float
+    leverage: int = 1
+    condition_type: str = "PRICE_BELOW"  # PRICE_ABOVE, PRICE_BELOW, RSI_ABOVE, RSI_BELOW, MACD_BULLISH, MACD_BEARISH
+    condition_value: Optional[float] = None  # requis pour PRICE_*/RSI_*, ignoré pour MACD_*
+    custom_max_loss_pct: Optional[float] = None
+    custom_qp_arm_low_usd: Optional[float] = None
+    custom_qp_floor_low_usd: Optional[float] = None
+    custom_qp_lock_trigger_usd: Optional[float] = None
+    custom_quick_profit_usd: Optional[float] = None
+    custom_trailing_gap_usd: Optional[float] = None
+    custom_trail_trigger_pct: Optional[float] = None
+    custom_stop_loss_price: Optional[float] = None
+
 class PaperCloseRequest(BaseModel):
     trade_id: int
     reason: str = "MANUEL"
@@ -3544,83 +3594,235 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-@app.post("/api/paper/manual-open")
-def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
-    """Prise de trade manuelle libre — coin/direction/taille/levier au choix, indépendante
-    de tout signal généré par le bot. Utilise le mode (paper/live) actuellement configuré.
-    Les seuils custom_* écrasent les réglages de compte pour CE trade uniquement (None = défaut)."""
-    if req.action not in ("LONG", "SHORT"):
-        raise HTTPException(status_code=400, detail="Action invalide (LONG ou SHORT)")
-    if req.size_usdc <= 0 or req.leverage <= 0:
-        raise HTTPException(status_code=400, detail="Taille et levier doivent être positifs")
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict):
+    """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
+    'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
+    remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
+    Retourne (message, fill_price) ou lève une exception avec le détail de l'échec."""
+    if action not in ("LONG", "SHORT"):
+        raise ValueError("Action invalide (LONG ou SHORT)")
+    if size_usdc <= 0 or leverage <= 0:
+        raise ValueError("Taille et levier doivent être positifs")
     conn = get_db()
     ensure_portfolio(user_id, conn)
     cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
 
     # Prix temps réel via WebSocket en priorité — la table 'prices' n'est mise à jour que
-    # toutes les 3 minutes par le scan et peut être significativement périmée, causant un
-    # écart artificiel dès l'ouverture (même bug déjà corrigé pour l'auto-exécution du bot).
-    if ws_connected and ws_prices and req.coin in ws_prices:
-        price = ws_prices[req.coin]
+    # toutes les 3 minutes par le scan et peut être significativement périmée.
+    if ws_connected and ws_prices and coin in ws_prices:
+        price = ws_prices[coin]
     else:
-        price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (req.coin,)).fetchone()
+        price_row = conn.execute("SELECT price FROM prices WHERE coin=?", (coin,)).fetchone()
         if not price_row:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"Prix non disponible pour {req.coin}")
+            raise ValueError(f"Prix non disponible pour {coin}")
         price = price_row["price"]
     now_iso = datetime.utcnow().isoformat()
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    c = {k: custom.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
+        "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
+        "custom_trail_trigger_pct","custom_stop_loss_price")}
 
     if trading_mode == "live":
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
         account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         if not account_address:
             conn.close()
-            raise HTTPException(status_code=400, detail="Aucune adresse wallet Hyperliquid configurée")
+            raise ValueError("Aucune adresse wallet Hyperliquid configurée")
         if not HL_SDK_AVAILABLE or not HL_AGENT_PRIVATE_KEY:
             conn.close()
-            raise HTTPException(status_code=400, detail="Mode live non configuré côté serveur (SDK/clé manquants)")
-        max_loss_for_sl = req.custom_max_loss_pct if req.custom_max_loss_pct is not None else 0.31
+            raise ValueError("Mode live non configuré côté serveur (SDK/clé manquants)")
+        max_loss_for_sl = c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31
         try:
-            coin_size, sl_oid, fill_price = hl_open_position(account_address, req.coin, req.action, req.size_usdc, req.leverage, price, max_loss_for_sl)
+            coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
         except Exception as e:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"Échec ouverture live: {e}")
+            raise ValueError(f"Échec ouverture live: {e}")
         conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
             size_usdc, leverage, opened_at, session_date, is_live, is_manual, hl_sl_oid, hl_size,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
             VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?)""",
-            (user_id, req.coin, req.action, fill_price, fill_price, req.size_usdc, req.leverage,
+            (user_id, coin, action, fill_price, fill_price, size_usdc, leverage,
              now_iso, today, sl_oid, coin_size,
-             req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
-             req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
-             req.custom_trail_trigger_pct, req.custom_stop_loss_price))
+             c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
+             c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
+             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
         conn.commit()
         conn.close()
-        add_bot_log(user_id, f"👤🔴 Trade MANUEL LIVE: {req.action} {req.coin} @ ${fill_price} | {req.size_usdc} USDC (x{req.leverage})", "success")
-        return {"message": f"Trade manuel LIVE {req.action} {req.coin} ouvert à ${fill_price}"}
+        add_bot_log(user_id, f"👤🔴 Trade MANUEL LIVE: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{leverage})", "success")
+        return f"Trade manuel LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
     portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-    if not portfolio or portfolio["balance"] < req.size_usdc:
+    if not portfolio or portfolio["balance"] < size_usdc:
         conn.close()
-        raise HTTPException(status_code=400, detail="Solde insuffisant")
+        raise ValueError("Solde insuffisant")
     conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
         size_usdc, leverage, opened_at, session_date, is_manual,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
         VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)""",
-        (user_id, req.coin, req.action, price, price, req.size_usdc, req.leverage,
+        (user_id, coin, action, price, price, size_usdc, leverage,
          now_iso, today,
+         c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
+         c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
+         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
+    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"👤 Trade MANUEL: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
+    return f"Trade manuel {action} {coin} ouvert à ${price}", price
+
+def _pending_order_custom_dict(order: dict) -> dict:
+    return {k: order.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
+        "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
+        "custom_trail_trigger_pct","custom_stop_loss_price")}
+
+def check_pending_price_orders(mids: dict, conn):
+    """Vérifie tous les ordres programmés à condition de PRIX (tous utilisateurs confondus),
+    à chaque tick WebSocket temps réel — indépendant de is_running (intention manuelle)."""
+    orders = conn.execute(
+        "SELECT * FROM pending_orders WHERE status='PENDING' AND condition_type IN ('PRICE_ABOVE','PRICE_BELOW')"
+    ).fetchall()
+    for o in orders:
+        order = dict(o)
+        coin = order["coin"]
+        if coin not in mids:
+            continue
+        cur = float(mids[coin])
+        triggered = (cur >= order["condition_value"]) if order["condition_type"] == "PRICE_ABOVE" else (cur <= order["condition_value"])
+        if not triggered:
+            continue
+        try:
+            message, _ = execute_manual_trade(order["user_id"], coin, order["action"], order["size_usdc"],
+                                                order["leverage"], _pending_order_custom_dict(order))
+            conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
+                         (datetime.utcnow().isoformat(), order["id"]))
+            conn.commit()
+            add_bot_log(order["user_id"], f"⏳✅ Ordre programmé déclenché: {message}", "success")
+        except ValueError as e:
+            # Échec d'exécution (ex: solde insuffisant) — on annule l'ordre plutôt que de
+            # retenter en boucle indéfiniment sur une condition qui restera probablement remplie
+            conn.execute("UPDATE pending_orders SET status='CANCELLED', executed_at=? WHERE id=?",
+                         (datetime.utcnow().isoformat(), order["id"]))
+            conn.commit()
+            add_bot_log(order["user_id"], f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
+
+def check_pending_indicator_orders(user_id: int):
+    """Vérifie les ordres programmés à condition d'INDICATEUR (RSI/MACD) pour un utilisateur,
+    à chaque cycle de scan (~3min, rythme naturel de rafraîchissement de ces indicateurs)."""
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT * FROM pending_orders WHERE user_id=? AND status='PENDING' AND condition_type IN ('RSI_ABOVE','RSI_BELOW','MACD_BULLISH','MACD_BEARISH')",
+        (user_id,)
+    ).fetchall()
+    for o in orders:
+        order = dict(o)
+        coin = order["coin"]
+        data = market_data_cache.get(coin)
+        if not data:
+            continue
+        ct = order["condition_type"]
+        triggered = False
+        if ct == "RSI_ABOVE" and data.get("rsi") is not None:
+            triggered = data["rsi"] >= order["condition_value"]
+        elif ct == "RSI_BELOW" and data.get("rsi") is not None:
+            triggered = data["rsi"] <= order["condition_value"]
+        elif ct == "MACD_BULLISH":
+            triggered = bool(data.get("macd_bull"))
+        elif ct == "MACD_BEARISH":
+            triggered = bool(data.get("macd_bear"))
+        if not triggered:
+            continue
+        try:
+            message, _ = execute_manual_trade(order["user_id"], coin, order["action"], order["size_usdc"],
+                                                order["leverage"], _pending_order_custom_dict(order))
+            conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
+                         (datetime.utcnow().isoformat(), order["id"]))
+            conn.commit()
+            add_bot_log(user_id, f"⏳✅ Ordre programmé déclenché: {message}", "success")
+        except ValueError as e:
+            conn.execute("UPDATE pending_orders SET status='CANCELLED', executed_at=? WHERE id=?",
+                         (datetime.utcnow().isoformat(), order["id"]))
+            conn.commit()
+            add_bot_log(user_id, f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
+    conn.close()
+
+@app.post("/api/paper/manual-open")
+def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
+    """Prise de trade manuelle libre — coin/direction/taille/levier au choix, indépendante
+    de tout signal généré par le bot. Utilise le mode (paper/live) actuellement configuré.
+    Les seuils custom_* écrasent les réglages de compte pour CE trade uniquement (None = défaut)."""
+    try:
+        message, _ = execute_manual_trade(user_id, req.coin, req.action, req.size_usdc, req.leverage, req.dict())
+        return {"message": message}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+VALID_CONDITION_TYPES = ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW", "MACD_BULLISH", "MACD_BEARISH")
+
+@app.post("/api/pending-orders")
+def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_current_user)):
+    """Crée un ordre programmé qui surveille un actif et ouvre automatiquement dès que la
+    condition est remplie (prix ou indicateur). Pas d'expiration — reste actif jusqu'à
+    déclenchement ou annulation manuelle. Si aucune valeur de condition n'est renseignée,
+    exécute immédiatement avec le prix actuel (pas de mise en attente)."""
+    if req.action not in ("LONG", "SHORT"):
+        raise HTTPException(status_code=400, detail="Action invalide (LONG ou SHORT)")
+    if req.condition_type not in VALID_CONDITION_TYPES:
+        raise HTTPException(status_code=400, detail=f"Type de condition invalide (choix: {', '.join(VALID_CONDITION_TYPES)})")
+    needs_value = req.condition_type in ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW")
+
+    # Pas de donnée de condition renseignée -> exécution immédiate avec le prix seul
+    if needs_value and req.condition_value is None:
+        try:
+            message, _ = execute_manual_trade(user_id, req.coin, req.action, req.size_usdc, req.leverage, req.dict())
+            return {"message": message, "executed_immediately": True}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    conn = get_db()
+    now_iso = datetime.utcnow().isoformat()
+    cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
+    conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
+        condition_type, condition_value, status, created_at, trading_mode,
+        custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
+        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
+        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
+        (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
+         req.condition_type, req.condition_value, now_iso, trading_mode,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price))
-    conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (req.size_usdc, user_id))
     conn.commit()
     conn.close()
-    add_bot_log(user_id, f"👤 Trade MANUEL: {req.action} {req.coin} @ ${price} | {req.size_usdc} USDC (x{req.leverage})", "success")
-    return {"message": f"Trade manuel {req.action} {req.coin} ouvert à ${price}"}
+    add_bot_log(user_id, f"⏳ Ordre programmé créé: {req.action} {req.coin} dès que {req.condition_type} {req.condition_value}", "info")
+    return {"message": f"Ordre programmé créé — {req.action} {req.coin} dès que {req.condition_type} {req.condition_value}", "executed_immediately": False}
+
+@app.get("/api/pending-orders")
+def list_pending_orders(user_id: int = Depends(get_current_user)):
+    """Liste les ordres programmés (en attente + historique récent des 20 derniers déclenchés/annulés)."""
+    conn = get_db()
+    pending = conn.execute("SELECT * FROM pending_orders WHERE user_id=? AND status='PENDING' ORDER BY created_at DESC", (user_id,)).fetchall()
+    history = conn.execute("SELECT * FROM pending_orders WHERE user_id=? AND status!='PENDING' ORDER BY id DESC LIMIT 20", (user_id,)).fetchall()
+    conn.close()
+    return {"pending": [dict(r) for r in pending], "history": [dict(r) for r in history]}
+
+@app.delete("/api/pending-orders/{order_id}")
+def cancel_pending_order(order_id: int, user_id: int = Depends(get_current_user)):
+    """Annule un ordre programmé encore en attente."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM pending_orders WHERE id=? AND user_id=? AND status='PENDING'", (order_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Ordre introuvable ou déjà traité")
+    conn.execute("UPDATE pending_orders SET status='CANCELLED' WHERE id=?", (order_id,))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🗑️ Ordre programmé #{order_id} annulé", "info")
+    return {"message": "Ordre annulé"}
 
 @app.post("/api/paper/trade")
 def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_user)):
