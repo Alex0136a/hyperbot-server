@@ -1616,7 +1616,7 @@ Confirmer ?`
                       value={conditionValue} onChange={e=>setConditionValue(e.target.value)}
                       style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
                   )}
-                  <div style={{fontSize:9,color:"#475569",marginTop:6}}>Aucune valeur renseignée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation.</div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:6}}>Aucune valeur renseignée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation. En paper, l'entrée se fait exactement au prix programmé (pas d'ambiguïté) ; en live, le prix réel de l'exchange fait foi.</div>
                 </div>
               )}
             </div>
