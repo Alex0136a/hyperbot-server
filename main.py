@@ -2860,7 +2860,6 @@ async def run_bot_loop(user_id: int):
                 await scan_markets(user_id)
                 check_and_log_penalizing_coins(user_id)
                 check_recovering_sanctioned_coins(user_id)
-                check_pending_indicator_orders(user_id)
                 cleanup_old_data(user_id)
             except asyncio.CancelledError:
                 raise
@@ -2888,6 +2887,9 @@ async def lifespan(app: FastAPI):
     # Démarrer WebSocket Hyperliquid automatiquement au démarrage du serveur
     asyncio.create_task(connect_hyperliquid_ws())
     print("🔌 WebSocket Hyperliquid démarré automatiquement")
+    # Boucle des ordres programmés — indépendante de is_running, tourne toujours
+    asyncio.create_task(pending_orders_loop())
+    print("⏳ Boucle des ordres programmés démarrée (indépendante de l'état du bot)")
     yield
 
 app = FastAPI(title="HyperBot AI", lifespan=lifespan)
@@ -3594,10 +3596,13 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict):
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None):
     """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
     'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
     remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
+    `override_paper_price` : si fourni, force le prix d'entrée EN PAPER au prix programmé
+    exact (pour lever toute ambiguïté sur une condition de prix) — impossible en LIVE, où
+    le prix de fill réel de l'exchange fait foi (comptabilité PnL doit refléter la réalité).
     Retourne (message, fill_price) ou lève une exception avec le détail de l'échec."""
     if action not in ("LONG", "SHORT"):
         raise ValueError("Action invalide (LONG ou SHORT)")
@@ -3618,6 +3623,8 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             conn.close()
             raise ValueError(f"Prix non disponible pour {coin}")
         price = price_row["price"]
+    if override_paper_price is not None and trading_mode != "live":
+        price = override_paper_price
     now_iso = datetime.utcnow().isoformat()
     today = datetime.utcnow().strftime("%Y-%m-%d")
     c = {k: custom.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
@@ -3696,7 +3703,8 @@ def check_pending_price_orders(mids: dict, conn):
             continue
         try:
             message, _ = execute_manual_trade(order["user_id"], coin, order["action"], order["size_usdc"],
-                                                order["leverage"], _pending_order_custom_dict(order))
+                                                order["leverage"], _pending_order_custom_dict(order),
+                                                override_paper_price=order["condition_value"])
             conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
                          (datetime.utcnow().isoformat(), order["id"]))
             conn.commit()
@@ -3748,6 +3756,27 @@ def check_pending_indicator_orders(user_id: int):
             conn.commit()
             add_bot_log(user_id, f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
     conn.close()
+
+async def pending_orders_loop():
+    """Boucle dédiée aux ordres programmés — totalement INDÉPENDANTE de l'état du bot
+    (is_running). Tourne en permanence dès le démarrage du serveur, même si l'auto-trading
+    est arrêté pour tous les utilisateurs. Important en mode live : un ordre programmé doit
+    pouvoir se déclencher même si vous avez appuyé sur ARRÊTER."""
+    while True:
+        try:
+            conn = get_db()
+            if ws_connected and ws_prices:
+                check_pending_price_orders(ws_prices, conn)
+            users_with_indicator_orders = conn.execute(
+                "SELECT DISTINCT user_id FROM pending_orders WHERE status='PENDING' "
+                "AND condition_type IN ('RSI_ABOVE','RSI_BELOW','MACD_BULLISH','MACD_BEARISH')"
+            ).fetchall()
+            conn.close()
+            for row in users_with_indicator_orders:
+                check_pending_indicator_orders(row["user_id"])
+        except Exception as e:
+            print(f"⚠️ pending_orders_loop error: {e}")
+        await asyncio.sleep(10)
 
 @app.post("/api/paper/manual-open")
 def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
