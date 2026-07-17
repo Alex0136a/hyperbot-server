@@ -493,8 +493,7 @@ def init_db():
             action TEXT NOT NULL,
             size_usdc REAL NOT NULL,
             leverage INTEGER NOT NULL,
-            condition_type TEXT NOT NULL,
-            condition_value REAL,
+            conditions TEXT NOT NULL,
             status TEXT DEFAULT 'PENDING',
             created_at TEXT,
             executed_at TEXT,
@@ -508,6 +507,12 @@ def init_db():
             custom_trail_trigger_pct REAL,
             custom_stop_loss_price REAL
         )""")
+        conn.commit()
+    except: pass
+    try:
+        # Migration : anciens ordres avec condition_type/condition_value uniques ->
+        # colonne conditions (liste JSON, permet de combiner plusieurs conditions en ET)
+        conn.execute("ALTER TABLE pending_orders ADD COLUMN conditions TEXT")
         conn.commit()
     except: pass
     try:
@@ -2607,7 +2612,7 @@ async def connect_hyperliquid_ws():
                             # Ordres programmés à condition de PRIX — vérifiés à chaque tick temps
                             # réel (pas seulement au cycle de scan ~3min), indépendamment de
                             # is_running (une intention manuelle de l'utilisateur, pas de l'auto-trading)
-                            check_pending_price_orders(mids, conn)
+                            check_and_execute_pending_orders(mids, conn)
                         except Exception as e:
                             print(f"WS trades error: {e}")
                         finally:
@@ -3540,13 +3545,16 @@ class ManualTradeRequest(BaseModel):
     custom_trail_trigger_pct: Optional[float] = None
     custom_stop_loss_price: Optional[float] = None
 
+class OrderCondition(BaseModel):
+    type: str  # PRICE_ABOVE, PRICE_BELOW, RSI_ABOVE, RSI_BELOW, MACD_BULLISH, MACD_BEARISH
+    value: Optional[float] = None  # requis pour PRICE_*/RSI_*, ignoré pour MACD_*
+
 class PendingOrderRequest(BaseModel):
     coin: str
     action: str  # LONG ou SHORT
     size_usdc: float
     leverage: int = 1
-    condition_type: str = "PRICE_BELOW"  # PRICE_ABOVE, PRICE_BELOW, RSI_ABOVE, RSI_BELOW, MACD_BULLISH, MACD_BEARISH
-    condition_value: Optional[float] = None  # requis pour PRICE_*/RSI_*, ignoré pour MACD_*
+    conditions: List[OrderCondition] = []  # combinées en ET — toutes doivent être remplies
     custom_max_loss_pct: Optional[float] = None
     custom_qp_arm_low_usd: Optional[float] = None
     custom_qp_floor_low_usd: Optional[float] = None
@@ -3686,76 +3694,68 @@ def _pending_order_custom_dict(order: dict) -> dict:
         "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
         "custom_trail_trigger_pct","custom_stop_loss_price")}
 
-def check_pending_price_orders(mids: dict, conn):
-    """Vérifie tous les ordres programmés à condition de PRIX (tous utilisateurs confondus),
-    à chaque tick WebSocket temps réel — indépendant de is_running (intention manuelle)."""
-    orders = conn.execute(
-        "SELECT * FROM pending_orders WHERE status='PENDING' AND condition_type IN ('PRICE_ABOVE','PRICE_BELOW')"
-    ).fetchall()
+def _evaluate_condition(cond: dict, coin: str, mids: dict) -> bool:
+    """Évalue UNE condition individuelle. Retourne None si la donnée nécessaire n'est pas
+    encore disponible (pas encore déclenché, pas une erreur — juste 'pas encore su')."""
+    ctype = cond.get("type")
+    value = cond.get("value")
+    if ctype in ("PRICE_ABOVE", "PRICE_BELOW"):
+        if coin not in mids:
+            return None
+        cur = float(mids[coin])
+        return cur >= value if ctype == "PRICE_ABOVE" else cur <= value
+    data = market_data_cache.get(coin)
+    if not data:
+        return None
+    if ctype == "RSI_ABOVE":
+        return data["rsi"] >= value if data.get("rsi") is not None else None
+    if ctype == "RSI_BELOW":
+        return data["rsi"] <= value if data.get("rsi") is not None else None
+    if ctype == "MACD_BULLISH":
+        return bool(data.get("macd_bull"))
+    if ctype == "MACD_BEARISH":
+        return bool(data.get("macd_bear"))
+    return None
+
+def check_and_execute_pending_orders(mids: dict, conn):
+    """Vérifie TOUS les ordres programmés (tous utilisateurs, tous types de condition
+    confondus) et déclenche l'ouverture dès que TOUTES les conditions d'un ordre sont
+    remplies simultanément (ET logique — permet de combiner prix + RSI + MACD ensemble).
+    Appelée à la fois à chaque tick WebSocket (réactivité sur le prix) et depuis la boucle
+    dédiée toutes les 10s (couvre aussi RSI/MACD, qui ne changent qu'au rythme du scan)."""
+    orders = conn.execute("SELECT * FROM pending_orders WHERE status='PENDING'").fetchall()
     for o in orders:
         order = dict(o)
         coin = order["coin"]
-        if coin not in mids:
+        try:
+            conditions = json.loads(order["conditions"]) if order.get("conditions") else []
+        except (json.JSONDecodeError, TypeError):
+            conditions = []
+        if not conditions:
             continue
-        cur = float(mids[coin])
-        triggered = (cur >= order["condition_value"]) if order["condition_type"] == "PRICE_ABOVE" else (cur <= order["condition_value"])
-        if not triggered:
-            continue
+        results = [_evaluate_condition(c, coin, mids) for c in conditions]
+        if any(r is None for r in results) or not all(results):
+            continue  # au moins une condition pas encore remplie (ou donnée pas dispo) -> on attend
+
+        # Prix programmé pour lever l'ambiguïté en paper : celui de la 1ère condition de
+        # type prix trouvée dans la liste, sinon prix courant
+        price_conditions = [c for c in conditions if c.get("type") in ("PRICE_ABOVE", "PRICE_BELOW")]
+        override_price = price_conditions[0]["value"] if price_conditions else None
         try:
             message, _ = execute_manual_trade(order["user_id"], coin, order["action"], order["size_usdc"],
                                                 order["leverage"], _pending_order_custom_dict(order),
-                                                override_paper_price=order["condition_value"])
+                                                override_paper_price=override_price)
             conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
                          (datetime.utcnow().isoformat(), order["id"]))
             conn.commit()
             add_bot_log(order["user_id"], f"⏳✅ Ordre programmé déclenché: {message}", "success")
         except ValueError as e:
             # Échec d'exécution (ex: solde insuffisant) — on annule l'ordre plutôt que de
-            # retenter en boucle indéfiniment sur une condition qui restera probablement remplie
+            # retenter en boucle indéfiniment sur des conditions qui resteront probablement remplies
             conn.execute("UPDATE pending_orders SET status='CANCELLED', executed_at=? WHERE id=?",
                          (datetime.utcnow().isoformat(), order["id"]))
             conn.commit()
             add_bot_log(order["user_id"], f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
-
-def check_pending_indicator_orders(user_id: int):
-    """Vérifie les ordres programmés à condition d'INDICATEUR (RSI/MACD) pour un utilisateur,
-    à chaque cycle de scan (~3min, rythme naturel de rafraîchissement de ces indicateurs)."""
-    conn = get_db()
-    orders = conn.execute(
-        "SELECT * FROM pending_orders WHERE user_id=? AND status='PENDING' AND condition_type IN ('RSI_ABOVE','RSI_BELOW','MACD_BULLISH','MACD_BEARISH')",
-        (user_id,)
-    ).fetchall()
-    for o in orders:
-        order = dict(o)
-        coin = order["coin"]
-        data = market_data_cache.get(coin)
-        if not data:
-            continue
-        ct = order["condition_type"]
-        triggered = False
-        if ct == "RSI_ABOVE" and data.get("rsi") is not None:
-            triggered = data["rsi"] >= order["condition_value"]
-        elif ct == "RSI_BELOW" and data.get("rsi") is not None:
-            triggered = data["rsi"] <= order["condition_value"]
-        elif ct == "MACD_BULLISH":
-            triggered = bool(data.get("macd_bull"))
-        elif ct == "MACD_BEARISH":
-            triggered = bool(data.get("macd_bear"))
-        if not triggered:
-            continue
-        try:
-            message, _ = execute_manual_trade(order["user_id"], coin, order["action"], order["size_usdc"],
-                                                order["leverage"], _pending_order_custom_dict(order))
-            conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
-                         (datetime.utcnow().isoformat(), order["id"]))
-            conn.commit()
-            add_bot_log(user_id, f"⏳✅ Ordre programmé déclenché: {message}", "success")
-        except ValueError as e:
-            conn.execute("UPDATE pending_orders SET status='CANCELLED', executed_at=? WHERE id=?",
-                         (datetime.utcnow().isoformat(), order["id"]))
-            conn.commit()
-            add_bot_log(user_id, f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
-    conn.close()
 
 async def pending_orders_loop():
     """Boucle dédiée aux ordres programmés — totalement INDÉPENDANTE de l'état du bot
@@ -3766,14 +3766,8 @@ async def pending_orders_loop():
         try:
             conn = get_db()
             if ws_connected and ws_prices:
-                check_pending_price_orders(ws_prices, conn)
-            users_with_indicator_orders = conn.execute(
-                "SELECT DISTINCT user_id FROM pending_orders WHERE status='PENDING' "
-                "AND condition_type IN ('RSI_ABOVE','RSI_BELOW','MACD_BULLISH','MACD_BEARISH')"
-            ).fetchall()
+                check_and_execute_pending_orders(ws_prices, conn)
             conn.close()
-            for row in users_with_indicator_orders:
-                check_pending_indicator_orders(row["user_id"])
         except Exception as e:
             print(f"⚠️ pending_orders_loop error: {e}")
         await asyncio.sleep(10)
@@ -3793,18 +3787,20 @@ VALID_CONDITION_TYPES = ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW",
 
 @app.post("/api/pending-orders")
 def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_current_user)):
-    """Crée un ordre programmé qui surveille un actif et ouvre automatiquement dès que la
-    condition est remplie (prix ou indicateur). Pas d'expiration — reste actif jusqu'à
-    déclenchement ou annulation manuelle. Si aucune valeur de condition n'est renseignée,
-    exécute immédiatement avec le prix actuel (pas de mise en attente)."""
+    """Crée un ordre programmé qui surveille un actif et ouvre automatiquement dès que
+    TOUTES les conditions choisies sont remplies simultanément (combinables : prix + RSI +
+    MACD, ou un seul type — au choix). Pas d'expiration — reste actif jusqu'à déclenchement
+    ou annulation manuelle. Aucune condition renseignée -> exécution immédiate au prix actuel."""
     if req.action not in ("LONG", "SHORT"):
         raise HTTPException(status_code=400, detail="Action invalide (LONG ou SHORT)")
-    if req.condition_type not in VALID_CONDITION_TYPES:
-        raise HTTPException(status_code=400, detail=f"Type de condition invalide (choix: {', '.join(VALID_CONDITION_TYPES)})")
-    needs_value = req.condition_type in ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW")
+    for c in req.conditions:
+        if c.type not in VALID_CONDITION_TYPES:
+            raise HTTPException(status_code=400, detail=f"Type de condition invalide '{c.type}' (choix: {', '.join(VALID_CONDITION_TYPES)})")
+        if c.type in ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW") and c.value is None:
+            raise HTTPException(status_code=400, detail=f"Valeur requise pour la condition {c.type}")
 
-    # Pas de donnée de condition renseignée -> exécution immédiate avec le prix seul
-    if needs_value and req.condition_value is None:
+    # Aucune condition renseignée -> exécution immédiate avec le prix seul
+    if not req.conditions:
         try:
             message, _ = execute_manual_trade(user_id, req.coin, req.action, req.size_usdc, req.leverage, req.dict())
             return {"message": message, "executed_immediately": True}
@@ -3815,20 +3811,22 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
     now_iso = datetime.utcnow().isoformat()
     cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
+    conditions_json = json.dumps([c.dict() for c in req.conditions])
     conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
-        condition_type, condition_value, status, created_at, trading_mode,
+        conditions, status, created_at, trading_mode,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
         (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
-         req.condition_type, req.condition_value, now_iso, trading_mode,
+         conditions_json, now_iso, trading_mode,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price))
     conn.commit()
     conn.close()
-    add_bot_log(user_id, f"⏳ Ordre programmé créé: {req.action} {req.coin} dès que {req.condition_type} {req.condition_value}", "info")
-    return {"message": f"Ordre programmé créé — {req.action} {req.coin} dès que {req.condition_type} {req.condition_value}", "executed_immediately": False}
+    conds_str = " ET ".join(f"{c.type} {c.value if c.value is not None else ''}" for c in req.conditions)
+    add_bot_log(user_id, f"⏳ Ordre programmé créé: {req.action} {req.coin} dès que [{conds_str}]", "info")
+    return {"message": f"Ordre programmé créé — {req.action} {req.coin} dès que [{conds_str}]", "executed_immediately": False}
 
 @app.get("/api/pending-orders")
 def list_pending_orders(user_id: int = Depends(get_current_user)):
@@ -3837,7 +3835,14 @@ def list_pending_orders(user_id: int = Depends(get_current_user)):
     pending = conn.execute("SELECT * FROM pending_orders WHERE user_id=? AND status='PENDING' ORDER BY created_at DESC", (user_id,)).fetchall()
     history = conn.execute("SELECT * FROM pending_orders WHERE user_id=? AND status!='PENDING' ORDER BY id DESC LIMIT 20", (user_id,)).fetchall()
     conn.close()
-    return {"pending": [dict(r) for r in pending], "history": [dict(r) for r in history]}
+    def parse(r):
+        d = dict(r)
+        try:
+            d["conditions"] = json.loads(d["conditions"]) if d.get("conditions") else []
+        except (json.JSONDecodeError, TypeError):
+            d["conditions"] = []
+        return d
+    return {"pending": [parse(r) for r in pending], "history": [parse(r) for r in history]}
 
 @app.delete("/api/pending-orders/{order_id}")
 def cancel_pending_order(order_id: int, user_id: int = Depends(get_current_user)):
