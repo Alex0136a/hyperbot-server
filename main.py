@@ -3858,6 +3858,60 @@ def cancel_pending_order(order_id: int, user_id: int = Depends(get_current_user)
     add_bot_log(user_id, f"🗑️ Ordre programmé #{order_id} annulé", "info")
     return {"message": "Ordre annulé"}
 
+@app.put("/api/pending-orders/{order_id}")
+def update_pending_order(order_id: int, req: PendingOrderRequest, user_id: int = Depends(get_current_user)):
+    """Modifie un ordre programmé encore en attente — coin, direction, taille, levier,
+    conditions et surcharges SL/QP/TTP peuvent tous être changés avant déclenchement."""
+    if req.action not in ("LONG", "SHORT"):
+        raise HTTPException(status_code=400, detail="Action invalide (LONG ou SHORT)")
+    for c in req.conditions:
+        if c.type not in VALID_CONDITION_TYPES:
+            raise HTTPException(status_code=400, detail=f"Type de condition invalide '{c.type}' (choix: {', '.join(VALID_CONDITION_TYPES)})")
+        if c.type in ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW") and c.value is None:
+            raise HTTPException(status_code=400, detail=f"Valeur requise pour la condition {c.type}")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM pending_orders WHERE id=? AND user_id=? AND status='PENDING'", (order_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Ordre introuvable ou déjà traité")
+    conditions_json = json.dumps([c.dict() for c in req.conditions])
+    conn.execute("""UPDATE pending_orders SET coin=?, action=?, size_usdc=?, leverage=?, conditions=?,
+        custom_max_loss_pct=?, custom_qp_arm_low_usd=?, custom_qp_floor_low_usd=?, custom_qp_lock_trigger_usd=?,
+        custom_quick_profit_usd=?, custom_trailing_gap_usd=?, custom_trail_trigger_pct=?, custom_stop_loss_price=?
+        WHERE id=?""",
+        (req.coin.upper(), req.action, req.size_usdc, req.leverage, conditions_json,
+         req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
+         req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
+         req.custom_trail_trigger_pct, req.custom_stop_loss_price, order_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"✏️ Ordre programmé #{order_id} modifié", "info")
+    return {"message": "Ordre programmé modifié"}
+
+@app.post("/api/pending-orders/{order_id}/execute-now")
+def execute_pending_order_now(order_id: int, user_id: int = Depends(get_current_user)):
+    """Force l'exécution immédiate d'un ordre programmé, sans attendre que ses conditions
+    soient remplies — utile si vous changez d'avis et voulez entrer tout de suite."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM pending_orders WHERE id=? AND user_id=? AND status='PENDING'", (order_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Ordre introuvable ou déjà traité")
+    order = dict(row)
+    conn.close()
+    try:
+        message, _ = execute_manual_trade(order["user_id"], order["coin"], order["action"], order["size_usdc"],
+                                            order["leverage"], _pending_order_custom_dict(order))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    conn = get_db()
+    conn.execute("UPDATE pending_orders SET status='EXECUTED', executed_at=? WHERE id=?",
+                 (datetime.utcnow().isoformat(), order_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"⚡ Ordre programmé #{order_id} exécuté manuellement avant condition: {message}", "success")
+    return {"message": message}
+
 @app.post("/api/paper/trade")
 def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_user)):
     conn = get_db()
