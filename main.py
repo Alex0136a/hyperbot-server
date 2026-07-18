@@ -142,6 +142,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_widen_max_mult REAL DEFAULT 3.0")
+        conn.commit()
+    except: pass
+    try:
         # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
         # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
         conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
@@ -1351,7 +1355,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
-        trailing_gap_pct, trailing_gap_usd FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+        trailing_gap_pct, trailing_gap_usd, trailing_widen_max_mult FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
 
     def pick(custom_key, cfg_key, fallback):
         """Surcharge par trade (prise manuelle) si définie, sinon réglage de compte, sinon défaut codé."""
@@ -1401,6 +1405,15 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     if price_move_pct > peak_pct:
         peak_pct = price_move_pct
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
+
+    # Trailing PROGRESSIF : plus le pic dépasse le seuil d'activation, plus la tendance
+    # semble soutenue — l'écart s'élargit proportionnellement (plafonné) pour laisser
+    # courir les vrais trends au lieu de couper trop tôt sur un simple repli normal.
+    # Ex: pic à 2x le seuil d'activation -> écart x2 (jusqu'au plafond configuré).
+    trail_widen_max_mult = float(cfg_qp["trailing_widen_max_mult"]) if cfg_qp and "trailing_widen_max_mult" in cfg_qp.keys() and cfg_qp["trailing_widen_max_mult"] else 3.0
+    if peak_pct > trail_trigger_pct and trail_trigger_pct > 0:
+        widen_mult = min(trail_widen_max_mult, 1 + (peak_pct - trail_trigger_pct) / trail_trigger_pct)
+        trail_gap_pct = trail_gap_pct * widen_mult
 
     close_reason = None
     close_stop_level_pct = None
@@ -1475,7 +1488,92 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     conn.commit()
     return {"pnl": pnl, "close_reason": close_reason}
 
-async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn):
+async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
+    """Ré-entrée rapide après une sortie profitable (TRAILING_PROFIT/QP_FLOOR) — si la
+    tendance qui vient de faire gagner le trade semble toujours valide immédiatement après
+    la clôture, réouvre sans attendre le prochain cycle de scan complet (jusqu'à 3 min).
+    Uniquement pour les trades du bot (pas manuels), et uniquement en PAPER par prudence
+    (le live garde le rythme normal du scan, avec plus de supervision)."""
+    coin = closed_trade["coin"]
+    action = closed_trade["action"]
+    try:
+        cfg = conn.execute("SELECT * FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        if not cfg or not cfg["is_running"]:
+            return
+        trading_mode = cfg["trading_mode"] if "trading_mode" in cfg.keys() else "paper"
+        if trading_mode == "live":
+            return
+        already_open = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)
+        ).fetchone()[0]
+        if already_open > 0:
+            return
+
+        async with httpx.AsyncClient() as client:
+            candles_raw = await fetch_candles(client, coin)
+            all_prices = await fetch_all_metas(client)
+        if not candles_raw or len(candles_raw) < 50 or coin not in all_prices:
+            return
+        price = all_prices[coin]
+        candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
+        closes = [cd["c"] for cd in candles]
+        vols = [cd["v"] for cd in candles]
+        e20, e50, e200 = calc_ema(closes,20), calc_ema(closes,50), calc_ema(closes,200)
+        macd = calc_macd(closes,12,26,9)
+        bb = calc_bb(closes,20,2)
+        atr = calc_atr(candles,14)
+        vwap = calc_vwap(candles)
+        rsi = calc_rsi(closes,14)
+        vol_avg = sum(vols[-20:])/20
+        tech = {
+            "rsi": round(rsi,2) if rsi else None,
+            "macd_bull": macd["crossBull"] if macd else False,
+            "macd_bear": macd["crossBear"] if macd else False,
+            "ema20": round(e20[-1],4) if e20 else None,
+            "ema50": round(e50[-1],4) if e50 else None,
+            "ema200": round(e200[-1],4) if e200 else None,
+            "bb_upper": round(bb["upper"],4) if bb else None,
+            "bb_lower": round(bb["lower"],4) if bb else None,
+            "atr": round(atr,4) if atr else None,
+            "vwap": round(vwap,4) if vwap else None,
+            "volume_trend": "SPIKE" if vols[-1]>vol_avg*1.5 else "ABOVE_AVG" if vols[-1]>vol_avg else "BELOW_AVG",
+        }
+        # Signal frais basé sur les règles (rapide, pas d'appel IA payant pour une ré-entrée)
+        sig = analyze_with_rules(coin, tech, price)
+        if sig["action"] != action:
+            return  # la tendance ne tient plus dans le même sens -> pas de ré-entrée
+        required_conf = get_required_confidence(user_id, coin, action)
+        if sig["confidence"] < required_conf:
+            return
+
+        max_same_dir = cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() else 2
+        same_dir_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, action)
+        ).fetchone()[0]
+        if max_same_dir and same_dir_count >= max_same_dir:
+            add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond direction atteint ({same_dir_count}/{max_same_dir})", "info")
+            return
+
+        max_trades = cfg["max_open_trades"] if "max_open_trades" in cfg.keys() and cfg["max_open_trades"] else 5
+        portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+        capital = portfolio["balance"] if portfolio else 1000.0
+        size = round(capital / max_trades, 2)
+        if not portfolio or portfolio["balance"] < size:
+            return
+
+        now_iso = datetime.utcnow().isoformat()
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
+            size_usdc, leverage, opened_at, session_date)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (user_id, coin, action, price, price, size, 2, now_iso, today))
+        conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
+        conn.commit()
+        add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide {action} @ ${price} — tendance toujours valide après sortie profitable (confiance {sig['confidence']}%)", "success")
+    except Exception as e:
+        print(f"⚠️ try_rapid_reentry error: {e}")
+
+async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, close_reason: str = None):
     """Bookkeeping post-fermeture (confiance dynamique + stats de session temps réel).
     À appeler après un manage_open_trade qui a retourné un résultat non-None.
     Les trades MANUELS n'alimentent PAS la confiance/pause automatique du bot — une perte
@@ -1508,6 +1606,10 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn):
             conn.commit()
     except Exception:
         pass
+    # Ré-entrée rapide : uniquement après une sortie PROFITABLE du bot (pas manuelle,
+    # pas après un Max Loss/SL — on ne "poursuit" pas une position qui vient de perdre)
+    if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR"):
+        await try_rapid_reentry(user_id, trade, conn)
 
 async def scan_markets(user_id: int):
     conn = get_db()
@@ -2036,7 +2138,7 @@ async def scan_markets(user_id: int):
                 # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
                 result = manage_open_trade(user_id, trade_dict, cur, conn)
                 if result:
-                    await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn)
+                    await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn, result.get("close_reason"))
             conn.commit()
             conn.close()
 
@@ -2302,7 +2404,7 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     try:
         result = manage_open_trade(user_id, trade, cur, conn)
         if result:
-            await finalize_closed_trade(user_id, trade, result["pnl"], conn)
+            await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
             return True
         return False
     except Exception as e:
@@ -2825,7 +2927,7 @@ async def update_open_positions(user_id: int):
             continue
         result = manage_open_trade(user_id, trade, cur, conn)
         if result:
-            await finalize_closed_trade(user_id, trade, result["pnl"], conn)
+            await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
     conn.commit()
     conn.close()
 
@@ -3024,6 +3126,7 @@ class UpdateConfigRequest(BaseModel):
     max_same_direction_trend: Optional[int] = None
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
+    trailing_widen_max_mult: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
@@ -3164,6 +3267,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "max_same_direction_trend": config["max_same_direction_trend"] if "max_same_direction_trend" in config.keys() and config["max_same_direction_trend"] else 3,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 1.0,
+        "trailing_widen_max_mult": config["trailing_widen_max_mult"] if "trailing_widen_max_mult" in config.keys() and config["trailing_widen_max_mult"] else 3.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
@@ -3252,6 +3356,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
     if req.trailing_gap_usd is not None:
         conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
+    if req.trailing_widen_max_mult is not None:
+        conn.execute("UPDATE bot_config SET trailing_widen_max_mult=? WHERE user_id=?", (req.trailing_widen_max_mult, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.qp_arm_low_usd is not None:
