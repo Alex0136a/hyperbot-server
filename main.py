@@ -523,6 +523,10 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE pending_orders ADD COLUMN invalidation_price REAL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
             user_id INTEGER,
             coin TEXT,
@@ -809,6 +813,60 @@ def calc_vwap(candles):
         tv += tp * c["v"]
         v += c["v"]
     return tv/v if v else None
+
+def detect_support_resistance(candles: list, lookback: int = 50, tolerance_pct: float = 0.5, min_touches: int = 2):
+    """Détecte les niveaux de support/résistance à partir des swings locaux (hauts/bas locaux
+    confirmés par les bougies voisines), en regroupant les niveaux proches (tolérance %) et en
+    ne gardant que ceux touchés au moins `min_touches` fois — plus il y a de touches, plus le
+    niveau est considéré fiable. Retourne (support, resistance) sous le/au-dessus du prix
+    actuel, ou (None, None) si pas assez de données ou de niveaux confirmés."""
+    if len(candles) < lookback:
+        return None, None
+    recent = candles[-lookback:]
+    highs = [c["h"] for c in recent]
+    lows = [c["l"] for c in recent]
+    window = 3  # bougies de chaque côté pour confirmer un swing local
+    swing_highs, swing_lows = [], []
+    for i in range(window, len(recent) - window):
+        if highs[i] == max(highs[i-window:i+window+1]):
+            swing_highs.append(highs[i])
+        if lows[i] == min(lows[i-window:i+window+1]):
+            swing_lows.append(lows[i])
+
+    def cluster_levels(levels):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        clusters, current = [], [levels[0]]
+        for lvl in levels[1:]:
+            if abs(lvl - current[-1]) / current[-1] * 100 <= tolerance_pct:
+                current.append(lvl)
+            else:
+                clusters.append(current)
+                current = [lvl]
+        clusters.append(current)
+        return [sum(c)/len(c) for c in clusters if len(c) >= min_touches]
+
+    resistance_levels = cluster_levels(swing_highs)
+    support_levels = cluster_levels(swing_lows)
+    cur_price = recent[-1]["c"]
+    supports_below = [s for s in support_levels if s < cur_price]
+    resistances_above = [r for r in resistance_levels if r > cur_price]
+    support = max(supports_below) if supports_below else None
+    resistance = min(resistances_above) if resistances_above else None
+    return support, resistance
+
+def detect_range_market(candles: list, support: float, resistance: float, max_channel_pct: float = 15.0) -> bool:
+    """Détermine si le marché est en range (oscillation entre niveaux) plutôt qu'en tendance
+    forte — nécessite un support ET une résistance confirmés, le prix actuel entre les deux,
+    et un canal pas trop large (au-delà, ça ressemble plus à une tendance qu'à un vrai range)."""
+    if not support or not resistance or not candles:
+        return False
+    cur_price = candles[-1]["c"]
+    if not (support < cur_price < resistance):
+        return False
+    channel_width_pct = (resistance - support) / support * 100
+    return channel_width_pct <= max_channel_pct
 
 # ── HYPERLIQUID API ──────────────────────────────────────────
 HL_BASE = "https://api.hyperliquid.xyz"
@@ -1635,6 +1693,19 @@ async def scan_markets(user_id: int):
             vols = [cd["v"] for cd in candles]
             coin_recent_closes[coin] = closes[-CORRELATION_LOOKBACK:]  # cache pour anti-corrélation, avant tout 'continue'
 
+            # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
+            # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion) —
+            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS
+            support, resistance = detect_support_resistance(candles)
+            if detect_range_market(candles, support, resistance):
+                last_sugg = range_suggestion_cache.get(coin)
+                if not last_sugg or (datetime.utcnow() - last_sugg).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
+                    range_suggestion_cache[coin] = datetime.utcnow()
+                    add_bot_log(user_id,
+                        f"📊 {coin}: marché en RANGE détecté — support ~${support:.4g} (LONG envisageable) / "
+                        f"résistance ~${resistance:.4g} (SHORT envisageable) — suggestion, pas d'ordre créé automatiquement",
+                        "info")
+
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
             e200 = calc_ema(closes, 200)
@@ -2221,6 +2292,8 @@ ws_connected = False
 
 # Cache des données de marché structurées (indicateurs pré-calculés)
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
+range_suggestion_cache = {}  # coin -> datetime de la dernière suggestion journalisée (limite le bruit)
+RANGE_SUGGESTION_COOLDOWN_HOURS = 4  # ne resignale pas le même coin avant ce délai
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket.
@@ -3573,6 +3646,7 @@ class PendingOrderRequest(BaseModel):
     size_usdc: float
     leverage: int = 1
     conditions: List[OrderCondition] = []  # combinées en ET — toutes doivent être remplies
+    invalidation_price: Optional[float] = None  # LONG: annule si prix <= ce niveau ; SHORT: annule si prix >= ce niveau
     custom_max_loss_pct: Optional[float] = None
     custom_qp_arm_low_usd: Optional[float] = None
     custom_qp_floor_low_usd: Optional[float] = None
@@ -3745,6 +3819,21 @@ def check_and_execute_pending_orders(mids: dict, conn):
     for o in orders:
         order = dict(o)
         coin = order["coin"]
+
+        # Invalidation vérifiée EN PREMIER : si le marché a cassé le niveau qui invaliderait
+        # la thèse (ex: support censé tenir qui cède franchement), on annule plutôt que
+        # d'attendre indéfiniment une condition qui n'a plus de sens.
+        inv_price = order.get("invalidation_price")
+        if inv_price is not None and coin in mids:
+            cur = float(mids[coin])
+            invalidated = (cur <= inv_price) if order["action"] == "LONG" else (cur >= inv_price)
+            if invalidated:
+                conn.execute("UPDATE pending_orders SET status='CANCELLED', executed_at=? WHERE id=?",
+                             (datetime.utcnow().isoformat(), order["id"]))
+                conn.commit()
+                add_bot_log(order["user_id"], f"⛔ Ordre programmé #{order['id']} invalidé: {coin} a atteint {cur} (niveau d'invalidation: {inv_price}) — annulé automatiquement", "warning")
+                continue
+
         try:
             conditions = json.loads(order["conditions"]) if order.get("conditions") else []
         except (json.JSONDecodeError, TypeError):
@@ -3835,20 +3924,21 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
     # qui lit uniquement la colonne 'conditions' (JSON), mais doit rester non-NULL en base.
     legacy_condition_type = req.conditions[0].type if req.conditions else "PRICE_BELOW"
     conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
-        conditions, condition_type, status, created_at, trading_mode,
+        conditions, condition_type, status, created_at, trading_mode, invalidation_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
-         conditions_json, legacy_condition_type, now_iso, trading_mode,
+         conditions_json, legacy_condition_type, now_iso, trading_mode, req.invalidation_price,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price))
     conn.commit()
     conn.close()
     conds_str = " ET ".join(f"{c.type} {c.value if c.value is not None else ''}" for c in req.conditions)
-    add_bot_log(user_id, f"⏳ Ordre programmé créé: {req.action} {req.coin} dès que [{conds_str}]", "info")
-    return {"message": f"Ordre programmé créé — {req.action} {req.coin} dès que [{conds_str}]", "executed_immediately": False}
+    inv_str = f" (invalidation: {req.invalidation_price})" if req.invalidation_price is not None else ""
+    add_bot_log(user_id, f"⏳ Ordre programmé créé: {req.action} {req.coin} dès que [{conds_str}]{inv_str}", "info")
+    return {"message": f"Ordre programmé créé — {req.action} {req.coin} dès que [{conds_str}]{inv_str}", "executed_immediately": False}
 
 @app.get("/api/pending-orders")
 def list_pending_orders(user_id: int = Depends(get_current_user)):
@@ -3897,11 +3987,11 @@ def update_pending_order(order_id: int, req: PendingOrderRequest, user_id: int =
         conn.close()
         raise HTTPException(status_code=404, detail="Ordre introuvable ou déjà traité")
     conditions_json = json.dumps([c.dict() for c in req.conditions])
-    conn.execute("""UPDATE pending_orders SET coin=?, action=?, size_usdc=?, leverage=?, conditions=?,
+    conn.execute("""UPDATE pending_orders SET coin=?, action=?, size_usdc=?, leverage=?, conditions=?, invalidation_price=?,
         custom_max_loss_pct=?, custom_qp_arm_low_usd=?, custom_qp_floor_low_usd=?, custom_qp_lock_trigger_usd=?,
         custom_quick_profit_usd=?, custom_trailing_gap_usd=?, custom_trail_trigger_pct=?, custom_stop_loss_price=?
         WHERE id=?""",
-        (req.coin.upper(), req.action, req.size_usdc, req.leverage, conditions_json,
+        (req.coin.upper(), req.action, req.size_usdc, req.leverage, conditions_json, req.invalidation_price,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price, order_id))
