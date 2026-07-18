@@ -404,6 +404,7 @@ function App() {
   const [manualStatus, setManualStatus] = useState("");
   const [orderMode, setOrderMode] = useState("now"); // "now" ou "schedule"
   const [editingOrderId, setEditingOrderId] = useState(null);
+  const [invalidationPrice, setInvalidationPrice] = useState("");
   const [conditionsList, setConditionsList] = useState([]);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -912,12 +913,17 @@ Confirmer ?`
           :positions.length===0?<div style={{textAlign:"center",padding:40,color:"#475569"}}>Aucune position ouverte</div>
           :positions.map((pos,i)=>{
             const p=pos.position; const pnl=parseFloat(p.unrealizedPnl||0);
+            const dir = parseFloat(p.szi)>0?"LONG":"SHORT";
+            const matchedTrade = (paper?.open_trades||[]).find(t=>t.coin===p.coin && t.action===dir && t.is_live);
             return (
               <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:12}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                   <div style={{display:"flex",gap:7,alignItems:"center"}}>
-                    <span style={{background:parseFloat(p.szi)>0?"#052e16":"#2d0a0a",color:parseFloat(p.szi)>0?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{parseFloat(p.szi)>0?"LONG":"SHORT"}</span>
+                    <span style={{background:parseFloat(p.szi)>0?"#052e16":"#2d0a0a",color:parseFloat(p.szi)>0?"#34d399":"#f87171",padding:"2px 7px",borderRadius:4,fontSize:10,fontWeight:700}}>{dir}</span>
                     <span style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>{p.coin}/USDC</span>
+                    {!!matchedTrade?.is_manual && (
+                      <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Position ouverte manuellement, pas par le bot">👤 MANUEL</span>
+                    )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
                 </div>
@@ -1310,6 +1316,9 @@ Confirmer ?`
                         <span style={{background:trade.action==="LONG"?"#052e16":"#2d0a0a",color:trade.action==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700}}>{trade.action}</span>
                         <span style={{color:"#f1f5f9",fontWeight:700}}>{trade.coin}/USDC</span>
                         <span style={{color:"#64748b",fontSize:10}}>x{trade.leverage}</span>
+                        {!!trade.is_manual && (
+                          <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
                         <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
@@ -1360,6 +1369,9 @@ Confirmer ?`
                       <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
                       <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                      {!!trade.is_manual && (
+                        <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
+                      )}
                       {trade.peak_price_pct != null && (
                         <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
                           pic {trade.peak_price_pct.toFixed(3)}%
@@ -1656,6 +1668,12 @@ Confirmer ?`
                     }} style={{background:"#7c3aed",border:"none",borderRadius:4,padding:"6px 12px",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>+ Ajouter</button>
                   </div>
 
+                  <div style={{marginTop:10}}>
+                    <div style={{fontSize:9,color:"#f87171",marginBottom:4}}>🛑 Prix d'invalidation (optionnel) — annule l'ordre automatiquement si le marché casse ce niveau avant déclenchement</div>
+                    <input type="number" step="0.01" placeholder={manualAction==="LONG"?"Ex: support cassé plus bas":"Ex: résistance cassée plus haut"}
+                      value={invalidationPrice} onChange={e=>setInvalidationPrice(e.target.value)}
+                      style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
+                  </div>
                   <div style={{fontSize:9,color:"#475569",marginTop:8}}>Aucune condition ajoutée = exécution immédiate au prix actuel (pas de mise en attente). Sans expiration — reste actif jusqu'au déclenchement ou à l'annulation. En paper, l'entrée se fait exactement au prix programmé (pas d'ambiguïté) ; en live, le prix réel de l'exchange fait foi.</div>
                 </div>
               )}
@@ -1668,7 +1686,7 @@ Confirmer ?`
                 {pendingOrders.pending.map(o=>(
                   <div key={o.id} style={{padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
                     <div style={{fontSize:10,color:"#e2e8f0",marginBottom:4}}>
-                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}
+                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
                     </div>
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>{
@@ -1676,6 +1694,7 @@ Confirmer ?`
                         setManualCoin(o.coin); setManualCoinSearch(o.coin);
                         setManualAction(o.action); setManualSize(o.size_usdc); setManualLeverage(o.leverage);
                         setConditionsList(o.conditions||[]);
+                        setInvalidationPrice(o.invalidation_price??"");
                         setManualCustom({
                           custom_max_loss_pct:o.custom_max_loss_pct, custom_qp_arm_low_usd:o.custom_qp_arm_low_usd,
                           custom_qp_floor_low_usd:o.custom_qp_floor_low_usd, custom_qp_lock_trigger_usd:o.custom_qp_lock_trigger_usd,
@@ -1710,7 +1729,7 @@ Confirmer ?`
                 {pendingOrders.history.map(o=>(
                   <div key={o.id} style={{padding:"5px 0",borderBottom:"1px solid #0a0e1a",fontSize:10,color:"#94a3b8"}}>
                     <span style={{background:o.status==="EXECUTED"?"#0f3d2e":"#3d1a1a",color:o.status==="EXECUTED"?"#34d399":"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,marginRight:6}}>{o.status}</span>
-                    <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}
+                    <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
                   </div>
                 ))}
               </div>
@@ -1776,20 +1795,20 @@ Confirmer ?`
                 } else if(editingOrderId) {
                   const res = await apiCall(`/api/pending-orders/${editingOrderId}`,"PUT",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
-                    conditions:conditionsList,
+                    conditions:conditionsList, invalidation_price:invalidationPrice?Number(invalidationPrice):null,
                     ...manualCustom
                   },token);
                   setManualStatus(`✅ ${res.message}`);
-                  setConditionsList([]);
+                  setConditionsList([]); setInvalidationPrice("");
                   setEditingOrderId(null);
                 } else {
                   const res = await apiCall("/api/pending-orders","POST",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
-                    conditions:conditionsList,
+                    conditions:conditionsList, invalidation_price:invalidationPrice?Number(invalidationPrice):null,
                     ...manualCustom
                   },token);
                   setManualStatus(`✅ ${res.message}`);
-                  setConditionsList([]);
+                  setConditionsList([]); setInvalidationPrice("");
                 }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
