@@ -516,6 +516,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Garantit que condition_type existe même sur une base neuve créée après le passage
+        # aux conditions combinées (colonne retirée du CREATE TABLE) — toujours renseignée à
+        # l'insertion pour satisfaire une éventuelle contrainte NOT NULL héritée d'anciennes bases.
+        conn.execute("ALTER TABLE pending_orders ADD COLUMN condition_type TEXT")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
             user_id INTEGER,
             coin TEXT,
@@ -3823,13 +3830,17 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
     cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
     conditions_json = json.dumps([c.dict() for c in req.conditions])
+    # legacy_condition_type : satisfait l'ancienne colonne condition_type (NOT NULL, héritée
+    # d'avant le passage aux conditions combinées) — plus utilisée par la logique actuelle,
+    # qui lit uniquement la colonne 'conditions' (JSON), mais doit rester non-NULL en base.
+    legacy_condition_type = req.conditions[0].type if req.conditions else "PRICE_BELOW"
     conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
-        conditions, status, created_at, trading_mode,
+        conditions, condition_type, status, created_at, trading_mode,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?)""",
         (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
-         conditions_json, now_iso, trading_mode,
+         conditions_json, legacy_condition_type, now_iso, trading_mode,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price))
