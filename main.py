@@ -6,7 +6,7 @@ Serveur principal avec authentification, API et moteur de scan
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List
@@ -2900,6 +2900,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="HyperBot AI", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Toute exception non gérée renvoie du JSON exploitable (avec le vrai message d'erreur)
+    au lieu de la page texte brute "Internal Server Error" par défaut de Starlette — que le
+    frontend ne pouvait pas parser (JSON.parse échouait sur du texte non-JSON, masquant
+    l'erreur réelle derrière un message cryptique 'Unexpected token... is not valid JSON')."""
+    import traceback
+    tb = traceback.format_exc()
+    print(f"⛔ Exception non gérée sur {request.method} {request.url.path}:\n{tb}")
+    return JSONResponse(status_code=500, content={"detail": f"Erreur serveur: {str(exc) or type(exc).__name__}"})
 
 # ── MODÈLES ──────────────────────────────────────────────────
 class RegisterRequest(BaseModel):
