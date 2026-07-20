@@ -704,6 +704,20 @@ Confirmer ?`
       {/* DASHBOARD */}
       {tab==="dashboard" && (
         <div style={{padding:16}}>
+          {rangeOpportunities.length > 0 && (
+            <div style={{background:"#0f1629",border:"1px solid #34d399",borderRadius:10,padding:14,marginBottom:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{fontSize:10,color:"#34d399",letterSpacing:1,fontWeight:700}}>📊 OPPORTUNITÉS DÉTECTÉES ({rangeOpportunities.length})</div>
+                <button onClick={()=>setTab("manuel")} style={{background:"transparent",border:"1px solid #34d399",borderRadius:5,padding:"3px 10px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Ouvrir dans Trading Manuel →</button>
+              </div>
+              {rangeOpportunities.map((o,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:i<rangeOpportunities.length-1?"1px solid #1e2d4a":"none"}}>
+                  <span style={{fontSize:11,color:"#e2e8f0"}}><b>{o.coin}</b> <span style={{color:"#64748b",fontSize:9}}>canal {o.channel_pct}% · il y a {o.age_minutes}min</span></span>
+                  <span style={{fontSize:10,color:"#64748b"}}>Support ${o.support} / Résistance ${o.resistance}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:14}}>
             <div style={{fontSize:10,color:"#475569",marginBottom:10,letterSpacing:1}}>PRIX EN TEMPS RÉEL</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
