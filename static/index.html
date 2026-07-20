@@ -373,6 +373,7 @@ function App() {
   const [aiContinuous, setAiContinuous] = useState(false);
   const [filterHours, setFilterHours] = useState(true);
   const [filterExtraHours, setFilterExtraHours] = useState(true);
+  const [hardCapEnabled, setHardCapEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -409,6 +410,7 @@ function App() {
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
   const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
+  const [rangeOpportunities, setRangeOpportunities] = useState([]);
   const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
   const [confThreshold, setConfThreshold] = useState(95);
@@ -441,7 +443,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders, rangeOpps] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -455,13 +457,16 @@ function App() {
         apiCall(`/api/coins/max-confidence?threshold=${confThreshold}`,"GET",null,token),
         apiCall("/api/market-data","GET",null,token),
         apiCall("/api/pending-orders","GET",null,token),
+        apiCall("/api/range-opportunities","GET",null,token),
       ]);
       setMarketData(mktData?.data||{});
       setPendingOrders({pending:pendOrders?.pending||[], history:pendOrders?.history||[]});
+      setRangeOpportunities(rangeOpps?.opportunities||[]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
       setFilterExtraHours(cfg?.filter_extra_hours !== 0);
+      setHardCapEnabled(cfg?.hard_cap_enabled === 1);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -1168,6 +1173,19 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
+              </div>
+              <button onClick={()=>{
+                const v=!hardCapEnabled; setHardCapEnabled(v);
+                apiCall("/api/config/filters","PUT",{"hard_cap_enabled":v},token);
+              }} style={{background:hardCapEnabled?"#1e3a5f22":"#0f1629",border:hardCapEnabled?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:hardCapEnabled?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {hardCapEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>📅 Pause Week-end (Forex uniquement)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Crypto trade 24h/24 7j/7 — désactivé par défaut</div>
               </div>
@@ -1455,13 +1473,14 @@ Confirmer ?`
                     {key:"rsi_oversold",label:"RSI survente (<)",def:35,step:1,min:5,max:45},
                     {key:"rsi_overbought",label:"RSI surachat (>)",def:65,step:1,min:55,max:95},
                     {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
-                    {key:"btc_trend_threshold",label:"Seuil tendance BTC (%/8h)",def:2.0,step:0.1,min:0.5,max:10},
+                    {key:"btc_trend_threshold",label:"Seuil tendance BTC (%, confirmé 4h ET 8h)",def:2.0,step:0.1,min:0.5,max:10},
                     {key:"max_same_direction_neutral",label:"Max même direction (marché neutre)",def:2,step:1,min:1,max:10},
                     {key:"max_same_direction_trend",label:"Max même direction (tendance confirmée)",def:3,step:1,min:1,max:10},
                     {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.0,step:0.1,min:1,max:5},
                     {key:"trailing_gap_pct",label:"Écart trailing (% prix)",def:0.42,step:0.01,min:0.02,max:5},
                     {key:"trailing_gap_usd",label:"Plafond écart trailing ($)",def:1.0,step:0.1,min:0.1,max:20},
                     {key:"trailing_widen_max_mult",label:"Trailing progressif - plafond (×)",def:3.0,step:0.5,min:1,max:10},
+                    {key:"hard_cap_pct",label:"Plafond absolu de PnL (%)",def:2.5,step:0.1,min:0.1,max:50},
                     {key:"qp_lock_trigger_usd",label:"Plancher QP haut - seuil d'armement ($)",def:1.5,step:0.1,min:0.1,max:20},
                     {key:"quick_profit_usd",label:"Plancher QP haut - montant garanti ($)",def:1.1,step:0.1,min:0.1,max:20},
                     {key:"qp_arm_low_usd",label:"Plancher QP bas - seuil d'armement ($)",def:1.1,step:0.1,min:0.1,max:20},
@@ -1560,6 +1579,41 @@ Confirmer ?`
             <div style={{fontSize:10,color:"#475569",marginBottom:14}}>
               Prise de trade libre, indépendante du bot — mode actuel : <b style={{color:config?.trading_mode==="live"?"#f87171":"#60a5fa"}}>{config?.trading_mode==="live"?"🔴 LIVE (argent réel)":"🎮 PAPER"}</b>
             </div>
+
+            {/* Opportunités de range détectées — remplit le formulaire en 1 clic, validez en 2e clic */}
+            {rangeOpportunities.length > 0 && (
+              <div style={{background:"#0f1629",border:"1px solid #34d399",borderRadius:8,padding:12,marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#34d399",marginBottom:8}}>📊 Opportunités détectées ({rangeOpportunities.length})</div>
+                {rangeOpportunities.map((o,i)=>(
+                  <div key={i} style={{padding:"8px 0",borderBottom:i<rangeOpportunities.length-1?"1px solid #1e2d4a":"none"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>{o.coin} <span style={{color:"#64748b",fontWeight:400,fontSize:10}}>canal {o.channel_pct}% · il y a {o.age_minutes}min</span></span>
+                      <a href={`https://app.hyperliquid.xyz/trade/${o.coin}`} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:"#60a5fa"}}>Voir les bougies ↗</a>
+                    </div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button onClick={()=>{
+                        setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("LONG");
+                        setOrderMode("schedule");
+                        setConditionsList([{type:"PRICE_BELOW", value:o.support}]);
+                        setInvalidationPrice(String(o.long_invalidation));
+                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
+                      }} style={{flex:1,background:"#0f3d2e",border:"1px solid #34d399",borderRadius:6,padding:"8px 6px",color:"#34d399",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                        → LONG au support ${o.support}
+                      </button>
+                      <button onClick={()=>{
+                        setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
+                        setOrderMode("schedule");
+                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}]);
+                        setInvalidationPrice(String(o.short_invalidation));
+                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
+                      }} style={{flex:1,background:"#3d0f1a",border:"1px solid #f87171",borderRadius:6,padding:"8px 6px",color:"#f87171",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                        → SHORT à la résistance ${o.resistance}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Recherche / sélection du coin */}
             <div style={{marginBottom:12}}>
