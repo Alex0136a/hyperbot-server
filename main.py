@@ -1860,20 +1860,8 @@ async def scan_markets(user_id: int):
                         f"   → Suggestion uniquement, aucun ordre créé automatiquement"
                     )
                     add_bot_log(user_id, msg, "info")
-                    email_body = (
-                        f"Marché en RANGE détecté sur {coin} (canal {channel_pct:.1f}%)\n\n"
-                        f"LONG au support ~${support:.4g}\n"
-                        f"  Invalidation ~${long_invalidation:.4g}\n"
-                        f"  Si rupture confirmée, envisager SHORT de retournement\n\n"
-                        f"SHORT à la résistance ~${resistance:.4g}\n"
-                        f"  Invalidation ~${short_invalidation:.4g}\n"
-                        f"  Si rupture confirmée, envisager LONG de retournement\n\n"
-                        f"Vérifier les bougies: https://app.hyperliquid.xyz/trade/{coin}\n\n"
-                        f"Suggestion uniquement — aucun ordre créé automatiquement. "
-                        f"Créez l'ordre vous-même dans Trading Manuel si l'opportunité vous convient."
-                    )
-                    await send_alert_if_needed(user_id, f"range_{coin}", f"Opportunité RANGE — {coin}", email_body,
-                                                cooldown_minutes=RANGE_SUGGESTION_COOLDOWN_HOURS * 60)
+                    # Email retiré sur demande (trop de mails) — la suggestion reste visible
+                    # dans les logs, le Tableau de bord et Trading Manuel.
 
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
