@@ -155,6 +155,16 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN btc_eth_2d_trend_threshold REAL DEFAULT 6.0")
+        conn.commit()
+    except: pass
+    try:
+        # Seuil recalibré de 3% à 6% après analyse de la volatilité réelle de BTC (~2-3.7%
+        # de mouvement typique sur 2 jours) — 3% était trop proche du bruit normal.
+        conn.execute("UPDATE bot_config SET btc_eth_2d_trend_threshold=6.0 WHERE btc_eth_2d_trend_threshold=3.0")
+        conn.commit()
+    except: pass
+    try:
         # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
         # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
         conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
@@ -1986,8 +1996,25 @@ async def scan_markets(user_id: int):
 
             # === RÈGLE RENFORCÉE BTC/ETH — ces deux actifs suivent des tendances
             # persistantes plutôt que des retournements fréquents (contrairement aux alts).
-            # On bloque tout trade à contre-tendance de leur PROPRE structure EMA,
-            # même si le filtre global BTC ±2% (confirmé 4h ET 8h) considère la zone "neutre".
+            # Deux vérifications complémentaires :
+            #  1. Mouvement de PRIX DIRECT sur 2 jours (comble le trou où une tendance naissante,
+            #     pas encore alignée sur les 3 EMA, ne bloquait rien du tout — cas observé d'un
+            #     SHORT BTC pris en pleine tendance haussière).
+            #  2. Structure EMA propre (20/50/200) — capte les tendances déjà pleinement établies.
+            if coin in ("BTC", "ETH"):
+                btc_eth_2d_thresh = config["btc_eth_2d_trend_threshold"] if config and "btc_eth_2d_trend_threshold" in config.keys() and config["btc_eth_2d_trend_threshold"] else 6.0
+                candles_2d = await fetch_candles(client, coin, "4h", 12)  # 12×4h = 48h = 2 jours
+                if candles_2d and len(candles_2d) >= 12:
+                    price_2d_open = float(candles_2d[0]["c"])
+                    price_2d_close = float(candles_2d[-1]["c"])
+                    change_2d_pct = (price_2d_close - price_2d_open) / price_2d_open * 100
+                    if change_2d_pct >= btc_eth_2d_thresh and action == "SHORT":
+                        add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — tendance haussière sur 2j (+{change_2d_pct:.1f}%)", "warning")
+                        continue
+                    if change_2d_pct <= -btc_eth_2d_thresh and action == "LONG":
+                        add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — tendance baissière sur 2j ({change_2d_pct:.1f}%)", "warning")
+                        continue
+
             if coin in ("BTC", "ETH") and e20 and e50 and e200:
                 own_ema_align = "BULL" if e20[-1] > e50[-1] > e200[-1] else "BEAR" if e20[-1] < e50[-1] < e200[-1] else "MIXED"
                 if own_ema_align == "BULL" and action == "SHORT":
@@ -3185,6 +3212,7 @@ class UpdateConfigRequest(BaseModel):
     trailing_gap_usd: Optional[float] = None
     trailing_widen_max_mult: Optional[float] = None
     hard_cap_pct: Optional[float] = None
+    btc_eth_2d_trend_threshold: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
@@ -3328,6 +3356,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trailing_widen_max_mult": config["trailing_widen_max_mult"] if "trailing_widen_max_mult" in config.keys() and config["trailing_widen_max_mult"] else 3.0,
         "hard_cap_enabled": config["hard_cap_enabled"] if "hard_cap_enabled" in config.keys() and config["hard_cap_enabled"] is not None else 0,
         "hard_cap_pct": config["hard_cap_pct"] if "hard_cap_pct" in config.keys() and config["hard_cap_pct"] else 2.5,
+        "btc_eth_2d_trend_threshold": config["btc_eth_2d_trend_threshold"] if "btc_eth_2d_trend_threshold" in config.keys() and config["btc_eth_2d_trend_threshold"] else 6.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
@@ -3420,6 +3449,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_widen_max_mult=? WHERE user_id=?", (req.trailing_widen_max_mult, user_id))
     if req.hard_cap_pct is not None:
         conn.execute("UPDATE bot_config SET hard_cap_pct=? WHERE user_id=?", (req.hard_cap_pct, user_id))
+    if req.btc_eth_2d_trend_threshold is not None:
+        conn.execute("UPDATE bot_config SET btc_eth_2d_trend_threshold=? WHERE user_id=?", (req.btc_eth_2d_trend_threshold, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.qp_arm_low_usd is not None:
