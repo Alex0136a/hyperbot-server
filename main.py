@@ -146,6 +146,15 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plafond absolu de PnL (%) — désactivé par défaut, à activer manuellement si voulu
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hard_cap_enabled INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hard_cap_pct REAL DEFAULT 2.5")
+        conn.commit()
+    except: pass
+    try:
         # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
         # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
         conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
@@ -1355,7 +1364,8 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
-        trailing_gap_pct, trailing_gap_usd, trailing_widen_max_mult FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
+        trailing_gap_pct, trailing_gap_usd, trailing_widen_max_mult, hard_cap_enabled, hard_cap_pct
+        FROM bot_config WHERE user_id=?""", (user_id,)).fetchone()
 
     def pick(custom_key, cfg_key, fallback):
         """Surcharge par trade (prise manuelle) si définie, sinon réglage de compte, sinon défaut codé."""
@@ -1434,6 +1444,17 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         close_reason = "MAX_LOSS"
         close_stop_level_pct = -max_loss_pct
         add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
+    # Plafond ABSOLU de PnL (%), optionnel/désactivable — ferme dès que ce seuil est atteint,
+    # même si le trailing progressif ou le plancher QP voudrait continuer à laisser courir.
+    # Contrairement au reste (basé sur le mouvement de prix brut), ce seuil se base sur le
+    # PnL réel du trade (pnl_pct = pnl/size_usdc*100, donc AVEC effet de levier inclus).
+    hard_cap_enabled = bool(cfg_qp["hard_cap_enabled"]) if cfg_qp and "hard_cap_enabled" in cfg_qp.keys() else False
+    if not close_reason and hard_cap_enabled:
+        hard_cap_pct = float(cfg_qp["hard_cap_pct"]) if cfg_qp and "hard_cap_pct" in cfg_qp.keys() and cfg_qp["hard_cap_pct"] else 2.5
+        pnl_pct_live = pnl / trade["size_usdc"] * 100
+        if pnl_pct_live >= hard_cap_pct:
+            close_reason = "HARD_CAP"
+            add_bot_log(user_id, f"🎯🔒 {trade['coin']}: Plafond absolu +{round(pnl,2)} USDC atteint ({round(pnl_pct_live,2)}% ≥ {hard_cap_pct}%) — fermeture forcée, priorité sur QP/TTP", "success")
     if not close_reason:
         # Le pic ne redescend jamais : une fois le palier haut atteint, il reste actif pour
         # toujours sur ce trade. Sinon, le palier bas prend le relais s'il est armé.
@@ -1737,23 +1758,30 @@ async def scan_markets(user_id: int):
         conn.commit()
         conn.close()
 
-        # Tendance BTC globale sur 4h
+        # Tendance BTC — double confirmation 4h ET 8h (compromis réactivité/fiabilité) :
+        # le signal ne se déclenche que si les deux fenêtres sont d'accord sur la direction,
+        # ce qui filtre le bruit court terme (un sursaut de 4h qui ne se confirme pas sur 8h)
+        # sans perdre en réactivité dès qu'un mouvement est réellement soutenu dans la durée.
+        # Un seul appel API (8 bougies 1h) sert aux deux fenêtres.
         btc_trend = "neutral"
         btc_change = 0
         btc_thresh = config["btc_trend_threshold"] if config and "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0
-        btc_candles_4h = await fetch_candles(client, "BTC", "1h", 8)
-        if btc_candles_4h and len(btc_candles_4h) >= 4:
-            btc_open = float(btc_candles_4h[0]["c"])
-            btc_close = float(btc_candles_4h[-1]["c"])
-            btc_change = (btc_close - btc_open) / btc_open * 100
-            if btc_change > btc_thresh:
+        btc_candles_8h = await fetch_candles(client, "BTC", "1h", 8)
+        if btc_candles_8h and len(btc_candles_8h) >= 8:
+            btc_close = float(btc_candles_8h[-1]["c"])
+            btc_open_4h = float(btc_candles_8h[-4]["c"])
+            btc_open_8h = float(btc_candles_8h[0]["c"])
+            btc_change_4h = (btc_close - btc_open_4h) / btc_open_4h * 100
+            btc_change_8h = (btc_close - btc_open_8h) / btc_open_8h * 100
+            btc_change = btc_change_4h  # la plus réactive des deux, utilisée une fois la tendance confirmée
+            if btc_change_4h > btc_thresh and btc_change_8h > btc_thresh:
                 btc_trend = "bullish"
-                add_bot_log(user_id, f"🟢 BTC HAUSSIER (+{btc_change:.1f}%) - mode tendance LONG actif", "success")
-            elif btc_change < -btc_thresh:
+                add_bot_log(user_id, f"🟢 BTC HAUSSIER (4h:+{btc_change_4h:.1f}% / 8h:+{btc_change_8h:.1f}%, confirmé) - mode tendance LONG actif", "success")
+            elif btc_change_4h < -btc_thresh and btc_change_8h < -btc_thresh:
                 btc_trend = "bearish"
-                add_bot_log(user_id, f"🔴 BTC BAISSIER ({btc_change:.1f}%) - mode tendance SHORT actif", "error")
+                add_bot_log(user_id, f"🔴 BTC BAISSIER (4h:{btc_change_4h:.1f}% / 8h:{btc_change_8h:.1f}%, confirmé) - mode tendance SHORT actif", "error")
             else:
-                add_bot_log(user_id, f"⚪ BTC NEUTRE ({btc_change:.1f}%) - mode retournement actif", "info")
+                add_bot_log(user_id, f"⚪ BTC NEUTRE (4h:{btc_change_4h:.1f}% / 8h:{btc_change_8h:.1f}%) - mode retournement actif", "info")
 
         # Analyze each coin — tous les actifs sont traités à égalité (le pré-filtre technique
         # décide seul qui mérite un appel IA, "active_coins" ne sert plus qu'à l'ordre de scan)
@@ -1797,16 +1825,45 @@ async def scan_markets(user_id: int):
 
             # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
             # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion) —
-            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS
+            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS.
+            # Inclut toutes les valeurs prêtes à copier dans un ordre programmé manuel :
+            # niveau d'entrée, invalidation (buffer 0.5% au-delà du niveau), et le niveau de
+            # retournement en cas de rupture confirmée (même niveau, direction opposée).
             support, resistance = detect_support_resistance(candles)
             if detect_range_market(candles, support, resistance):
-                last_sugg = range_suggestion_cache.get(coin)
-                if not last_sugg or (datetime.utcnow() - last_sugg).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
-                    range_suggestion_cache[coin] = datetime.utcnow()
-                    add_bot_log(user_id,
-                        f"📊 {coin}: marché en RANGE détecté — support ~${support:.4g} (LONG envisageable) / "
-                        f"résistance ~${resistance:.4g} (SHORT envisageable) — suggestion, pas d'ordre créé automatiquement",
-                        "info")
+                cache_key = (user_id, coin)
+                last_sugg = range_suggestion_cache.get(cache_key)
+                if not last_sugg or (datetime.utcnow() - last_sugg["timestamp"]).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
+                    long_invalidation = support * 0.995
+                    short_invalidation = resistance * 1.005
+                    channel_pct = (resistance - support) / support * 100
+                    range_suggestion_cache[cache_key] = {
+                        "timestamp": datetime.utcnow(), "coin": coin, "support": round(support, 6),
+                        "resistance": round(resistance, 6), "long_invalidation": round(long_invalidation, 6),
+                        "short_invalidation": round(short_invalidation, 6), "channel_pct": round(channel_pct, 2)
+                    }
+                    msg = (
+                        f"📊 {coin}: marché en RANGE détecté (canal {channel_pct:.1f}%)\n"
+                        f"   → LONG au support ~${support:.4g} | invalidation ~${long_invalidation:.4g} | si rupture confirmée, envisager SHORT de retournement\n"
+                        f"   → SHORT à la résistance ~${resistance:.4g} | invalidation ~${short_invalidation:.4g} | si rupture confirmée, envisager LONG de retournement\n"
+                        f"   → Vérifier les bougies: https://app.hyperliquid.xyz/trade/{coin}\n"
+                        f"   → Suggestion uniquement, aucun ordre créé automatiquement"
+                    )
+                    add_bot_log(user_id, msg, "info")
+                    email_body = (
+                        f"Marché en RANGE détecté sur {coin} (canal {channel_pct:.1f}%)\n\n"
+                        f"LONG au support ~${support:.4g}\n"
+                        f"  Invalidation ~${long_invalidation:.4g}\n"
+                        f"  Si rupture confirmée, envisager SHORT de retournement\n\n"
+                        f"SHORT à la résistance ~${resistance:.4g}\n"
+                        f"  Invalidation ~${short_invalidation:.4g}\n"
+                        f"  Si rupture confirmée, envisager LONG de retournement\n\n"
+                        f"Vérifier les bougies: https://app.hyperliquid.xyz/trade/{coin}\n\n"
+                        f"Suggestion uniquement — aucun ordre créé automatiquement. "
+                        f"Créez l'ordre vous-même dans Trading Manuel si l'opportunité vous convient."
+                    )
+                    await send_alert_if_needed(user_id, f"range_{coin}", f"Opportunité RANGE — {coin}", email_body,
+                                                cooldown_minutes=RANGE_SUGGESTION_COOLDOWN_HOURS * 60)
 
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
@@ -1930,7 +1987,7 @@ async def scan_markets(user_id: int):
             # === RÈGLE RENFORCÉE BTC/ETH — ces deux actifs suivent des tendances
             # persistantes plutôt que des retournements fréquents (contrairement aux alts).
             # On bloque tout trade à contre-tendance de leur PROPRE structure EMA,
-            # même si le filtre global BTC ±2%/8h considère la zone "neutre".
+            # même si le filtre global BTC ±2% (confirmé 4h ET 8h) considère la zone "neutre".
             if coin in ("BTC", "ETH") and e20 and e50 and e200:
                 own_ema_align = "BULL" if e20[-1] > e50[-1] > e200[-1] else "BEAR" if e20[-1] < e50[-1] < e200[-1] else "MIXED"
                 if own_ema_align == "BULL" and action == "SHORT":
@@ -2394,7 +2451,7 @@ ws_connected = False
 
 # Cache des données de marché structurées (indicateurs pré-calculés)
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
-range_suggestion_cache = {}  # coin -> datetime de la dernière suggestion journalisée (limite le bruit)
+range_suggestion_cache = {}  # (user_id, coin) -> {"timestamp":..., "support":..., "resistance":..., "long_invalidation":..., "short_invalidation":..., "channel_pct":...}
 RANGE_SUGGESTION_COOLDOWN_HOURS = 4  # ne resignale pas le même coin avant ce délai
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
@@ -3127,6 +3184,7 @@ class UpdateConfigRequest(BaseModel):
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
     trailing_widen_max_mult: Optional[float] = None
+    hard_cap_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
@@ -3268,6 +3326,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 1.0,
         "trailing_widen_max_mult": config["trailing_widen_max_mult"] if "trailing_widen_max_mult" in config.keys() and config["trailing_widen_max_mult"] else 3.0,
+        "hard_cap_enabled": config["hard_cap_enabled"] if "hard_cap_enabled" in config.keys() and config["hard_cap_enabled"] is not None else 0,
+        "hard_cap_pct": config["hard_cap_pct"] if "hard_cap_pct" in config.keys() and config["hard_cap_pct"] else 2.5,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
@@ -3358,6 +3418,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_gap_usd=? WHERE user_id=?", (req.trailing_gap_usd, user_id))
     if req.trailing_widen_max_mult is not None:
         conn.execute("UPDATE bot_config SET trailing_widen_max_mult=? WHERE user_id=?", (req.trailing_widen_max_mult, user_id))
+    if req.hard_cap_pct is not None:
+        conn.execute("UPDATE bot_config SET hard_cap_pct=? WHERE user_id=?", (req.hard_cap_pct, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.qp_arm_low_usd is not None:
@@ -3485,7 +3547,7 @@ def update_filters(req: dict, user_id: int = Depends(get_current_user)):
     conn = get_db()
     updates = []
     values = []
-    for field in ["filter_hours", "filter_weekend", "filter_macro", "filter_extra_hours"]:
+    for field in ["filter_hours", "filter_weekend", "filter_macro", "filter_extra_hours", "hard_cap_enabled"]:
         if field in req:
             updates.append(f"{field}=?")
             values.append(1 if req[field] else 0)
@@ -4304,6 +4366,22 @@ async def reconnect_websocket(user_id: int = Depends(get_current_user)):
     asyncio.create_task(connect_hyperliquid_ws())
     add_bot_log(user_id, "🔌 Reconnexion WebSocket forcée manuellement", "info")
     return {"message": "Reconnexion WebSocket lancée"}
+
+@app.get("/api/range-opportunities")
+def get_range_opportunities(user_id: int = Depends(get_current_user)):
+    """Liste les opportunités de range actuellement détectées (encore fraîches, dans la
+    fenêtre de cooldown) pour cet utilisateur — support/résistance + invalidations, prêtes
+    à être transformées en ordre programmé en un clic depuis Trading Manuel."""
+    now = datetime.utcnow()
+    opportunities = []
+    for (uid, coin), data in range_suggestion_cache.items():
+        if uid != user_id:
+            continue
+        age_hours = (now - data["timestamp"]).total_seconds() / 3600
+        if age_hours < RANGE_SUGGESTION_COOLDOWN_HOURS:
+            opportunities.append({**{k: v for k, v in data.items() if k != "timestamp"}, "age_minutes": round(age_hours * 60)})
+    opportunities.sort(key=lambda o: o["age_minutes"])
+    return {"opportunities": opportunities}
 
 @app.get("/api/market-data")
 def get_market_data(user_id: int = Depends(get_current_user)):
