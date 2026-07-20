@@ -706,16 +706,47 @@ Confirmer ?`
         <div style={{padding:16}}>
           {rangeOpportunities.length > 0 && (
             <div style={{background:"#0f1629",border:"1px solid #34d399",borderRadius:10,padding:14,marginBottom:14}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
                 <div style={{fontSize:10,color:"#34d399",letterSpacing:1,fontWeight:700}}>📊 OPPORTUNITÉS DÉTECTÉES ({rangeOpportunities.length})</div>
-                <button onClick={()=>setTab("manuel")} style={{background:"transparent",border:"1px solid #34d399",borderRadius:5,padding:"3px 10px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Ouvrir dans Trading Manuel →</button>
+                <div style={{fontSize:9,color:"#334155"}}>triées par qualité de range (canal le plus serré en premier)</div>
               </div>
-              {rangeOpportunities.map((o,i)=>(
-                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:i<rangeOpportunities.length-1?"1px solid #1e2d4a":"none"}}>
-                  <span style={{fontSize:11,color:"#e2e8f0"}}><b>{o.coin}</b> <span style={{color:"#64748b",fontSize:9}}>canal {o.channel_pct}% · il y a {o.age_minutes}min</span></span>
-                  <span style={{fontSize:10,color:"#64748b"}}>Support ${o.support} / Résistance ${o.resistance}</span>
-                </div>
-              ))}
+              <div style={{fontSize:9,color:"#475569",marginBottom:10}}>Cliquez LONG ou SHORT pour préparer le trade dans Trading Manuel (à valider ensuite)</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:8,maxHeight:360,overflowY:"auto",paddingRight:4}}>
+                {[...rangeOpportunities].sort((a,b)=>a.channel_pct-b.channel_pct).map((o,i)=>(
+                  <div key={i} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:8,padding:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
+                      <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>{o.coin}</span>
+                      <a href={`https://app.hyperliquid.xyz/trade/${o.coin}`} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:"#60a5fa"}}>Bougies ↗</a>
+                    </div>
+                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                      <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>canal {o.channel_pct}%</span>
+                      <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{o.age_minutes}min</span>
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{
+                        setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("LONG");
+                        setOrderMode("schedule");
+                        setConditionsList([{type:"PRICE_BELOW", value:o.support}]);
+                        setInvalidationPrice(String(o.long_invalidation));
+                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
+                        setTab("manuel");
+                      }} style={{flex:1,background:"#0f3d2e",border:"1px solid #34d399",borderRadius:5,padding:"6px 4px",color:"#34d399",fontSize:10,fontWeight:700,cursor:"pointer"}} title={`LONG au support $${o.support}`}>
+                        LONG ${o.support}
+                      </button>
+                      <button onClick={()=>{
+                        setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
+                        setOrderMode("schedule");
+                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}]);
+                        setInvalidationPrice(String(o.short_invalidation));
+                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
+                        setTab("manuel");
+                      }} style={{flex:1,background:"#3d0f1a",border:"1px solid #f87171",borderRadius:5,padding:"6px 4px",color:"#f87171",fontSize:10,fontWeight:700,cursor:"pointer"}} title={`SHORT à la résistance $${o.resistance}`}>
+                        SHORT ${o.resistance}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:14,marginBottom:14}}>
