@@ -1205,7 +1205,7 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🕐 Heures ponctuelles bloquées ({(config?.extra_blocked_hours||[12,14]).map(h=>`${h}h`).join(", ")} UTC)</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🕐 Heures ponctuelles bloquées ({(config?.extra_blocked_hours||[12,14]).map(h=>`${h}h00-${h}h59`).join(" et ")} UTC)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Tranches identifiées comme négatives sur le Bilan — réglables dans "Réglages avancés"</div>
               </div>
               <button onClick={()=>{
