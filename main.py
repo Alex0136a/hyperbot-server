@@ -274,7 +274,14 @@ def init_db():
     try:
         # Tranches horaires ponctuelles bloquées (hors "heures creuses" contiguës) — 12h et 14h
         # UTC identifiées comme négatives sur le Bilan du 14/07/2026 (NET -1.57$/-1.42$).
-        conn.execute("ALTER TABLE bot_config ADD COLUMN extra_blocked_hours TEXT DEFAULT '[12,14]'")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN extra_blocked_hours TEXT DEFAULT '[12,13,14]'")
+        conn.commit()
+    except: pass
+    try:
+        # 13h UTC ajoutée après le Bilan du 22/07/2026 (13h-14h: 13 trades, WR 15.4%, NET -6.15$,
+        # pire créneau observé) — migre uniquement les configs encore sur l'ancien défaut [12,14],
+        # ne touche pas aux personnalisations déjà différentes.
+        conn.execute("UPDATE bot_config SET extra_blocked_hours='[12,13,14]' WHERE extra_blocked_hours='[12,14]'")
         conn.commit()
     except: pass
     try:
@@ -683,7 +690,7 @@ def init_db():
             atr_period INTEGER DEFAULT 14,
             hours_creuses_start INTEGER DEFAULT 21,
             hours_creuses_end INTEGER DEFAULT 24,
-            extra_blocked_hours TEXT DEFAULT '[12,14]',
+            extra_blocked_hours TEXT DEFAULT '[12,13,14]',
             filter_extra_hours INTEGER DEFAULT 1,
             macro_blackout_before_min INTEGER DEFAULT 120,
             macro_blackout_after_min INTEGER DEFAULT 60,
@@ -3361,7 +3368,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "atr_period": config["atr_period"] if "atr_period" in config.keys() and config["atr_period"] else 14,
         "hours_creuses_start": config["hours_creuses_start"] if "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21,
         "hours_creuses_end": config["hours_creuses_end"] if "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24,
-        "extra_blocked_hours": json.loads(config["extra_blocked_hours"]) if "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else [12,14],
+        "extra_blocked_hours": json.loads(config["extra_blocked_hours"]) if "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else [12,13,14],
         "macro_blackout_before_min": config["macro_blackout_before_min"] if "macro_blackout_before_min" in config.keys() and config["macro_blackout_before_min"] else 120,
         "macro_blackout_after_min": config["macro_blackout_after_min"] if "macro_blackout_after_min" in config.keys() and config["macro_blackout_after_min"] else 60,
         "max_position_usdc": config["max_position_usdc"] or 50.0,
