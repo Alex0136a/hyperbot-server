@@ -214,6 +214,18 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Armement/plancher de gain Accumulation — une fois le pic à accumulation_qp_arm_pct
+        # atteint, le gain à accumulation_qp_floor_pct est garanti. Au-delà du plancher, on
+        # continue de tenir tant que RSI/MACD confirment encore la hausse (pas un simple
+        # trailing sur le prix) — ne revend que si les indicateurs montrent un essoufflement.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_qp_arm_pct REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_qp_floor_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
         # % du capital total réellement déployable pour le trading automatique (bot principal
         # ET Accumulation) — le reste (100% - ce %) reste en réserve, jamais engagé. Permet de
         # commencer prudemment (ex: 50%) avant de passer à 100% une fois en confiance.
@@ -1463,7 +1475,37 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         accum_close_reason = None
         accum_log_msg = None
 
-        if pnl_pct_live >= target_pct:
+        # Suivi du pic de gain (même principe que le trailing du bot principal, mais sur le
+        # PnL réel puisque l'Accumulation est sans levier — pnl_pct = mouvement de prix ici).
+        accum_peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
+        if pnl_pct_live > accum_peak_pct:
+            accum_peak_pct = pnl_pct_live
+            conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
+
+        cfg_accum_qp = conn.execute(
+            "SELECT accumulation_qp_arm_pct, accumulation_qp_floor_pct, accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?",
+            (user_id,)).fetchone()
+        qp_arm_pct = cfg_accum_qp["accumulation_qp_arm_pct"] if cfg_accum_qp and "accumulation_qp_arm_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_arm_pct"] else 1.5
+        qp_floor_pct = cfg_accum_qp["accumulation_qp_floor_pct"] if cfg_accum_qp and "accumulation_qp_floor_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_floor_pct"] else 1.0
+        armed = accum_peak_pct >= qp_arm_pct
+
+        if armed and pnl_pct_live <= qp_floor_pct:
+            accum_close_reason = "ACCUMULATION_QP_FLOOR"
+            accum_log_msg = f"💰🔒 {trade['coin']}: Plancher Accumulation garanti +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% — pic {round(accum_peak_pct,2)}% avait armé {qp_arm_pct}%, plancher {qp_floor_pct}%) — revente"
+        elif armed:
+            # Armé et au-dessus du plancher : on continue de tenir tant que RSI/MACD confirment
+            # encore la hausse — ne revend que si les indicateurs montrent un essoufflement,
+            # pas sur un simple recul de prix (contrairement au trailing du bot principal).
+            md = market_data_cache.get(trade["coin"], {})
+            macd_still_bullish = not md.get("macd_bear")
+            rsi_still_strong = md.get("rsi") is None or md["rsi"] >= 50
+            trend_continues = macd_still_bullish and rsi_still_strong
+            if not trend_continues:
+                accum_close_reason = "ACCUMULATION_TREND_END"
+                accum_log_msg = f"📊 {trade['coin']}: Tendance haussière plus confirmée par les indicateurs (RSI {md.get('rsi')}, MACD {'baissier' if md.get('macd_bear') else 'neutre'}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+            # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
+        elif pnl_pct_live >= target_pct:
+            # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
             accum_close_reason = "ACCUMULATION_TARGET"
             accum_log_msg = f"💰 {trade['coin']}: Objectif Accumulation atteint +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% ≥ {target_pct}%) — revente"
         elif trade.get("accumulation_support_price"):
@@ -3439,6 +3481,8 @@ class UpdateConfigRequest(BaseModel):
     accumulation_rsi_min: Optional[float] = None
     accumulation_rsi_max: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
+    accumulation_qp_arm_pct: Optional[float] = None
+    accumulation_qp_floor_pct: Optional[float] = None
     capital_allocation_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
@@ -3593,6 +3637,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
+        "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 1.5,
+        "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "capital_allocation_pct": config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
@@ -3704,6 +3750,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_rsi_max=? WHERE user_id=?", (req.accumulation_rsi_max, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
+    if req.accumulation_qp_arm_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=? WHERE user_id=?", (req.accumulation_qp_arm_pct, user_id))
+    if req.accumulation_qp_floor_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_qp_floor_pct=? WHERE user_id=?", (req.accumulation_qp_floor_pct, user_id))
     if req.capital_allocation_pct is not None:
         conn.execute("UPDATE bot_config SET capital_allocation_pct=? WHERE user_id=?", (req.capital_allocation_pct, user_id))
     if req.qp_lock_trigger_usd is not None:
