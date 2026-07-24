@@ -165,6 +165,43 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Mode Accumulation — désactivé par défaut, à activer manuellement si voulu.
+        # Achète sans levier (spot-like), jamais de sortie forcée en perte, sortie
+        # uniquement au %  de gain visé. Capital ADDITIONNEL à chaque achat (pas de
+        # rotation) — d'où le plafond de positions simultanées pour limiter l'exposition totale.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_enabled INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_target_pct REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_size_usdc REAL DEFAULT 20.0")
+        conn.commit()
+    except: pass
+    try:
+        # Taille par achat AUTOMATIQUE en % du capital disponible (compound) — remplace le
+        # montant fixe accumulation_size_usdc pour la détection auto uniquement. L'achat
+        # manuel dans Trading Manuel continue d'utiliser le montant $ tapé librement.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_size_pct REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_positions INTEGER DEFAULT 5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_rsi_threshold REAL DEFAULT 30.0")
+        conn.commit()
+    except: pass
+    try:
+        # Marge de confirmation pour considérer un support comme réellement cassé (pas juste
+        # un bruit/mèche passagère) — au-delà, on revend en Accumulation plutôt que d'attendre.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_breakdown_buffer_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
         # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
         # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
         conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
@@ -384,6 +421,25 @@ def init_db():
         # Surcharges PAR TRADE pour la prise manuelle — NULL = utilise le réglage de compte
         # par défaut (bot_config), sinon la valeur ici prime pour CE trade précis uniquement.
         conn.execute("ALTER TABLE paper_trades ADD COLUMN is_manual INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        # Mode Accumulation : achat sans levier, sans Max Loss/QP/TTP — on garde tant que
+        # nécessaire (patience si le prix baisse), seule sortie possible = objectif de gain %
+        # atteint. accumulation_target_pct est figé PAR TRADE au moment de l'achat (le réglage
+        # de compte peut changer ensuite sans affecter les achats déjà en cours).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN is_accumulation INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN accumulation_target_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        # Support de référence au moment de l'achat — si le prix casse ce niveau avec une
+        # marge de confirmation (pas juste un bruit passager), on revend même à perte plutôt
+        # que d'attendre indéfiniment un support qui n'existe peut-être plus.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN accumulation_support_price REAL")
         conn.commit()
     except: pass
     try:
@@ -1379,6 +1435,53 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
+    # Mode ACCUMULATION : court-circuite tout le reste (Max Loss, QP, TTP, plafond absolu).
+    # Aucune sortie forcée en perte — on garde tant que nécessaire, patience en cas de repli.
+    # Seule sortie possible : le % de gain visé (figé par trade à l'achat) est atteint.
+    if trade.get("is_accumulation"):
+        target_pct = float(trade["accumulation_target_pct"]) if trade.get("accumulation_target_pct") is not None else 2.0
+        pnl_pct_live = pnl / trade["size_usdc"] * 100
+        accum_close_reason = None
+        accum_log_msg = None
+
+        if pnl_pct_live >= target_pct:
+            accum_close_reason = "ACCUMULATION_TARGET"
+            accum_log_msg = f"💰 {trade['coin']}: Objectif Accumulation atteint +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% ≥ {target_pct}%) — revente"
+        elif trade.get("accumulation_support_price"):
+            # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit passager)
+            # -> on revend même à perte plutôt que d'attendre indéfiniment un support qui a cédé
+            cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+            support_ref = float(trade["accumulation_support_price"])
+            breakdown_level = support_ref * (1 - buffer_pct / 100)
+            if cur < breakdown_level:
+                accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+
+        if accum_close_reason:
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TARGET" else "warning")
+            is_live_accum = bool(trade.get("is_live"))
+            if is_live_accum:
+                user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+                try:
+                    hl_close_position(account_address, trade["coin"], trade.get("hl_sl_oid"))
+                    add_bot_log(user_id, f"🔴 {trade['coin']}: position réelle fermée sur Hyperliquid ({accum_close_reason})", "success")
+                except Exception as e:
+                    add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — vérifiez manuellement sur l'exchange !", "error")
+            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                closed_at=?, close_reason=? WHERE id=?""",
+                (cur, round(pnl,2), round(pnl_pct_live,2), datetime.utcnow().isoformat(), accum_close_reason, trade["id"]))
+            if not is_live_accum:
+                conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                             (trade["size_usdc"], round(pnl,2), user_id))
+            conn.commit()
+            return {"pnl": pnl, "close_reason": accum_close_reason}
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        return None
+
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
         trailing_gap_pct, trailing_gap_usd, trailing_widen_max_mult, hard_cap_enabled, hard_cap_pct
@@ -1896,6 +1999,55 @@ async def scan_markets(user_id: int):
                 "btc_trend": btc_trend,
                 "btc_change": btc_change,
             }
+
+            # Mode Accumulation — détection automatique en plus de la possibilité de
+            # déclenchement manuel. Achète sans levier, sans Max Loss/QP/TTP, sortie
+            # uniquement au % de gain visé. Plafonné en nombre de positions simultanées
+            # (capital additionnel à chaque achat, pas de rotation — d'où le plafond).
+            # Déclenchement en 3 conditions combinées (toutes requises) :
+            #  1. RSI sous le seuil de survente réglé (on achète bien un point statistiquement bas)
+            #  2. Prix proche d'un VRAI support détecté (niveau validé par plusieurs touches
+            #     réelles, pas juste un chiffre d'indicateur — voir detect_support_resistance)
+            #  3. Confirmation de retournement : dernière bougie clôture en hausse (vert) ET
+            #     (RSI qui remonte sur les dernières bougies OU MACD qui devient haussier) —
+            #     évite d'acheter alors que le prix continue encore de chuter sur le support.
+            if config and config["accumulation_enabled"] and rsi is not None and support is not None:
+                accum_rsi_thresh = config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0
+                near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
+                if rsi < accum_rsi_thresh and near_support:
+                    last_candle_green = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])
+                    rsi_recovering = False
+                    if len(closes) > 17:
+                        rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
+                        if rsi_prev is not None and rsi > rsi_prev:
+                            rsi_recovering = True
+                    macd_bull_confirm = bool(macd and macd.get("crossBull"))
+                    reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
+                    if reversal_confirmed:
+                        conn_accum = get_db()
+                        max_pos = config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5
+                        current_pos = conn_accum.execute(
+                            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)
+                        ).fetchone()[0]
+                        already_here = conn_accum.execute(
+                            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_accumulation=1", (user_id, coin)
+                        ).fetchone()[0]
+                        portfolio_row = conn_accum.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                        conn_accum.close()
+                        if current_pos < max_pos and already_here == 0:
+                            # Taille en % du capital disponible (compound) — grandit/rétrécit
+                            # avec le portefeuille, comme le bot principal (capital ÷ trades max)
+                            accum_size_pct = config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0
+                            capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
+                            accum_size = round(capital_disponible * accum_size_pct / 100, 2)
+                            accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
+                            try:
+                                message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
+                                                                    is_accumulation=True, accumulation_target_pct=accum_target,
+                                                                    accumulation_support_price=support)
+                                add_bot_log(user_id, f"🤖💰 Accumulation auto: {message} (RSI {rsi:.1f}, support ${support:.4g}, retournement confirmé)", "success")
+                            except ValueError as e:
+                                pass  # solde insuffisant ou autre — pas de log d'erreur pour ne pas polluer, juste on retente au prochain cycle
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
@@ -3208,6 +3360,12 @@ class UpdateConfigRequest(BaseModel):
     trailing_widen_max_mult: Optional[float] = None
     hard_cap_pct: Optional[float] = None
     btc_eth_2d_trend_threshold: Optional[float] = None
+    accumulation_target_pct: Optional[float] = None
+    accumulation_size_usdc: Optional[float] = None
+    accumulation_size_pct: Optional[float] = None
+    accumulation_max_positions: Optional[int] = None
+    accumulation_rsi_threshold: Optional[float] = None
+    accumulation_breakdown_buffer_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
@@ -3352,6 +3510,13 @@ def get_config(user_id: int = Depends(get_current_user)):
         "hard_cap_enabled": config["hard_cap_enabled"] if "hard_cap_enabled" in config.keys() and config["hard_cap_enabled"] is not None else 0,
         "hard_cap_pct": config["hard_cap_pct"] if "hard_cap_pct" in config.keys() and config["hard_cap_pct"] else 2.5,
         "btc_eth_2d_trend_threshold": config["btc_eth_2d_trend_threshold"] if "btc_eth_2d_trend_threshold" in config.keys() and config["btc_eth_2d_trend_threshold"] else 6.0,
+        "accumulation_enabled": config["accumulation_enabled"] if "accumulation_enabled" in config.keys() and config["accumulation_enabled"] is not None else 0,
+        "accumulation_target_pct": config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0,
+        "accumulation_size_usdc": config["accumulation_size_usdc"] if "accumulation_size_usdc" in config.keys() and config["accumulation_size_usdc"] else 20.0,
+        "accumulation_size_pct": config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0,
+        "accumulation_max_positions": config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5,
+        "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
+        "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
@@ -3446,6 +3611,18 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET hard_cap_pct=? WHERE user_id=?", (req.hard_cap_pct, user_id))
     if req.btc_eth_2d_trend_threshold is not None:
         conn.execute("UPDATE bot_config SET btc_eth_2d_trend_threshold=? WHERE user_id=?", (req.btc_eth_2d_trend_threshold, user_id))
+    if req.accumulation_target_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_target_pct=? WHERE user_id=?", (req.accumulation_target_pct, user_id))
+    if req.accumulation_size_usdc is not None:
+        conn.execute("UPDATE bot_config SET accumulation_size_usdc=? WHERE user_id=?", (req.accumulation_size_usdc, user_id))
+    if req.accumulation_size_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_size_pct=? WHERE user_id=?", (req.accumulation_size_pct, user_id))
+    if req.accumulation_max_positions is not None:
+        conn.execute("UPDATE bot_config SET accumulation_max_positions=? WHERE user_id=?", (req.accumulation_max_positions, user_id))
+    if req.accumulation_rsi_threshold is not None:
+        conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
+    if req.accumulation_breakdown_buffer_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.qp_arm_low_usd is not None:
@@ -3573,7 +3750,7 @@ def update_filters(req: dict, user_id: int = Depends(get_current_user)):
     conn = get_db()
     updates = []
     values = []
-    for field in ["filter_hours", "filter_weekend", "filter_macro", "filter_extra_hours", "hard_cap_enabled"]:
+    for field in ["filter_hours", "filter_weekend", "filter_macro", "filter_extra_hours", "hard_cap_enabled", "accumulation_enabled"]:
         if field in req:
             updates.append(f"{field}=?")
             values.append(1 if req[field] else 0)
@@ -3821,6 +3998,9 @@ class ManualTradeRequest(BaseModel):
     action: str  # LONG ou SHORT
     size_usdc: float
     leverage: int = 1
+    is_accumulation: bool = False
+    accumulation_target_pct: Optional[float] = None
+    accumulation_support_price: Optional[float] = None
     custom_max_loss_pct: Optional[float] = None
     custom_qp_arm_low_usd: Optional[float] = None
     custom_qp_floor_low_usd: Optional[float] = None
@@ -3890,18 +4070,22 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None):
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None):
     """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
     'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
     remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
     `override_paper_price` : si fourni, force le prix d'entrée EN PAPER au prix programmé
     exact (pour lever toute ambiguïté sur une condition de prix) — impossible en LIVE, où
     le prix de fill réel de l'exchange fait foi (comptabilité PnL doit refléter la réalité).
+    `is_accumulation` : mode achat sans levier forcé (x1), sans Max Loss/QP/TTP, sortie
+    uniquement au % de gain visé (accumulation_target_pct) — jamais de vente forcée en perte.
     Retourne (message, fill_price) ou lève une exception avec le détail de l'échec."""
     if action not in ("LONG", "SHORT"):
         raise ValueError("Action invalide (LONG ou SHORT)")
     if size_usdc <= 0 or leverage <= 0:
         raise ValueError("Taille et levier doivent être positifs")
+    if is_accumulation:
+        leverage = 1  # spot-like, pas de levier en mode Accumulation
     conn = get_db()
     ensure_portfolio(user_id, conn)
     cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
@@ -3924,6 +4108,8 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     c = {k: custom.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
         "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
         "custom_trail_trigger_pct","custom_stop_loss_price")}
+    accum_flag = 1 if is_accumulation else 0
+    accum_target = accumulation_target_pct if is_accumulation else None
 
     if trading_mode == "live":
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
@@ -3934,7 +4120,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         if not HL_SDK_AVAILABLE or not HL_AGENT_PRIVATE_KEY:
             conn.close()
             raise ValueError("Mode live non configuré côté serveur (SDK/clé manquants)")
-        max_loss_for_sl = c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31
+        max_loss_for_sl = 100.0 if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
             coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
         except Exception as e:
@@ -3942,36 +4128,42 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             raise ValueError(f"Échec ouverture live: {e}")
         conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
             size_usdc, leverage, opened_at, session_date, is_live, is_manual, hl_sl_oid, hl_size,
+            is_accumulation, accumulation_target_pct, accumulation_support_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-            VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, coin, action, fill_price, fill_price, size_usdc, leverage,
-             now_iso, today, sl_oid, coin_size,
+             now_iso, today, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
              c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
         conn.commit()
         conn.close()
-        add_bot_log(user_id, f"👤🔴 Trade MANUEL LIVE: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{leverage})", "success")
-        return f"Trade manuel LIVE {action} {coin} ouvert à ${fill_price}", fill_price
+        label = "👤💰 Achat ACCUMULATION LIVE" if is_accumulation else "👤🔴 Trade MANUEL LIVE"
+        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{leverage})", "success")
+        return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
     portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
     if not portfolio or portfolio["balance"] < size_usdc:
         conn.close()
         raise ValueError("Solde insuffisant")
     conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
-        size_usdc, leverage, opened_at, session_date, is_manual,
+        size_usdc, leverage, opened_at, session_date, is_manual, is_accumulation, accumulation_target_pct,
+        accumulation_support_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, coin, action, price, price, size_usdc, leverage,
-         now_iso, today,
+         now_iso, today, accum_flag, accum_target, accumulation_support_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
          c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
+    if is_accumulation:
+        add_bot_log(user_id, f"👤💰 Achat ACCUMULATION: {action} {coin} @ ${price} | {size_usdc} USDC — objectif +{accum_target}%, pas de sortie forcée en perte", "success")
+        return f"Achat Accumulation {action} {coin} ouvert à ${price} (objectif +{accum_target}%)", price
     add_bot_log(user_id, f"👤 Trade MANUEL: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
     return f"Trade manuel {action} {coin} ouvert à ${price}", price
 
@@ -4077,9 +4269,23 @@ async def pending_orders_loop():
 def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
     """Prise de trade manuelle libre — coin/direction/taille/levier au choix, indépendante
     de tout signal généré par le bot. Utilise le mode (paper/live) actuellement configuré.
-    Les seuils custom_* écrasent les réglages de compte pour CE trade uniquement (None = défaut)."""
+    Les seuils custom_* écrasent les réglages de compte pour CE trade uniquement (None = défaut).
+    Mode Accumulation : plafonné à accumulation_max_positions positions simultanées (capital
+    additionnel à chaque achat, pas de rotation — le plafond limite l'exposition totale)."""
+    if req.is_accumulation:
+        conn = get_db()
+        cfg = conn.execute("SELECT accumulation_max_positions FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        max_pos = cfg["accumulation_max_positions"] if cfg and "accumulation_max_positions" in cfg.keys() and cfg["accumulation_max_positions"] else 5
+        current_pos = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)
+        ).fetchone()[0]
+        conn.close()
+        if current_pos >= max_pos:
+            raise HTTPException(status_code=400, detail=f"Plafond Accumulation atteint ({current_pos}/{max_pos} positions simultanées) — revendez-en une ou augmentez le plafond")
     try:
-        message, _ = execute_manual_trade(user_id, req.coin, req.action, req.size_usdc, req.leverage, req.dict())
+        message, _ = execute_manual_trade(user_id, req.coin, req.action, req.size_usdc, req.leverage, req.dict(),
+                                            is_accumulation=req.is_accumulation, accumulation_target_pct=req.accumulation_target_pct,
+                                            accumulation_support_price=req.accumulation_support_price)
         return {"message": message}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
