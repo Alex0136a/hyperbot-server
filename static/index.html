@@ -374,6 +374,7 @@ function App() {
   const [filterHours, setFilterHours] = useState(true);
   const [filterExtraHours, setFilterExtraHours] = useState(true);
   const [hardCapEnabled, setHardCapEnabled] = useState(false);
+  const [accumulationEnabled, setAccumulationEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -406,6 +407,7 @@ function App() {
   const [orderMode, setOrderMode] = useState("now"); // "now" ou "schedule"
   const [editingOrderId, setEditingOrderId] = useState(null);
   const [invalidationPrice, setInvalidationPrice] = useState("");
+  const [accumulationTargetPct, setAccumulationTargetPct] = useState("");
   const [conditionsList, setConditionsList] = useState([]);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -467,6 +469,7 @@ function App() {
       setFilterHours(cfg?.filter_hours !== 0);
       setFilterExtraHours(cfg?.filter_extra_hours !== 0);
       setHardCapEnabled(cfg?.hard_cap_enabled === 1);
+      setAccumulationEnabled(cfg?.accumulation_enabled === 1);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -974,6 +977,9 @@ Confirmer ?`
                     {!!matchedTrade?.is_manual && (
                       <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Position ouverte manuellement, pas par le bot">👤 MANUEL</span>
                     )}
+                    {!!matchedTrade?.is_accumulation && (
+                      <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Accumulation — sans levier, pas de vente forcée en perte">💰 ACCUMULATION</span>
+                    )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
                 </div>
@@ -1218,6 +1224,19 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation (achat auto sur RSI {config?.accumulation_rsi_threshold||30} survente)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (RSI survente + retournement), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
+              </div>
+              <button onClick={()=>{
+                const v=!accumulationEnabled; setAccumulationEnabled(v);
+                apiCall("/api/config/filters","PUT",{"accumulation_enabled":v},token);
+              }} style={{background:accumulationEnabled?"#1e3a5f22":"#0f1629",border:accumulationEnabled?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:accumulationEnabled?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {accumulationEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
               </div>
@@ -1382,6 +1401,9 @@ Confirmer ?`
                         {!!trade.is_manual && (
                           <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
                         )}
+                        {!!trade.is_accumulation && (
+                          <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={`Accumulation — objectif +${trade.accumulation_target_pct}%, pas de vente forcée en perte`}>💰 ACCUMULATION</span>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
                         <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
@@ -1434,6 +1456,9 @@ Confirmer ?`
                       <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
                       {!!trade.is_manual && (
                         <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
+                      )}
+                      {!!trade.is_accumulation && (
+                        <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Accumulation — sans levier, pas de vente forcée en perte">💰 ACCUMULATION</span>
                       )}
                       {trade.peak_price_pct != null && (
                         <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
@@ -1526,6 +1551,12 @@ Confirmer ?`
                     {key:"trailing_gap_usd",label:"Plafond écart trailing ($)",def:1.0,step:0.1,min:0.1,max:20},
                     {key:"trailing_widen_max_mult",label:"Trailing progressif - plafond (×)",def:3.0,step:0.5,min:1,max:10},
                     {key:"hard_cap_pct",label:"Plafond absolu de PnL (%)",def:2.5,step:0.1,min:0.1,max:50},
+                    {key:"accumulation_target_pct",label:"Accumulation - objectif de gain (%)",def:2.0,step:0.5,min:0.5,max:50},
+                    {key:"accumulation_size_pct",label:"Accumulation - taille par achat auto (% du capital, compound)",def:2.0,step:0.5,min:0.5,max:20},
+                    {key:"accumulation_size_usdc",label:"Accumulation - taille par défaut suggérée en achat manuel ($)",def:20.0,step:5,min:5,max:1000},
+                    {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées",def:5,step:1,min:1,max:50},
+                    {key:"accumulation_rsi_threshold",label:"Accumulation - seuil RSI survente",def:30,step:1,min:5,max:45},
+                    {key:"accumulation_breakdown_buffer_pct",label:"Accumulation - marge de rupture de support (%)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"btc_eth_2d_trend_threshold",label:"BTC/ETH - tendance 2j (%)",def:6.0,step:0.5,min:1,max:20},
                     {key:"qp_lock_trigger_usd",label:"Plancher QP haut - seuil d'armement ($)",def:1.5,step:0.1,min:0.1,max:20},
                     {key:"quick_profit_usd",label:"Plancher QP haut - montant garanti ($)",def:1.1,step:0.1,min:0.1,max:20},
@@ -1726,7 +1757,18 @@ Confirmer ?`
               <div style={{display:"flex",gap:6,marginBottom:8}}>
                 <button onClick={()=>setOrderMode("now")} style={{flex:1,background:orderMode==="now"?"#1e3a5f":"#0f1629",border:orderMode==="now"?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:8,color:orderMode==="now"?"#60a5fa":"#64748b",fontWeight:700,fontSize:11,cursor:"pointer"}}>⚡ Ouvrir maintenant</button>
                 <button onClick={()=>setOrderMode("schedule")} style={{flex:1,background:orderMode==="schedule"?"#1e3a5f":"#0f1629",border:orderMode==="schedule"?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:8,color:orderMode==="schedule"?"#60a5fa":"#64748b",fontWeight:700,fontSize:11,cursor:"pointer"}}>⏳ Programmer</button>
+                <button onClick={()=>{setOrderMode("accumulation"); setManualAction("LONG");}} style={{flex:1,background:orderMode==="accumulation"?"#1e3a5f":"#0f1629",border:orderMode==="accumulation"?"1px solid #fbbf24":"1px solid #1e2d4a",borderRadius:6,padding:8,color:orderMode==="accumulation"?"#fbbf24":"#64748b",fontWeight:700,fontSize:11,cursor:"pointer"}}>💰 Accumulation</button>
               </div>
+              {orderMode==="accumulation" && (
+                <div style={{background:"#0f1629",border:"1px solid #fbbf24",borderRadius:6,padding:10}}>
+                  <div style={{fontSize:9,color:"#fbbf24",marginBottom:6,fontWeight:700}}>ACHAT SANS LEVIER — JAMAIS DE VENTE FORCÉE EN PERTE</div>
+                  <div style={{fontSize:9,color:"#64748b",marginBottom:8}}>Achète maintenant au prix actuel, sans levier. Revend quand l'objectif de gain est atteint. Ici (achat manuel), la position est conservée indéfiniment si le prix baisse (patience, pas de stop) — la protection anti-rupture de support ne s'applique qu'aux achats détectés automatiquement par le bot (support connu et validé).</div>
+                  <div style={{fontSize:9,color:"#64748b",marginBottom:3}}>Objectif de gain (%) — défaut compte {config?.accumulation_target_pct||2}%</div>
+                  <input type="number" step="0.5" placeholder={config?.accumulation_target_pct||2}
+                    value={accumulationTargetPct} onChange={e=>setAccumulationTargetPct(e.target.value)}
+                    style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11}}/>
+                </div>
+              )}
               {orderMode==="schedule" && (
                 <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10}}>
                   <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>CONDITIONS DE DÉCLENCHEMENT (combinables — toutes doivent être remplies)</div>
@@ -1886,13 +1928,21 @@ Confirmer ?`
               const isLive = config?.trading_mode==="live";
               if(orderMode==="now" && isLive && !confirm(`Confirmer l'ouverture d'un trade LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
               if(orderMode==="schedule" && isLive && !confirm(`Confirmer la programmation d'un ordre LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
-              setManualStatus(editingOrderId ? "⏳ Modification en cours..." : orderMode==="now" ? "⏳ Ouverture en cours..." : "⏳ Programmation en cours...");
+              if(orderMode==="accumulation" && isLive && !confirm(`Confirmer l'achat ACCUMULATION LIVE (argent réel) : ${manualCoin}, ${manualSize} USDC, sans levier, objectif +${accumulationTargetPct||config?.accumulation_target_pct||2}% ?`)) return;
+              setManualStatus(editingOrderId ? "⏳ Modification en cours..." : orderMode==="now" ? "⏳ Ouverture en cours..." : orderMode==="accumulation" ? "⏳ Achat en cours..." : "⏳ Programmation en cours...");
               try {
                 if(orderMode==="now") {
                   const res = await apiCall("/api/paper/manual-open","POST",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage, ...manualCustom
                   },token);
                   setManualStatus(`✅ ${res.message}`);
+                } else if(orderMode==="accumulation") {
+                  const res = await apiCall("/api/paper/manual-open","POST",{
+                    coin:manualCoin, action:"LONG", size_usdc:manualSize, leverage:1,
+                    is_accumulation:true, accumulation_target_pct:accumulationTargetPct?Number(accumulationTargetPct):null
+                  },token);
+                  setManualStatus(`✅ ${res.message}`);
+                  setAccumulationTargetPct("");
                 } else if(editingOrderId) {
                   const res = await apiCall(`/api/pending-orders/${editingOrderId}`,"PUT",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
@@ -1913,9 +1963,11 @@ Confirmer ?`
                 }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
-            }} style={{width:"100%",background:config?.trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            }} style={{width:"100%",background:config?.trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":orderMode==="accumulation"?"linear-gradient(135deg,#b45309,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
               {orderMode==="now"
                 ? (config?.trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER")
+                : orderMode==="accumulation"
+                  ? (config?.trading_mode==="live"?"🔴 ACHETER EN LIVE (ARGENT RÉEL)":"💰 ACHETER (ACCUMULATION)")
                 : editingOrderId
                   ? "✏️ ENREGISTRER LES MODIFICATIONS"
                   : (config?.trading_mode==="live"?"🔴 PROGRAMMER EN LIVE (ARGENT RÉEL)":"⏳ PROGRAMMER L'ORDRE")}
