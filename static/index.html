@@ -1227,7 +1227,7 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation (achat auto sur RSI {config?.accumulation_rsi_threshold||30} survente)</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation (achat auto sur RSI {config?.accumulation_rsi_min||15}-{config?.accumulation_rsi_max||40})</div>
                 <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (RSI survente + retournement), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
               </div>
               <button onClick={()=>{
@@ -1239,14 +1239,14 @@ Confirmer ?`
             </div>
             {accumulationEnabled && (
               <div style={{padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
-                <div style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginBottom:6}}>🏆 Détection auto restreinte aux 10 meilleurs actifs (par performance réelle)</div>
+                <div style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginBottom:6}}>🏆 Détection auto restreinte aux actifs réellement rentables (max 10, net positif uniquement)</div>
                 {topPerformingCoins.length === 0 ? (
-                  <div style={{fontSize:9,color:"#475569"}}>Pas encore assez d'historique (min. 3 trades fermés par coin) — aucune restriction appliquée pour l'instant, tous les coins sont éligibles.</div>
+                  <div style={{fontSize:9,color:"#475569"}}>Aucun coin ne remplit encore les critères (min. 3 trades fermés ET net positif) — aucune restriction appliquée pour l'instant, tous les coins sont éligibles.</div>
                 ) : (
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                     {topPerformingCoins.map((c,i)=>(
-                      <span key={i} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"3px 8px",fontSize:9,color:c.net>=0?"#34d399":"#f87171"}}>
-                        {i+1}. {c.coin} ({c.net>=0?"+":""}{c.net}$, {c.winrate}%)
+                      <span key={i} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"3px 8px",fontSize:9,color:"#34d399"}}>
+                        {i+1}. {c.coin} (+{c.net}$, {c.winrate}%)
                       </span>
                     ))}
                   </div>
@@ -1574,7 +1574,8 @@ Confirmer ?`
                     {key:"accumulation_size_pct",label:"Accumulation - taille par achat auto (% du capital, compound)",def:2.0,step:0.5,min:0.5,max:20},
                     {key:"accumulation_size_usdc",label:"Accumulation - taille par défaut suggérée en achat manuel ($)",def:20.0,step:5,min:5,max:1000},
                     {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées",def:5,step:1,min:1,max:50},
-                    {key:"accumulation_rsi_threshold",label:"Accumulation - seuil RSI survente",def:30,step:1,min:5,max:45},
+                    {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
+                    {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
                     {key:"accumulation_breakdown_buffer_pct",label:"Accumulation - marge de rupture de support (%)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"btc_eth_2d_trend_threshold",label:"BTC/ETH - tendance 2j (%)",def:6.0,step:0.5,min:1,max:20},
                     {key:"qp_lock_trigger_usd",label:"Plancher QP haut - seuil d'armement ($)",def:1.5,step:0.1,min:0.1,max:20},
