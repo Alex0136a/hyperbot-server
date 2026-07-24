@@ -2318,7 +2318,7 @@ async def scan_markets(user_id: int):
                 try:
                     message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
                                                         is_accumulation=True, accumulation_target_pct=accum_target,
-                                                        accumulation_support_price=support_c)
+                                                        accumulation_support_price=support_c, is_manual=False)
                     priority_tag = "priorité top-10" if coin in accumulation_top_coins else "hors top-10"
                     add_bot_log(user_id, f"🤖💰 Accumulation auto ({priority_tag}): {message} (RSI {rsi_c:.1f}, support ${support_c:.4g}, retournement confirmé)", "success")
                 except ValueError as e:
@@ -4222,7 +4222,7 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None):
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None, is_manual: bool = True):
     """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
     'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
     remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
@@ -4283,15 +4283,16 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             is_accumulation, accumulation_target_pct, accumulation_support_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-            VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, coin, action, fill_price, fill_price, size_usdc, leverage,
-             now_iso, today, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price,
+             now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
              c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
         conn.commit()
         conn.close()
-        label = "👤💰 Achat ACCUMULATION LIVE" if is_accumulation else "👤🔴 Trade MANUEL LIVE"
+        prefix = "👤" if is_manual else "🤖"
+        label = f"{prefix}💰 Achat ACCUMULATION LIVE" if is_accumulation else f"{prefix}🔴 Trade {'MANUEL' if is_manual else 'AUTO'} LIVE"
         add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{leverage})", "success")
         return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
@@ -4304,19 +4305,20 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         accumulation_support_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, coin, action, price, price, size_usdc, leverage,
-         now_iso, today, accum_flag, accum_target, accumulation_support_price,
+         now_iso, today, 1 if is_manual else 0, accum_flag, accum_target, accumulation_support_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
          c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
+    prefix = "👤" if is_manual else "🤖"
     if is_accumulation:
-        add_bot_log(user_id, f"👤💰 Achat ACCUMULATION: {action} {coin} @ ${price} | {size_usdc} USDC — objectif +{accum_target}%, pas de sortie forcée en perte", "success")
+        add_bot_log(user_id, f"{prefix}💰 Achat ACCUMULATION: {action} {coin} @ ${price} | {size_usdc} USDC — objectif +{accum_target}%, pas de sortie forcée en perte", "success")
         return f"Achat Accumulation {action} {coin} ouvert à ${price} (objectif +{accum_target}%)", price
-    add_bot_log(user_id, f"👤 Trade MANUEL: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
+    add_bot_log(user_id, f"{prefix} Trade {'MANUEL' if is_manual else 'AUTO'}: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
     return f"Trade manuel {action} {coin} ouvert à ${price}", price
 
 def _pending_order_custom_dict(order: dict) -> dict:
