@@ -202,6 +202,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # % du capital total réellement déployable pour le trading automatique (bot principal
+        # ET Accumulation) — le reste (100% - ce %) reste en réserve, jamais engagé. Permet de
+        # commencer prudemment (ex: 50%) avant de passer à 100% une fois en confiance.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN capital_allocation_pct REAL DEFAULT 100.0")
+        conn.commit()
+    except: pass
+    try:
         # Plafond du recul du trailing en $ (nouveau usage) — migre les configs encore
         # sur l'ancien défaut 0.3 (jamais utilisé jusqu'ici) vers le nouveau défaut 1.0
         conn.execute("UPDATE bot_config SET trailing_gap_usd=1.0 WHERE trailing_gap_usd=0.3 OR trailing_gap_usd IS NULL")
@@ -1698,7 +1705,8 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
         max_trades = cfg["max_open_trades"] if "max_open_trades" in cfg.keys() and cfg["max_open_trades"] else 5
         portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
         capital = portfolio["balance"] if portfolio else 1000.0
-        size = round(capital / max_trades, 2)
+        alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
+        size = round((capital * alloc_pct / 100) / max_trades, 2)
         if not portfolio or portfolio["balance"] < size:
             return
 
@@ -1924,6 +1932,12 @@ async def scan_markets(user_id: int):
 
         pending_opens = []  # candidats de ce cycle en attente de sélection anti-corrélation (meilleure moitié)
 
+        # Mode Accumulation : restreint la détection automatique aux 10 meilleurs actifs par
+        # performance réelle (calculé une seule fois par cycle, pas par coin — évite de refaire
+        # la requête N fois). Liste vide tant que l'historique est insuffisant (< min_trades par
+        # coin) — dans ce cas, aucune restriction n'est appliquée (pas encore assez de recul).
+        accumulation_top_coins = get_top_performing_coins(user_id) if config and config["accumulation_enabled"] else []
+
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
             if coin not in prices:
@@ -2011,7 +2025,8 @@ async def scan_markets(user_id: int):
             #  3. Confirmation de retournement : dernière bougie clôture en hausse (vert) ET
             #     (RSI qui remonte sur les dernières bougies OU MACD qui devient haussier) —
             #     évite d'acheter alors que le prix continue encore de chuter sur le support.
-            if config and config["accumulation_enabled"] and rsi is not None and support is not None:
+            in_top_coins = not accumulation_top_coins or coin in accumulation_top_coins
+            if config and config["accumulation_enabled"] and rsi is not None and support is not None and in_top_coins:
                 accum_rsi_thresh = config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0
                 near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
                 if rsi < accum_rsi_thresh and near_support:
@@ -2035,11 +2050,13 @@ async def scan_markets(user_id: int):
                         portfolio_row = conn_accum.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                         conn_accum.close()
                         if current_pos < max_pos and already_here == 0:
-                            # Taille en % du capital disponible (compound) — grandit/rétrécit
-                            # avec le portefeuille, comme le bot principal (capital ÷ trades max)
+                            # Taille en % du capital RÉELLEMENT ALLOUÉ (après réserve non
+                            # touchée) — compound, grandit/rétrécit avec le portefeuille,
+                            # comme le bot principal (capital alloué ÷ trades max)
                             accum_size_pct = config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0
                             capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
-                            accum_size = round(capital_disponible * accum_size_pct / 100, 2)
+                            alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
+                            accum_size = round((capital_disponible * alloc_pct / 100) * accum_size_pct / 100, 2)
                             accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
                             try:
                                 message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
@@ -2240,14 +2257,15 @@ async def scan_markets(user_id: int):
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
-                # Taille = capital total ÷ nombre de trades simultanés max — pour engager
-                # tout le capital disponible si tous les slots sont utilisés, en compound
-                # sur le solde courant (pas un capital initial fixe). Sans plafond de
-                # sécurité supplémentaire (Max Loss/QP + arrêt manuel jugés suffisants).
+                # Taille = (capital total × % alloué) ÷ nombre de trades simultanés max — pour
+                # engager le capital réellement disponible (réserve non touchée) si tous les
+                # slots sont utilisés, en compound sur le solde courant (pas un capital initial
+                # fixe). Sans plafond de sécurité supplémentaire (Max Loss/QP + arrêt manuel jugés suffisants).
                 portfolio_now = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 capital = portfolio_now["balance"] if portfolio_now else 1000.0
-                size = round(capital / max_trades, 2)
-                add_bot_log(user_id, f"📐 Taille trade: {size} USDC (capital {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
+                alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
+                size = round((capital * alloc_pct / 100) / max_trades, 2)
+                add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({alloc_pct}% de {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
@@ -2306,10 +2324,11 @@ async def scan_markets(user_id: int):
                 else:
                     open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
-                    # Taille = capital réel (Hyperliquid) ÷ nombre de trades simultanés max —
-                    # même formule qu'en paper, sans plafond de sécurité supplémentaire.
+                    # Taille = (capital réel Hyperliquid × % alloué) ÷ nombre de trades simultanés
+                    # max — même formule qu'en paper, sans plafond de sécurité supplémentaire.
                     capital = get_hl_account_value(account_address)
-                    size = round(capital / max_trades, 2) if capital > 0 else 0.0
+                    alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
+                    size = round((capital * alloc_pct / 100) / max_trades, 2) if capital > 0 else 0.0
                     coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                     same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
@@ -2400,6 +2419,27 @@ def is_coin_penalizing(user_id: int, coin: str, conn) -> bool:
         return False
     win_rate = (row["wins"] or 0) / max(row["total"] or 1, 1) * 100
     return win_rate < PENALIZING_WINRATE_THRESHOLD and (row["net"] or 0) < PENALIZING_NET_THRESHOLD
+
+def get_top_performing_coins(user_id: int, limit: int = 10, min_trades: int = 3) -> list:
+    """Classement en direct des meilleurs actifs par performance réelle (net PnL), à partir
+    de l'historique des trades fermés — équivalent de la section 'Performance par actif' du
+    Bilan, mais calculé en direct dans l'app plutôt qu'à partir d'un rapport externe.
+    Écarte les coins avec un échantillon trop faible (< min_trades) pour éviter qu'un
+    résultat isolé (bon ou mauvais) fausse le classement. Utilisé par le mode Accumulation
+    pour prioriser les actifs qui ont historiquement le mieux performé."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT coin, COUNT(*) as total, SUM(pnl) as net,
+            SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+        GROUP BY coin
+        HAVING total >= ?
+        ORDER BY net DESC
+        LIMIT ?
+    """, (user_id, min_trades, limit)).fetchall()
+    conn.close()
+    return [r["coin"] for r in rows]
 
 def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None, btc_change: float = 0.0) -> int:
     """Retourne la confiance requise selon l'historique récent du coin/direction :
@@ -3366,6 +3406,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_max_positions: Optional[int] = None
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
+    capital_allocation_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
@@ -3517,6 +3558,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_max_positions": config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
+        "capital_allocation_pct": config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
@@ -3623,6 +3665,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
+    if req.capital_allocation_pct is not None:
+        conn.execute("UPDATE bot_config SET capital_allocation_pct=? WHERE user_id=?", (req.capital_allocation_pct, user_id))
     if req.qp_lock_trigger_usd is not None:
         conn.execute("UPDATE bot_config SET qp_lock_trigger_usd=? WHERE user_id=?", (req.qp_lock_trigger_usd, user_id))
     if req.qp_arm_low_usd is not None:
@@ -3868,6 +3912,25 @@ def get_stats(user_id: int = Depends(get_current_user)):
     avg_conf = int(sum(s["confidence"] for s in signals) / total) if total else 0
     avg_rr = round(sum(s["risk_reward"] or 0 for s in signals) / total, 2) if total else 0
     return {"total": total, "longs": longs, "shorts": shorts, "avg_confidence": avg_conf, "avg_rr": avg_rr}
+
+@app.get("/api/coins/top-performing")
+def get_top_performing_coins_endpoint(user_id: int = Depends(get_current_user)):
+    """Classement en direct des meilleurs actifs par performance réelle — utilisé par le mode
+    Accumulation pour prioriser, et affiché dans l'interface pour transparence."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT coin, COUNT(*) as total, SUM(pnl) as net,
+            SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins
+        FROM paper_trades
+        WHERE user_id=? AND status='CLOSED'
+        GROUP BY coin
+        HAVING total >= 3
+        ORDER BY net DESC
+        LIMIT 10
+    """, (user_id,)).fetchall()
+    conn.close()
+    return {"coins": [{"coin": r["coin"], "trades": r["total"], "net": round(r["net"] or 0, 2),
+                        "winrate": round((r["wins"] or 0) / max(r["total"], 1) * 100, 1)} for r in rows]}
 
 @app.get("/api/coins/max-confidence")
 def get_max_confidence_by_coin(threshold: int = 95, user_id: int = Depends(get_current_user)):
