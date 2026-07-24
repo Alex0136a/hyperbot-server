@@ -413,6 +413,7 @@ function App() {
   const [newCondValue, setNewCondValue] = useState("");
   const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
   const [rangeOpportunities, setRangeOpportunities] = useState([]);
+  const [topPerformingCoins, setTopPerformingCoins] = useState([]);
   const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
   const [confThreshold, setConfThreshold] = useState(95);
@@ -445,7 +446,7 @@ function App() {
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
       // 2. Données secondaires en parallèle
-      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders, rangeOpps] = await Promise.all([
+      const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders, rangeOpps, topCoins] = await Promise.all([
         apiCall("/api/config","GET",null,token),
         apiCall("/api/signals?limit=50","GET",null,token),
         apiCall("/api/prices","GET",null,token),
@@ -460,10 +461,12 @@ function App() {
         apiCall("/api/market-data","GET",null,token),
         apiCall("/api/pending-orders","GET",null,token),
         apiCall("/api/range-opportunities","GET",null,token),
+        apiCall("/api/coins/top-performing","GET",null,token),
       ]);
       setMarketData(mktData?.data||{});
       setPendingOrders({pending:pendOrders?.pending||[], history:pendOrders?.history||[]});
       setRangeOpportunities(rangeOpps?.opportunities||[]);
+      setTopPerformingCoins(topCoins?.coins||[]);
       setConfig(cfg);
       setAiContinuous(cfg?.ai_continuous === 1);
       setFilterHours(cfg?.filter_hours !== 0);
@@ -1234,6 +1237,22 @@ Confirmer ?`
                 {accumulationEnabled?"✅ ON":"⭕ OFF"}
               </button>
             </div>
+            {accumulationEnabled && (
+              <div style={{padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+                <div style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginBottom:6}}>🏆 Détection auto restreinte aux 10 meilleurs actifs (par performance réelle)</div>
+                {topPerformingCoins.length === 0 ? (
+                  <div style={{fontSize:9,color:"#475569"}}>Pas encore assez d'historique (min. 3 trades fermés par coin) — aucune restriction appliquée pour l'instant, tous les coins sont éligibles.</div>
+                ) : (
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {topPerformingCoins.map((c,i)=>(
+                      <span key={i} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:4,padding:"3px 8px",fontSize:9,color:c.net>=0?"#34d399":"#f87171"}}>
+                        {i+1}. {c.coin} ({c.net>=0?"+":""}{c.net}$, {c.winrate}%)
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
@@ -1628,6 +1647,16 @@ Confirmer ?`
                   <input type="number" defaultValue={config?.max_open_trades||5} min="1" max="20"
                     onChange={e=>apiCall("/api/config","PUT",{max_open_trades:Number(e.target.value)},token).then(loadData)}
                     style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:9,color:"#475569",marginBottom:4,letterSpacing:1}}>% DU CAPITAL ALLOUÉ AU TRADING</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <input type="number" defaultValue={config?.capital_allocation_pct||100} min="1" max="100" step="5"
+                      onChange={e=>apiCall("/api/config","PUT",{capital_allocation_pct:Number(e.target.value)},token).then(loadData)}
+                      style={{flex:1,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"8px 10px",color:"#e2e8f0",fontFamily:"inherit",fontSize:12}}/>
+                    <span style={{color:"#60a5fa",fontWeight:700,fontSize:14}}>%</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#334155",marginTop:4}}>Le reste ({100-(config?.capital_allocation_pct||100)}%) reste en réserve, jamais engagé — s'applique au bot principal ET à l'Accumulation</div>
                 </div>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
