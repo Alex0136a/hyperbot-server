@@ -3108,12 +3108,14 @@ async def check_positions_loop(user_id: int):
             if not config or not config["is_running"]:
                 break
             try:
-                # Seulement si WebSocket déconnecté — sinon WS gère en temps réel
+                # Seulement si WebSocket déconnecté — sinon WS gère déjà tout en temps réel
+                # (y compris le suivi du pic, Max Loss/QP/TTP). BUG CORRIGÉ : cette boucle
+                # appelait encore update_prices_display même quand ws_connected=True, créant
+                # une course avec le handler WebSocket — update_prices_display écrit pnl/
+                # current_price SANS jamais mettre à jour peak_price_pct, ce qui pouvait
+                # afficher un PnL ponctuel non reflété dans le pic réellement enregistré du trade.
                 if not ws_connected:
                     await update_open_positions(user_id)
-                else:
-                    # Juste mettre à jour l'affichage des prix (lecture seule)
-                    await update_prices_display(user_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3147,30 +3149,6 @@ async def auto_reset_macro_filter(user_id: int):
         conn2.commit()
         conn2.close()
         add_bot_log(user_id, "✅ Filtre macro désactivé automatiquement — fenêtre macro passée", "success")
-
-async def update_prices_display(user_id: int):
-    """Met à jour seulement le prix affiché — pas de fermeture — évite les locks DB"""
-    if not ws_prices:
-        return
-    try:
-        conn = get_db()
-        trades = conn.execute(
-            "SELECT id, coin, action, entry_price, size_usdc, leverage FROM paper_trades WHERE user_id=? AND status='OPEN'",
-            (user_id,)
-        ).fetchall()
-        for trade in trades:
-            trade = dict(trade)
-            cur = ws_prices.get(trade["coin"])
-            if not cur:
-                continue
-            pnl_dir = 1 if trade["action"] == "LONG" else -1
-            pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * pnl_dir
-            conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
-        conn.commit()
-        conn.close()
-    except:
-        pass
 
 async def update_open_positions(user_id: int):
     """Filet de secours (toutes les 5s, uniquement si le WebSocket est déconnecté) :
