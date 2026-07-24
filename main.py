@@ -1949,6 +1949,7 @@ async def scan_markets(user_id: int):
         # la requête N fois). Liste vide tant que l'historique est insuffisant (< min_trades par
         # coin) — dans ce cas, aucune restriction n'est appliquée (pas encore assez de recul).
         accumulation_top_coins = get_top_performing_coins(user_id) if config and config["accumulation_enabled"] else []
+        accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -2031,14 +2032,17 @@ async def scan_markets(user_id: int):
             # uniquement au % de gain visé. Plafonné en nombre de positions simultanées
             # (capital additionnel à chaque achat, pas de rotation — d'où le plafond).
             # Déclenchement en 3 conditions combinées (toutes requises) :
-            #  1. RSI sous le seuil de survente réglé (on achète bien un point statistiquement bas)
+            #  1. RSI dans la fourchette réglée (survente, sans excès type effondrement)
             #  2. Prix proche d'un VRAI support détecté (niveau validé par plusieurs touches
             #     réelles, pas juste un chiffre d'indicateur — voir detect_support_resistance)
             #  3. Confirmation de retournement : dernière bougie clôture en hausse (vert) ET
             #     (RSI qui remonte sur les dernières bougies OU MACD qui devient haussier) —
             #     évite d'acheter alors que le prix continue encore de chuter sur le support.
-            in_top_coins = not accumulation_top_coins or coin in accumulation_top_coins
-            if config and config["accumulation_enabled"] and rsi is not None and support is not None and in_top_coins:
+            # AUCUNE exclusion par le classement top-10 : n'importe quel coin qui remplit ces
+            # conditions est éligible. Le top-10 sert uniquement de PRIORITÉ en cas de conflit
+            # (plafond de positions atteint) — traité après la boucle, une fois tous les
+            # candidats de ce cycle connus.
+            if config and config["accumulation_enabled"] and rsi is not None and support is not None:
                 accum_rsi_min = config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0
                 accum_rsi_max = config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0
                 near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
@@ -2052,32 +2056,7 @@ async def scan_markets(user_id: int):
                     macd_bull_confirm = bool(macd and macd.get("crossBull"))
                     reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
                     if reversal_confirmed:
-                        conn_accum = get_db()
-                        max_pos = config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5
-                        current_pos = conn_accum.execute(
-                            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)
-                        ).fetchone()[0]
-                        already_here = conn_accum.execute(
-                            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_accumulation=1", (user_id, coin)
-                        ).fetchone()[0]
-                        portfolio_row = conn_accum.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-                        conn_accum.close()
-                        if current_pos < max_pos and already_here == 0:
-                            # Taille en % du capital RÉELLEMENT ALLOUÉ (après réserve non
-                            # touchée) — compound, grandit/rétrécit avec le portefeuille,
-                            # comme le bot principal (capital alloué ÷ trades max)
-                            accum_size_pct = config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0
-                            capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
-                            alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
-                            accum_size = round((capital_disponible * alloc_pct / 100) * accum_size_pct / 100, 2)
-                            accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
-                            try:
-                                message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
-                                                                    is_accumulation=True, accumulation_target_pct=accum_target,
-                                                                    accumulation_support_price=support)
-                                add_bot_log(user_id, f"🤖💰 Accumulation auto: {message} (RSI {rsi:.1f}, support ${support:.4g}, retournement confirmé)", "success")
-                            except ValueError as e:
-                                pass  # solde insuffisant ou autre — pas de log d'erreur pour ne pas polluer, juste on retente au prochain cycle
+                        accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi})
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
@@ -2245,6 +2224,41 @@ async def scan_markets(user_id: int):
                 "coin": coin, "action": ai["action"], "confidence": ai["confidence"],
                 "ai": ai, "price": price, "sig_id": sig_id,
             })
+
+        # Mode Accumulation — traitement de TOUS les candidats détectés ce cycle, une fois
+        # la boucle terminée. Priorité aux coins du top-10 (net positif) en cas de conflit
+        # (plafond de positions atteint), mais SANS exclure les autres — n'importe quel coin
+        # qui remplit les 3 conditions peut être acheté si de la place reste après les
+        # candidats prioritaires. Recheck du plafond à chaque achat (change au fil du traitement).
+        if accumulation_candidates and config and config["accumulation_enabled"]:
+            accumulation_candidates.sort(key=lambda c: 0 if c["coin"] in accumulation_top_coins else 1)
+            for cand in accumulation_candidates:
+                coin, support_c, rsi_c = cand["coin"], cand["support"], cand["rsi"]
+                conn_accum = get_db()
+                max_pos = config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5
+                current_pos = conn_accum.execute(
+                    "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)
+                ).fetchone()[0]
+                already_here = conn_accum.execute(
+                    "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_accumulation=1", (user_id, coin)
+                ).fetchone()[0]
+                portfolio_row = conn_accum.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                conn_accum.close()
+                if current_pos >= max_pos or already_here > 0:
+                    continue
+                accum_size_pct = config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0
+                capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
+                alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
+                accum_size = round((capital_disponible * alloc_pct / 100) * accum_size_pct / 100, 2)
+                accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
+                try:
+                    message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
+                                                        is_accumulation=True, accumulation_target_pct=accum_target,
+                                                        accumulation_support_price=support_c)
+                    priority_tag = "priorité top-10" if coin in accumulation_top_coins else "hors top-10"
+                    add_bot_log(user_id, f"🤖💰 Accumulation auto ({priority_tag}): {message} (RSI {rsi_c:.1f}, support ${support_c:.4g}, retournement confirmé)", "success")
+                except ValueError as e:
+                    pass  # solde insuffisant ou autre — pas de log d'erreur pour ne pas polluer, juste on retente au prochain cycle
 
         # === Filtre anti-corrélation entre candidats de CE cycle (avant toute ouverture) ===
         # Ne garde que la meilleure moitié (par confiance) de chaque cluster de coins
