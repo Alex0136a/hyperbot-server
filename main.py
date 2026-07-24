@@ -2042,21 +2042,43 @@ async def scan_markets(user_id: int):
             # conditions est éligible. Le top-10 sert uniquement de PRIORITÉ en cas de conflit
             # (plafond de positions atteint) — traité après la boucle, une fois tous les
             # candidats de ce cycle connus.
-            if config and config["accumulation_enabled"] and rsi is not None and support is not None:
+            if config and config["accumulation_enabled"] and rsi is not None:
                 accum_rsi_min = config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0
                 accum_rsi_max = config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0
-                near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
-                if accum_rsi_min <= rsi < accum_rsi_max and near_support:
-                    last_candle_green = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])
-                    rsi_recovering = False
-                    if len(closes) > 17:
-                        rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
-                        if rsi_prev is not None and rsi > rsi_prev:
-                            rsi_recovering = True
-                    macd_bull_confirm = bool(macd and macd.get("crossBull"))
-                    reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
-                    if reversal_confirmed:
-                        accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi})
+                if accum_rsi_min <= rsi < accum_rsi_max:
+                    # RSI dans la bonne fourchette — diagnostic détaillé de pourquoi ça achète
+                    # ou non, pour ne plus jamais avoir à deviner après coup (limité à 1 log
+                    # par coin toutes les 2h pour ne pas noyer les logs).
+                    diag_key = (user_id, coin)
+                    last_diag = accumulation_diagnostic_cache.get(diag_key)
+                    should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
+
+                    if support is None:
+                        if should_log_diag:
+                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
+                    else:
+                        near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
+                        if not near_support:
+                            if should_log_diag:
+                                accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                                dist_pct = abs(price - support) / support * 100
+                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette, support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}%) — pas d'achat", "info")
+                        else:
+                            last_candle_green = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])
+                            rsi_recovering = False
+                            if len(closes) > 17:
+                                rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
+                                if rsi_prev is not None and rsi > rsi_prev:
+                                    rsi_recovering = True
+                            macd_bull_confirm = bool(macd and macd.get("crossBull"))
+                            reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
+                            if reversal_confirmed:
+                                accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi})
+                            elif should_log_diag:
+                                accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                                raison = "bougie encore rouge" if not last_candle_green else "RSI ne remonte pas encore et MACD pas haussier"
+                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais retournement pas confirmé ({raison}) — pas d'achat", "info")
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
@@ -2695,6 +2717,8 @@ ws_connected = False
 # Cache des données de marché structurées (indicateurs pré-calculés)
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
 range_suggestion_cache = {}  # (user_id, coin) -> {"timestamp":..., "support":..., "resistance":..., "long_invalidation":..., "short_invalidation":..., "channel_pct":...}
+accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
+ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
 RANGE_SUGGESTION_COOLDOWN_HOURS = 4  # ne resignale pas le même coin avant ce délai
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
