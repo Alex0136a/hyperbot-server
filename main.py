@@ -196,6 +196,18 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Fourchette RSI (remplace le seuil unique) — borne haute réglée à 40 (moins strict
+        # que 30, laisse passer des configs où support+retournement sont déjà solides sans
+        # exiger une survente extrême) ET borne basse à 15 (évite d'acheter en pleine
+        # panique/effondrement, où le support a plus de chances de ne pas tenir).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_rsi_min REAL DEFAULT 15.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_rsi_max REAL DEFAULT 40.0")
+        conn.commit()
+    except: pass
+    try:
         # Marge de confirmation pour considérer un support comme réellement cassé (pas juste
         # un bruit/mèche passagère) — au-delà, on revend en Accumulation plutôt que d'attendre.
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_breakdown_buffer_pct REAL DEFAULT 1.0")
@@ -2027,9 +2039,10 @@ async def scan_markets(user_id: int):
             #     évite d'acheter alors que le prix continue encore de chuter sur le support.
             in_top_coins = not accumulation_top_coins or coin in accumulation_top_coins
             if config and config["accumulation_enabled"] and rsi is not None and support is not None and in_top_coins:
-                accum_rsi_thresh = config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0
+                accum_rsi_min = config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0
+                accum_rsi_max = config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0
                 near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
-                if rsi < accum_rsi_thresh and near_support:
+                if accum_rsi_min <= rsi < accum_rsi_max and near_support:
                     last_candle_green = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])
                     rsi_recovering = False
                     if len(closes) > 17:
@@ -2425,8 +2438,10 @@ def get_top_performing_coins(user_id: int, limit: int = 10, min_trades: int = 3)
     de l'historique des trades fermés — équivalent de la section 'Performance par actif' du
     Bilan, mais calculé en direct dans l'app plutôt qu'à partir d'un rapport externe.
     Écarte les coins avec un échantillon trop faible (< min_trades) pour éviter qu'un
-    résultat isolé (bon ou mauvais) fausse le classement. Utilisé par le mode Accumulation
-    pour prioriser les actifs qui ont historiquement le mieux performé."""
+    résultat isolé (bon ou mauvais) fausse le classement. N'inclut QUE les coins avec un net
+    réellement positif — mieux vaut moins de 10 coins éligibles que d'inclure un coin encore
+    négatif juste pour compléter la liste. Utilisé par le mode Accumulation pour prioriser
+    les actifs qui ont historiquement le mieux performé."""
     conn = get_db()
     rows = conn.execute("""
         SELECT coin, COUNT(*) as total, SUM(pnl) as net,
@@ -2434,7 +2449,7 @@ def get_top_performing_coins(user_id: int, limit: int = 10, min_trades: int = 3)
         FROM paper_trades
         WHERE user_id=? AND status='CLOSED'
         GROUP BY coin
-        HAVING total >= ?
+        HAVING total >= ? AND net > 0
         ORDER BY net DESC
         LIMIT ?
     """, (user_id, min_trades, limit)).fetchall()
@@ -3383,6 +3398,8 @@ class UpdateConfigRequest(BaseModel):
     accumulation_size_pct: Optional[float] = None
     accumulation_max_positions: Optional[int] = None
     accumulation_rsi_threshold: Optional[float] = None
+    accumulation_rsi_min: Optional[float] = None
+    accumulation_rsi_max: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
     capital_allocation_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
@@ -3535,6 +3552,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_size_pct": config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0,
         "accumulation_max_positions": config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
+        "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
+        "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "capital_allocation_pct": config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
@@ -3641,6 +3660,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_max_positions=? WHERE user_id=?", (req.accumulation_max_positions, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
+    if req.accumulation_rsi_min is not None:
+        conn.execute("UPDATE bot_config SET accumulation_rsi_min=? WHERE user_id=?", (req.accumulation_rsi_min, user_id))
+    if req.accumulation_rsi_max is not None:
+        conn.execute("UPDATE bot_config SET accumulation_rsi_max=? WHERE user_id=?", (req.accumulation_rsi_max, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
     if req.capital_allocation_pct is not None:
@@ -3902,7 +3925,7 @@ def get_top_performing_coins_endpoint(user_id: int = Depends(get_current_user)):
         FROM paper_trades
         WHERE user_id=? AND status='CLOSED'
         GROUP BY coin
-        HAVING total >= 3
+        HAVING total >= 3 AND net > 0
         ORDER BY net DESC
         LIMIT 10
     """, (user_id,)).fetchall()
