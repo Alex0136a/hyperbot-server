@@ -1209,6 +1209,14 @@ def analyze_with_rules(coin: str, tech: dict, price: float, max_loss_usd: float 
     ema_bear = bool(ema20 and ema50 and ema200 and ema20 < ema50 < ema200)
 
     action, confidence, signals = "WAIT", 50, []
+    rsi_extreme = rsi < 25 or rsi > 75
+    is_recent_spike = tech.get("is_recent_spike", False)
+    # Lors d'un RSI extrême causé par un PIC RAPIDE (pas une tendance soutenue sur plusieurs
+    # jours), MACD/EMA ne font que refléter le même mouvement récent de façon quasi
+    # tautologique — les traiter comme une vraie "contradiction indépendante" pénaliserait à
+    # tort un RSI extrême qui a statistiquement de bonnes chances de retour à la moyenne
+    # (fade). On neutralise donc leur pénalité (pas leur bonus) dans ce cas précis uniquement.
+    skip_contradiction_penalty = rsi_extreme and is_recent_spike
 
     if rsi < 25:
         action, confidence = "LONG", 78
@@ -1226,20 +1234,24 @@ def analyze_with_rules(coin: str, tech: dict, price: float, max_loss_usd: float 
     if action == "LONG":
         if macd_bull:
             confidence += 8; signals.append("MACD haussier confirmé")
-        elif macd_bear:
+        elif macd_bear and not skip_contradiction_penalty:
             confidence -= 12; signals.append("MACD contredit (baissier)")
+        elif macd_bear:
+            signals.append("MACD baissier mais pic rapide en cours — pas retenu contre le signal")
         if ema_bull:
             confidence += 6; signals.append("Structure EMA haussière")
-        elif ema_bear:
+        elif ema_bear and not skip_contradiction_penalty:
             confidence -= 10
     elif action == "SHORT":
         if macd_bear:
             confidence += 8; signals.append("MACD baissier confirmé")
-        elif macd_bull:
+        elif macd_bull and not skip_contradiction_penalty:
             confidence -= 12; signals.append("MACD contredit (haussier)")
+        elif macd_bull:
+            signals.append("MACD haussier mais pic rapide en cours — pas retenu contre le signal")
         if ema_bear:
             confidence += 6; signals.append("Structure EMA baissière")
-        elif ema_bull:
+        elif ema_bull and not skip_contradiction_penalty:
             confidence -= 10
 
     if vol_trend == "SPIKE":
@@ -2060,6 +2072,17 @@ async def scan_markets(user_id: int):
             vol_avg = sum(vols[-20:]) / 20
             vol_cur = vols[-1]
 
+            # Distingue un PIC RAPIDE (quelques bougies, mouvement brutal) d'une TENDANCE
+            # SOUTENUE (installée sur beaucoup plus de bougies) — évite que MACD/EMA, qui ne
+            # font que refléter le même mouvement récent de façon quasi tautologique lors d'un
+            # pic brutal, pénalisent à tort un RSI extrême qui a statistiquement de bonnes
+            # chances de retour à la moyenne (fade). Cf. WIF RSI 81 après poussée verticale.
+            is_recent_spike = False
+            if len(closes) >= 20:
+                move_recent = abs(closes[-1] - closes[-4]) / closes[-4] * 100 if closes[-4] else 0
+                move_longer = abs(closes[-1] - closes[-20]) / closes[-20] * 100 if closes[-20] else 0
+                is_recent_spike = move_longer > 0 and (move_recent / move_longer) > 0.6
+
             tech = {
                 "rsi": round(rsi, 2) if rsi else None,
                 "macd_bull": macd["crossBull"] if macd else False,
@@ -2074,6 +2097,7 @@ async def scan_markets(user_id: int):
                 "volume_trend": "SPIKE" if vol_cur > vol_avg*vol_mult else "ABOVE_AVG" if vol_cur > vol_avg else "BELOW_AVG",
                 "btc_trend": btc_trend,
                 "btc_change": btc_change,
+                "is_recent_spike": is_recent_spike,
             }
 
             # Mode Accumulation — détection automatique en plus de la possibilité de
