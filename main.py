@@ -1750,7 +1750,7 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
 
         max_same_dir = cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() else 2
         same_dir_count = conn.execute(
-            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, action)
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, action)
         ).fetchone()[0]
         if max_same_dir and same_dir_count >= max_same_dir:
             add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond direction atteint ({same_dir_count}/{max_same_dir})", "info")
@@ -2345,7 +2345,11 @@ async def scan_markets(user_id: int):
             # Auto-execute en mode paper
             cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct, max_same_direction_neutral, max_same_direction_trend FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             if cfg and cfg["trading_mode"] == "paper":
-                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
+                # Exclut les positions Accumulation du comptage — plafonds totalement
+                # indépendants entre le bot principal et l'Accumulation, malgré des réglages
+                # de compte séparés (max_open_trades vs accumulation_max_positions), le
+                # comptage réel doit aussi exclure explicitement is_accumulation=1.
+                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
                 # Taille = (capital total × % alloué) ÷ nombre de trades simultanés max — pour
@@ -2360,7 +2364,7 @@ async def scan_markets(user_id: int):
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
-                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
+                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, ai["action"])).fetchone()[0]
                 max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                 same_dir_blocked = same_dir_count >= max_same_dir
                 # Anti-corrélation réelle : bloque même sous le plafond si fortement corrélé (≥0.7)
@@ -2413,7 +2417,7 @@ async def scan_markets(user_id: int):
                 elif not HL_AGENT_PRIVATE_KEY:
                     add_bot_log(user_id, "⛔ Mode live: HL_AGENT_PRIVATE_KEY non configurée", "error")
                 else:
-                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN'", (user_id,)).fetchone()[0]
+                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
                     # Taille = (capital réel Hyperliquid × % alloué) ÷ nombre de trades simultanés
                     # max — même formule qu'en paper, sans plafond de sécurité supplémentaire.
@@ -2421,7 +2425,7 @@ async def scan_markets(user_id: int):
                     alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
                     size = round((capital * alloc_pct / 100) / max_trades, 2) if capital > 0 else 0.0
                     coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
-                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=?", (user_id, ai["action"])).fetchone()[0]
+                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                     same_dir_blocked = same_dir_count >= max_same_dir
                     correlated_coin = is_correlated_with_open_position(user_id, coin, ai["action"], conn)
