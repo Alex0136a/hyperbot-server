@@ -1355,10 +1355,10 @@ Confirmer ?`
       {tab==="logs" && (
         <div style={{padding:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:10,color:"#475569"}}>{persistentLogs?"📚 Historique persistant (200 entrées)":"⚡ Session courante (50 entrées)"}</span>
+            <span style={{fontSize:10,color:"#475569"}}>{persistentLogs?"📚 Historique persistant (jusqu'à 5000 entrées, ~20-24h)":"⚡ Session courante (50 entrées)"}</span>
             <button onClick={async()=>{
               const v=!persistentLogs; setPersistentLogs(v);
-              const r=await apiCall(v?"/api/bot/logs?persistent=true":"/api/bot/logs","GET",null,token);
+              const r=await apiCall(v?"/api/bot/logs?persistent=true&limit=5000":"/api/bot/logs","GET",null,token);
               setBotLogs(r?.logs||[]);
             }} style={{background:persistentLogs?"#1e3a5f":"#0f1629",border:persistentLogs?"1px solid #3b82f6":"1px solid #1e2d4a",borderRadius:6,padding:"4px 10px",color:persistentLogs?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
               {persistentLogs?"📚 PERSISTANT":"⚡ SESSION"}
