@@ -41,17 +41,23 @@ def add_bot_log(user_id: int, message: str, level: str = "info"):
     if len(bot_logs_memory[user_id]) > 50:
         bot_logs_memory[user_id] = bot_logs_memory[user_id][:50]
     print(message)
-    # Sauvegarde persistante en DB (garder 500 derniers logs)
+    # Sauvegarde persistante en DB (garder les 20 000 derniers logs — environ 2 à 4 jours de
+    # couverture au rythme habituel, contre ~1h seulement avec l'ancienne limite à 500).
+    # Tampon circulaire : avec l'index (user_id, id) en place, COUNT(*) et MIN(id) restent des
+    # lookups rapides (pas de balayage complet) — bien plus léger que comparer contre un
+    # ensemble des 20 000 dernières lignes à chaque insertion.
     try:
         conn = get_db()
         conn.execute(
             "INSERT INTO bot_activity_log (user_id, level, message) VALUES (?,?,?)",
             (user_id, level, message)
         )
-        # Nettoyer les vieux logs au-dela de 500
-        conn.execute("""DELETE FROM bot_activity_log WHERE user_id=? AND id NOT IN (
-            SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 500
-        )""", (user_id, user_id))
+        count = conn.execute("SELECT COUNT(*) FROM bot_activity_log WHERE user_id=?", (user_id,)).fetchone()[0]
+        if count > 20000:
+            conn.execute(
+                "DELETE FROM bot_activity_log WHERE user_id=? AND id=(SELECT MIN(id) FROM bot_activity_log WHERE user_id=?)",
+                (user_id, user_id)
+            )
         conn.commit()
         conn.close()
     except:
@@ -219,6 +225,12 @@ def init_db():
         # continue de tenir tant que RSI/MACD confirment encore la hausse (pas un simple
         # trailing sur le prix) — ne revend que si les indicateurs montrent un essoufflement.
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_qp_arm_pct REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        # Index composite indispensable pour que COUNT(*)/MIN(id) par utilisateur sur
+        # bot_activity_log restent rapides (sinon balayage complet de la table à chaque log).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_activity_log_user ON bot_activity_log(user_id, id)")
         conn.commit()
     except: pass
     try:
@@ -2961,9 +2973,9 @@ async def startup_cleanup(user_id: int):
             (pnl, user_id))
         cleaned.append(f"🧹 Trade orphelin fermé: {trade['action']} {trade['coin']} (PnL: {round(pnl,2)}$)")
 
-    # 6. Nettoyer les logs persistants > 500 entrées
+    # 6. Nettoyer les logs persistants > 20 000 entrées (cohérent avec add_bot_log)
     conn.execute("""DELETE FROM bot_activity_log WHERE user_id=? AND id NOT IN (
-        SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 500
+        SELECT id FROM bot_activity_log WHERE user_id=? ORDER BY id DESC LIMIT 20000
     )""", (user_id, user_id))
     
     # 7. Nettoyer la confiance dynamique des coins qui n'ont pas eu de perte depuis 24h
@@ -5175,14 +5187,16 @@ def get_daily_stats(user_id: int = Depends(get_current_user)):
     }
 
 @app.get("/api/bot/logs")
-def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = False):
+def get_bot_logs(user_id: int = Depends(get_current_user), persistent: bool = False, limit: int = 200):
     if persistent:
-        # Logs persistants depuis la DB
+        # Logs persistants depuis la DB — limite ajustable (jusqu'à 20 000, la rétention réelle)
+        # pour permettre un téléchargement complet couvrant plusieurs jours si besoin.
+        limit = max(1, min(limit, 20000))
         conn = get_db()
         rows = conn.execute(
             """SELECT level, message, created_at FROM bot_activity_log 
-               WHERE user_id=? ORDER BY id DESC LIMIT 200""",
-            (user_id,)
+               WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+            (user_id, limit)
         ).fetchall()
         conn.close()
         logs = [{"time": r["created_at"][11:19], "message": r["message"], "level": r["level"]} for r in rows]
