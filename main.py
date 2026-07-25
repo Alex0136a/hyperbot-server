@@ -1750,7 +1750,7 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
 
         max_same_dir = cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() else 2
         same_dir_count = conn.execute(
-            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, action)
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, action)
         ).fetchone()[0]
         if max_same_dir and same_dir_count >= max_same_dir:
             add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond direction atteint ({same_dir_count}/{max_same_dir})", "info")
@@ -1860,6 +1860,13 @@ async def scan_markets(user_id: int):
     filter_weekend = config["filter_weekend"] if config and "filter_weekend" in config.keys() else 1
     filter_macro = config["filter_macro"] if config and "filter_macro" in config.keys() else 0
 
+    # Indicateur de pause de l'exécution AUTOMATIQUE uniquement (bot principal + Accumulation).
+    # Le scan/l'analyse (RSI, MACD, EMA, support/résistance, suggestions...) continue toujours,
+    # même en heure bloquée — seule l'ouverture automatique de nouveaux trades est suspendue.
+    # Le trading manuel n'est jamais concerné (endpoints séparés, hors de cette fonction).
+    auto_trading_paused = False
+    auto_trading_pause_reason = None
+
     # === CALENDRIER MACRO FINNHUB ===
     finnhub_key = user["finnhub_key"] if user and "finnhub_key" in user.keys() else None
     if finnhub_key and not filter_macro:
@@ -1877,7 +1884,7 @@ async def scan_markets(user_id: int):
                 conn_m.commit()
                 conn_m.close()
                 add_bot_log(user_id, f"🔴 AUTO-PAUSE: {name} dans {hours}h — filtre macro activé automatiquement", "error")
-                return
+                auto_trading_paused, auto_trading_pause_reason = True, "macro_auto"
             elif hours <= 24:
                 add_bot_log(user_id, f"⚠️ MACRO ALERT: {name} dans {round(hours)}h — préparez-vous", "warning")
     
@@ -1890,8 +1897,8 @@ async def scan_markets(user_id: int):
     hc_start = config["hours_creuses_start"] if config and "hours_creuses_start" in config.keys() and config["hours_creuses_start"] is not None else 21
     hc_end = config["hours_creuses_end"] if config and "hours_creuses_end" in config.keys() and config["hours_creuses_end"] is not None else 24
     if filter_hours and hc_start <= hour_utc < hc_end:
-        add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades", "info")
-        return
+        add_bot_log(user_id, f"🌙 Session creuse ({hour_utc}h UTC) — pas de nouveaux trades (scan/analyse continuent)", "info")
+        auto_trading_paused, auto_trading_pause_reason = True, "session_creuse"
 
     # Tranches horaires supplémentaires bloquées, ponctuelles (pas forcément contiguës à
     # "heures creuses") — ex: 12h-13h et 14h-15h UTC, identifiées comme négatives sur le Bilan.
@@ -1900,17 +1907,17 @@ async def scan_markets(user_id: int):
     filter_extra_hours = config["filter_extra_hours"] if config and "filter_extra_hours" in config.keys() and config["filter_extra_hours"] is not None else 1
     extra_blocked = json.loads(config["extra_blocked_hours"]) if config and "extra_blocked_hours" in config.keys() and config["extra_blocked_hours"] else []
     if filter_extra_hours and hour_utc in extra_blocked:
-        add_bot_log(user_id, f"🌙 Tranche horaire bloquée ({hour_utc}h UTC, historique négatif) — pas de nouveaux trades", "info")
-        return
+        add_bot_log(user_id, f"🌙 Tranche horaire bloquée ({hour_utc}h UTC, historique négatif) — pas de nouveaux trades (scan/analyse continuent)", "info")
+        auto_trading_paused, auto_trading_pause_reason = True, "extra_blocked_hour"
 
     if filter_weekend and weekday >= 5:
         day_name = "Samedi" if weekday == 5 else "Dimanche"
-        add_bot_log(user_id, f"📅 {day_name} — trading suspendu (week-end)", "info")
-        return
+        add_bot_log(user_id, f"📅 {day_name} — nouveaux trades suspendus (week-end, scan/analyse continuent)", "info")
+        auto_trading_paused, auto_trading_pause_reason = True, "weekend"
 
     if filter_macro:
-        add_bot_log(user_id, f"⚠️ Pause macro activée manuellement — pas de nouveaux trades", "warning")
-        return
+        add_bot_log(user_id, f"⚠️ Pause macro activée manuellement — pas de nouveaux trades (scan/analyse continuent)", "warning")
+        auto_trading_paused, auto_trading_pause_reason = True, "macro_manuel"
 
     async with httpx.AsyncClient() as client:
         # Liste complète des actifs disponibles (30) — scannés dans tous les cas
@@ -2159,10 +2166,12 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"🔄 {coin}: Signal récent, ignoré", "info")
                 continue
 
-            # Verifier si coin deja en position ouverte
+            # Verifier si coin deja en position ouverte — exclut les positions Accumulation,
+            # qui sont un système totalement indépendant (sans levier, jamais de vente forcée)
+            # et ne doivent jamais empêcher le bot principal d'analyser/trader ce même coin.
             conn_check = get_db()
             coin_already_open = conn_check.execute(
-                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'",
+                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)",
                 (user_id, coin)
             ).fetchone()
             ai_continuous = config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0
@@ -2294,7 +2303,7 @@ async def scan_markets(user_id: int):
         # (plafond de positions atteint), mais SANS exclure les autres — n'importe quel coin
         # qui remplit les 3 conditions peut être acheté si de la place reste après les
         # candidats prioritaires. Recheck du plafond à chaque achat (change au fil du traitement).
-        if accumulation_candidates and config and config["accumulation_enabled"]:
+        if accumulation_candidates and config and config["accumulation_enabled"] and not auto_trading_paused:
             accumulation_candidates.sort(key=lambda c: 0 if c["coin"] in accumulation_top_coins else 1)
             for cand in accumulation_candidates:
                 coin, support_c, rsi_c = cand["coin"], cand["support"], cand["rsi"]
@@ -2344,12 +2353,12 @@ async def scan_markets(user_id: int):
 
             # Auto-execute en mode paper
             cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct, max_same_direction_neutral, max_same_direction_trend FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            if cfg and cfg["trading_mode"] == "paper":
+            if cfg and cfg["trading_mode"] == "paper" and not auto_trading_paused:
                 # Exclut les positions Accumulation du comptage — plafonds totalement
                 # indépendants entre le bot principal et l'Accumulation, malgré des réglages
                 # de compte séparés (max_open_trades vs accumulation_max_positions), le
                 # comptage réel doit aussi exclure explicitement is_accumulation=1.
-                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id,)).fetchone()[0]
+                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
                 # Taille = (capital total × % alloué) ÷ nombre de trades simultanés max — pour
@@ -2362,9 +2371,9 @@ async def scan_markets(user_id: int):
                 size = round((capital * alloc_pct / 100) / max_trades, 2)
                 add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({alloc_pct}% de {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
                 # Verifier si coin deja en position ouverte
-                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
+                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
-                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, ai["action"])).fetchone()[0]
+                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
                 max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                 same_dir_blocked = same_dir_count >= max_same_dir
                 # Anti-corrélation réelle : bloque même sous le plafond si fortement corrélé (≥0.7)
@@ -2407,7 +2416,7 @@ async def scan_markets(user_id: int):
                     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size, user_id))
                     add_bot_log(user_id, f"💰 PAPER TRADE: {ai['action']} {coin} @ ${entry_price} | {size} USDC (levier x{paper_leverage})", "success")
 
-            elif cfg and cfg["trading_mode"] == "live":
+            elif cfg and cfg["trading_mode"] == "live" and not auto_trading_paused:
                 user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                 account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
                 if not account_address:
@@ -2417,15 +2426,15 @@ async def scan_markets(user_id: int):
                 elif not HL_AGENT_PRIVATE_KEY:
                     add_bot_log(user_id, "⛔ Mode live: HL_AGENT_PRIVATE_KEY non configurée", "error")
                 else:
-                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id,)).fetchone()[0]
+                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
                     # Taille = (capital réel Hyperliquid × % alloué) ÷ nombre de trades simultanés
                     # max — même formule qu'en paper, sans plafond de sécurité supplémentaire.
                     capital = get_hl_account_value(account_address)
                     alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
                     size = round((capital * alloc_pct / 100) / max_trades, 2) if capital > 0 else 0.0
-                    coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)).fetchone()
-                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0)", (user_id, ai["action"])).fetchone()[0]
+                    coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
+                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                     same_dir_blocked = same_dir_count >= max_same_dir
                     correlated_coin = is_correlated_with_open_position(user_id, coin, ai["action"], conn)
