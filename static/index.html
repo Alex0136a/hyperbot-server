@@ -1453,10 +1453,11 @@ Confirmer ?`
                         </button>
                       </div>
                     </div>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:6}}>
                       {[
                         {l:"ENTRÉE",v:`$${trade.entry_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
                         {l:"ACTUEL",v:`$${trade.current_price?.toLocaleString("en-US",{maximumFractionDigits:4})}`},
+                        {l:"📈 PIC",v:trade.peak_price_pct!=null?`${trade.peak_price_pct.toFixed(2)}%`:"—",c:"#fbbf24"},
                         {l:"TAILLE",v:`${trade.size_usdc} USDC`},
                         {l:"OUVERT",v:new Date(trade.opened_at).toLocaleTimeString("fr-FR")},
                         {l:"⏱️ DURÉE",v:formatDuration(trade.opened_at),c:"#22d3ee"},
