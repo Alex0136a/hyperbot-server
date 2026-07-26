@@ -1192,6 +1192,8 @@ def cache_market_data(coin: str, tech: dict, price: float):
         "volume_trend": tech.get("volume_trend", "N/A"),
         "btc_trend": tech.get("btc_trend", "neutral"),
         "btc_change": round(tech.get("btc_change", 0), 2),
+        "support": tech.get("support"),
+        "resistance": tech.get("resistance"),
         "updated_at": dt.utcnow().strftime("%H:%M:%S")
     }
 
@@ -1546,17 +1548,16 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         armed = accum_peak_pct >= qp_arm_pct
 
         if armed:
-            # RSI/MACD comme garde-fou CONTINU dès l'armement — pas conditionné à un recul de
-            # prix d'abord. Dès que la tendance haussière n'est plus confirmée, on revend,
-            # quel que soit l'écart avec le pic (évite de laisser filer le gain en attendant
-            # un recul de prix qui pourrait ne jamais servir de déclencheur à temps).
+            # Sortie au SUPPORT détecté (pas RSI/MACD) — protège le gain à un vrai niveau
+            # technique plutôt que d'attendre une confirmation d'indicateur qui peut tarder
+            # et laisser filer trop de gain. Le support est recalculé en continu (cache
+            # rafraîchi à chaque cycle de scan), donc "suit" naturellement le marché comme
+            # un trailing, sans dépendre du niveau qui avait servi à l'achat initial.
             md = market_data_cache.get(trade["coin"], {})
-            macd_still_bullish = not md.get("macd_bear")
-            rsi_still_strong = md.get("rsi") is None or md["rsi"] >= 50
-            trend_continues = macd_still_bullish and rsi_still_strong
-            if not trend_continues:
-                accum_close_reason = "ACCUMULATION_TREND_END"
-                accum_log_msg = f"📊 {trade['coin']}: Tendance haussière plus confirmée (RSI {md.get('rsi')}, MACD {'baissier' if md.get('macd_bear') else 'neutre'}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic avait atteint {round(accum_peak_pct,2)}%)"
+            current_support = md.get("support")
+            if current_support and cur <= current_support:
+                accum_close_reason = "ACCUMULATION_SUPPORT_EXIT"
+                accum_log_msg = f"📉 {trade['coin']}: Retour au support (${current_support:.4g}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic avait atteint {round(accum_peak_pct,2)}%) — l'analyse décidera de la suite"
             # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
         elif pnl_pct_live >= target_pct:
             # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
@@ -2152,6 +2153,8 @@ async def scan_markets(user_id: int):
                 "btc_trend": btc_trend,
                 "btc_change": btc_change,
                 "is_recent_spike": is_recent_spike,
+                "support": support,
+                "resistance": resistance,
             }
 
             # Mode Accumulation — détection automatique en plus de la possibilité de
