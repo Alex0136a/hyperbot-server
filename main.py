@@ -2029,9 +2029,21 @@ async def scan_markets(user_id: int):
         # Analyze each coin — tous les actifs sont traités à égalité (le pré-filtre technique
         # décide seul qui mérite un appel IA, "active_coins" ne sert plus qu'à l'ordre de scan)
         opportunist_coins = [c for c in all_available_coins if c not in active_coins]
-        
-        # Scanner d'abord les coins actifs (priorité d'affichage), puis les autres
-        coins_to_scan = active_coins + opportunist_coins
+
+        # Classement en direct des meilleurs actifs par performance réelle (net PnL, même
+        # fonction que pour l'Accumulation) — calculé une seule fois par cycle, réutilisé pour
+        # réordonner le scan ET pour la priorité Accumulation. Ce même principe reste valable
+        # en LIVE : basé sur l'historique réel des trades, pas une donnée simulée.
+        top_performing_coins = get_top_performing_coins(user_id)
+
+        # Scanner d'abord les meilleurs actifs par performance réelle (priorité de trading),
+        # puis les coins actifs restants, puis les autres — un plafond de trades atteint
+        # profite donc en premier aux actifs qui ont statistiquement le mieux performé.
+        coins_to_scan = (
+            [c for c in top_performing_coins if c in active_coins or c in opportunist_coins] +
+            [c for c in active_coins if c not in top_performing_coins] +
+            [c for c in opportunist_coins if c not in top_performing_coins]
+        )
 
         # Seuils stratégie réglables (Paramètres > Réglages avancés), avec repli sur les défauts
         rsi_os = config["rsi_oversold"] if config and "rsi_oversold" in config.keys() and config["rsi_oversold"] else 35
@@ -2048,10 +2060,10 @@ async def scan_markets(user_id: int):
         pending_opens = []  # candidats de ce cycle en attente de sélection anti-corrélation (meilleure moitié)
 
         # Mode Accumulation : restreint la détection automatique aux 10 meilleurs actifs par
-        # performance réelle (calculé une seule fois par cycle, pas par coin — évite de refaire
-        # la requête N fois). Liste vide tant que l'historique est insuffisant (< min_trades par
-        # coin) — dans ce cas, aucune restriction n'est appliquée (pas encore assez de recul).
-        accumulation_top_coins = get_top_performing_coins(user_id) if config and config["accumulation_enabled"] else []
+        # performance réelle (même classement que ci-dessus, réutilisé — pas de requête en double).
+        # Liste vide tant que l'historique est insuffisant (< min_trades par coin) — dans ce cas,
+        # aucune restriction n'est appliquée (pas encore assez de recul).
+        accumulation_top_coins = top_performing_coins if config and config["accumulation_enabled"] else []
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
 
         for coin in coins_to_scan:
