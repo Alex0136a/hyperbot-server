@@ -224,7 +224,13 @@ def init_db():
         # atteint, le gain à accumulation_qp_floor_pct est garanti. Au-delà du plancher, on
         # continue de tenir tant que RSI/MACD confirment encore la hausse (pas un simple
         # trailing sur le prix) — ne revend que si les indicateurs montrent un essoufflement.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_qp_arm_pct REAL DEFAULT 1.5")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_qp_arm_pct REAL DEFAULT 3.0")
+        conn.commit()
+    except: pass
+    try:
+        # Armement remonté de 1.5% à 3% après retour d'expérience (RSI/MACD gardés comme
+        # garde-fou continu, sans conditionner à un recul de prix — voir manage_open_trade).
+        conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=3.0 WHERE accumulation_qp_arm_pct=1.5")
         conn.commit()
     except: pass
     try:
@@ -238,6 +244,12 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Remplace le plancher fixe par un vrai trailing qui SUIT le pic (déclenchement =
+        # pic - ce %), avec confirmation RSI/MACD requise avant la sortie effective.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_gap_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
         # Fenêtre de cooldown (minutes) après une perte sur un coin — pendant cette fenêtre,
         # une confirmation de mouvement (bougie dans le bon sens) est exigée en plus de la
         # confiance normale, plutôt que d'appliquer cette exigence à tous les coins.
@@ -248,6 +260,14 @@ def init_db():
         # Recalibré de 60 à 15 min (durée d'une bougie, l'intention initiale) — migre
         # uniquement les configs encore sur l'ancien défaut, ne touche pas aux personnalisations.
         conn.execute("UPDATE bot_config SET coin_loss_cooldown_minutes=15 WHERE coin_loss_cooldown_minutes=60")
+        conn.commit()
+    except: pass
+    try:
+        # Mode paper/live INDÉPENDANT pour Manuel + Accumulation, séparé de 'trading_mode'
+        # qui ne contrôle plus que l'auto-trading du bot principal. Permet de passer Manuel
+        # et Accumulation en live tout en gardant le bot principal en paper (déploiement
+        # prudent et progressif) — défaut 'paper', jamais live sans action explicite.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN manual_accum_trading_mode TEXT DEFAULT 'paper'")
         conn.commit()
     except: pass
     try:
@@ -1520,26 +1540,23 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
 
         cfg_accum_qp = conn.execute(
-            "SELECT accumulation_qp_arm_pct, accumulation_qp_floor_pct, accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?",
+            "SELECT accumulation_qp_arm_pct, accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?",
             (user_id,)).fetchone()
-        qp_arm_pct = cfg_accum_qp["accumulation_qp_arm_pct"] if cfg_accum_qp and "accumulation_qp_arm_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_arm_pct"] else 1.5
-        qp_floor_pct = cfg_accum_qp["accumulation_qp_floor_pct"] if cfg_accum_qp and "accumulation_qp_floor_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_floor_pct"] else 1.0
+        qp_arm_pct = cfg_accum_qp["accumulation_qp_arm_pct"] if cfg_accum_qp and "accumulation_qp_arm_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_arm_pct"] else 3.0
         armed = accum_peak_pct >= qp_arm_pct
 
-        if armed and pnl_pct_live <= qp_floor_pct:
-            accum_close_reason = "ACCUMULATION_QP_FLOOR"
-            accum_log_msg = f"💰🔒 {trade['coin']}: Plancher Accumulation garanti +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% — pic {round(accum_peak_pct,2)}% avait armé {qp_arm_pct}%, plancher {qp_floor_pct}%) — revente"
-        elif armed:
-            # Armé et au-dessus du plancher : on continue de tenir tant que RSI/MACD confirment
-            # encore la hausse — ne revend que si les indicateurs montrent un essoufflement,
-            # pas sur un simple recul de prix (contrairement au trailing du bot principal).
+        if armed:
+            # RSI/MACD comme garde-fou CONTINU dès l'armement — pas conditionné à un recul de
+            # prix d'abord. Dès que la tendance haussière n'est plus confirmée, on revend,
+            # quel que soit l'écart avec le pic (évite de laisser filer le gain en attendant
+            # un recul de prix qui pourrait ne jamais servir de déclencheur à temps).
             md = market_data_cache.get(trade["coin"], {})
             macd_still_bullish = not md.get("macd_bear")
             rsi_still_strong = md.get("rsi") is None or md["rsi"] >= 50
             trend_continues = macd_still_bullish and rsi_still_strong
             if not trend_continues:
                 accum_close_reason = "ACCUMULATION_TREND_END"
-                accum_log_msg = f"📊 {trade['coin']}: Tendance haussière plus confirmée par les indicateurs (RSI {md.get('rsi')}, MACD {'baissier' if md.get('macd_bear') else 'neutre'}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                accum_log_msg = f"📊 {trade['coin']}: Tendance haussière plus confirmée (RSI {md.get('rsi')}, MACD {'baissier' if md.get('macd_bear') else 'neutre'}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic avait atteint {round(accum_peak_pct,2)}%)"
             # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
         elif pnl_pct_live >= target_pct:
             # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
@@ -2385,10 +2402,12 @@ async def scan_markets(user_id: int):
                 conn_accum.close()
                 if current_pos >= max_pos or already_here > 0:
                     continue
-                accum_size_pct = config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0
+                # Taille = (capital alloué × 50%) ÷ nombre de positions simultanées max — même
+                # philosophie de compound que le bot principal (capital ÷ trades max), mais
+                # n'engage que la moitié du capital alloué pour l'Accumulation spécifiquement.
                 capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
                 alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
-                accum_size = round((capital_disponible * alloc_pct / 100) * accum_size_pct / 100, 2)
+                accum_size = round((capital_disponible * alloc_pct / 100 * 0.5) / max_pos, 2)
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
                 try:
                     message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
@@ -3546,6 +3565,7 @@ class UpdateConfigRequest(BaseModel):
     api_key: Optional[str] = None
     active_coins: Optional[List[str]] = None
     trading_mode: Optional[str] = None
+    manual_accum_trading_mode: Optional[str] = None
     ai_mode_paper: Optional[str] = None
     resume_now: Optional[bool] = None
     pause_now: Optional[bool] = None
@@ -3576,6 +3596,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_qp_arm_pct: Optional[float] = None
     accumulation_qp_floor_pct: Optional[float] = None
+    accumulation_trailing_gap_pct: Optional[float] = None
     coin_loss_cooldown_minutes: Optional[int] = None
     capital_allocation_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
@@ -3702,6 +3723,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "active_coins": json.loads(config["active_coins"]),
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
+        "manual_accum_trading_mode": config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper",
         "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
         "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
         "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
@@ -3731,8 +3753,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
-        "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 1.5,
+        "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
+        "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
         "coin_loss_cooldown_minutes": config["coin_loss_cooldown_minutes"] if "coin_loss_cooldown_minutes" in config.keys() and config["coin_loss_cooldown_minutes"] is not None else 15,
         "capital_allocation_pct": config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
@@ -3783,6 +3806,11 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
                     (req.trading_mode, user_id))
         # Log le changement de mode
         print(f"Mode change: {old_mode['trading_mode'] if old_mode else 'unknown'} -> {req.trading_mode} pour user {user_id}")
+    if req.manual_accum_trading_mode is not None:
+        old_mode2 = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        conn.execute("UPDATE bot_config SET manual_accum_trading_mode=? WHERE user_id=?",
+                    (req.manual_accum_trading_mode, user_id))
+        print(f"Mode change (Manuel+Accumulation): {old_mode2['manual_accum_trading_mode'] if old_mode2 else 'unknown'} -> {req.manual_accum_trading_mode} pour user {user_id}")
     if req.ai_mode_paper is not None:
         conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
                     (req.ai_mode_paper, user_id))
@@ -3849,6 +3877,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=? WHERE user_id=?", (req.accumulation_qp_arm_pct, user_id))
     if req.accumulation_qp_floor_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_qp_floor_pct=? WHERE user_id=?", (req.accumulation_qp_floor_pct, user_id))
+    if req.accumulation_trailing_gap_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_gap_pct=? WHERE user_id=?", (req.accumulation_trailing_gap_pct, user_id))
     if req.coin_loss_cooldown_minutes is not None:
         conn.execute("UPDATE bot_config SET coin_loss_cooldown_minutes=? WHERE user_id=?", (req.coin_loss_cooldown_minutes, user_id))
     if req.capital_allocation_pct is not None:
@@ -4337,8 +4367,8 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         leverage = 1  # spot-like, pas de levier en mode Accumulation
     conn = get_db()
     ensure_portfolio(user_id, conn)
-    cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
+    cfg = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    trading_mode = cfg["manual_accum_trading_mode"] if cfg and "manual_accum_trading_mode" in cfg.keys() and cfg["manual_accum_trading_mode"] else "paper"
 
     # Prix temps réel via WebSocket en priorité — la table 'prices' n'est mise à jour que
     # toutes les 3 minutes par le scan et peut être significativement périmée.
@@ -4567,8 +4597,8 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
 
     conn = get_db()
     now_iso = datetime.utcnow().isoformat()
-    cfg = conn.execute("SELECT trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    trading_mode = cfg["trading_mode"] if cfg and "trading_mode" in cfg.keys() else "paper"
+    cfg = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    trading_mode = cfg["manual_accum_trading_mode"] if cfg and "manual_accum_trading_mode" in cfg.keys() and cfg["manual_accum_trading_mode"] else "paper"
     conditions_json = json.dumps([c.dict() for c in req.conditions])
     # legacy_condition_type : satisfait l'ancienne colonne condition_type (NOT NULL, héritée
     # d'avant le passage aux conditions combinées) — plus utilisée par la logique actuelle,
