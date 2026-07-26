@@ -238,6 +238,19 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Fenêtre de cooldown (minutes) après une perte sur un coin — pendant cette fenêtre,
+        # une confirmation de mouvement (bougie dans le bon sens) est exigée en plus de la
+        # confiance normale, plutôt que d'appliquer cette exigence à tous les coins.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN coin_loss_cooldown_minutes INTEGER DEFAULT 15")
+        conn.commit()
+    except: pass
+    try:
+        # Recalibré de 60 à 15 min (durée d'une bougie, l'intention initiale) — migre
+        # uniquement les configs encore sur l'ancien défaut, ne touche pas aux personnalisations.
+        conn.execute("UPDATE bot_config SET coin_loss_cooldown_minutes=15 WHERE coin_loss_cooldown_minutes=60")
+        conn.commit()
+    except: pass
+    try:
         # % du capital total réellement déployable pour le trading automatique (bot principal
         # ET Accumulation) — le reste (100% - ce %) reste en réserve, jamais engagé. Permet de
         # commencer prudemment (ex: 50%) avant de passer à 100% une fois en confiance.
@@ -2253,6 +2266,23 @@ async def scan_markets(user_id: int):
             if confidence_ia < required_conf:
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
+
+            # Confirmation de mouvement CONDITIONNÉE : uniquement pour les coins ayant subi
+            # une perte récente (cooldown), pas pour tous les coins — évite d'exiger une
+            # confirmation systématique qui réduirait la fréquence de trade sans raison sur
+            # les coins qui se comportent normalement. Cas type : TAO/INJ, plusieurs pertes
+            # à pic quasi nul malgré une confiance déjà élevée (75-76%) — le signal était fort
+            # mais le marché venait de se retourner, sans lien avec le niveau de confiance.
+            cooldown_min = config["coin_loss_cooldown_minutes"] if config and "coin_loss_cooldown_minutes" in config.keys() and config["coin_loss_cooldown_minutes"] else 15
+            if cooldown_min > 0 and coin_recently_lost(user_id, coin, cooldown_min):
+                last_candle_confirms = "o" in candles_raw[-1] and (
+                    (action_ia == "LONG" and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])) or
+                    (action_ia == "SHORT" and float(candles_raw[-1]["c"]) < float(candles_raw[-1]["o"]))
+                )
+                if not last_candle_confirms:
+                    add_bot_log(user_id, f"⏳ {coin}: perte récente (<{cooldown_min}min) — confirmation de mouvement requise, pas encore confirmée — ignoré", "info")
+                    continue
+
             if is_opportunist:
                 add_bot_log(user_id, f"🎯 {coin}: Trade hors sélection ({confidence_ia}%) — actif ouvert dynamiquement !", "success")
 
@@ -2582,6 +2612,20 @@ def get_top_performing_coins(user_id: int, limit: int = 10, min_trades: int = 3)
     """, (user_id, min_trades, limit)).fetchall()
     conn.close()
     return [r["coin"] for r in rows]
+
+def coin_recently_lost(user_id: int, coin: str, cooldown_minutes: int = 60) -> bool:
+    """Vérifie si ce coin a subi une perte (peu importe la direction) dans la fenêtre de
+    cooldown récente — utilisé pour exiger une confirmation de mouvement supplémentaire
+    avant de retrader un actif qui vient de se faire sortir, plutôt que d'appliquer cette
+    exigence à tous les coins indistinctement (coût en fréquence de trade sinon)."""
+    conn = get_db()
+    cutoff = (datetime.utcnow() - timedelta(minutes=cooldown_minutes)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='CLOSED' AND pnl<=0 AND closed_at >= ?",
+        (user_id, coin, cutoff)
+    ).fetchone()
+    conn.close()
+    return (row[0] or 0) > 0
 
 def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None, btc_change: float = 0.0) -> int:
     """Retourne la confiance requise selon l'historique récent du coin/direction :
@@ -3532,6 +3576,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_qp_arm_pct: Optional[float] = None
     accumulation_qp_floor_pct: Optional[float] = None
+    coin_loss_cooldown_minutes: Optional[int] = None
     capital_allocation_pct: Optional[float] = None
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
@@ -3688,6 +3733,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 1.5,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
+        "coin_loss_cooldown_minutes": config["coin_loss_cooldown_minutes"] if "coin_loss_cooldown_minutes" in config.keys() and config["coin_loss_cooldown_minutes"] is not None else 15,
         "capital_allocation_pct": config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0,
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
@@ -3803,6 +3849,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=? WHERE user_id=?", (req.accumulation_qp_arm_pct, user_id))
     if req.accumulation_qp_floor_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_qp_floor_pct=? WHERE user_id=?", (req.accumulation_qp_floor_pct, user_id))
+    if req.coin_loss_cooldown_minutes is not None:
+        conn.execute("UPDATE bot_config SET coin_loss_cooldown_minutes=? WHERE user_id=?", (req.coin_loss_cooldown_minutes, user_id))
     if req.capital_allocation_pct is not None:
         conn.execute("UPDATE bot_config SET capital_allocation_pct=? WHERE user_id=?", (req.capital_allocation_pct, user_id))
     if req.qp_lock_trigger_usd is not None:
