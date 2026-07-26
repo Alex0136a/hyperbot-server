@@ -738,9 +738,12 @@ Confirmer ?`
                       <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>{o.coin}</span>
                       <a href={`https://app.hyperliquid.xyz/trade/${o.coin}`} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:"#60a5fa"}}>Bougies ↗</a>
                     </div>
-                    <div style={{display:"flex",gap:6,marginBottom:8}}>
+                    <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
                       <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>canal {o.channel_pct}%</span>
                       <span style={{background:"#1e2d4a",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{o.age_minutes}min</span>
+                      {o.biais_direction && (
+                        <span style={{background:o.biais_direction==="LONG"?"#0f3d2e":"#3d0f1a",color:o.biais_direction==="LONG"?"#34d399":"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🎯 {o.biais_direction} ~{o.biais_confiance}%</span>
+                      )}
                     </div>
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>{
@@ -750,7 +753,7 @@ Confirmer ?`
                         setInvalidationPrice(String(o.long_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
                         setTab("manuel");
-                      }} style={{flex:1,background:"#0f3d2e",border:"1px solid #34d399",borderRadius:5,padding:"6px 4px",color:"#34d399",fontSize:10,fontWeight:700,cursor:"pointer"}} title={`LONG au support $${o.support}`}>
+                      }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:5,padding:"6px 4px",color:"#34d399",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}} title={`LONG au support $${o.support}`}>
                         LONG ${o.support}
                       </button>
                       <button onClick={()=>{
@@ -760,7 +763,7 @@ Confirmer ?`
                         setInvalidationPrice(String(o.short_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
                         setTab("manuel");
-                      }} style={{flex:1,background:"#3d0f1a",border:"1px solid #f87171",borderRadius:5,padding:"6px 4px",color:"#f87171",fontSize:10,fontWeight:700,cursor:"pointer"}} title={`SHORT à la résistance $${o.resistance}`}>
+                      }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:5,padding:"6px 4px",color:"#f87171",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}} title={`SHORT à la résistance $${o.resistance}`}>
                         SHORT ${o.resistance}
                       </button>
                     </div>
@@ -1723,6 +1726,11 @@ Confirmer ?`
                       <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>{o.coin} <span style={{color:"#64748b",fontWeight:400,fontSize:10}}>canal {o.channel_pct}% · il y a {o.age_minutes}min</span></span>
                       <a href={`https://app.hyperliquid.xyz/trade/${o.coin}`} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:"#60a5fa"}}>Voir les bougies ↗</a>
                     </div>
+                    {o.biais_direction && (
+                      <div style={{marginBottom:6}}>
+                        <span style={{background:o.biais_direction==="LONG"?"#0f3d2e":"#3d0f1a",color:o.biais_direction==="LONG"?"#34d399":"#f87171",padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:700}}>🎯 Biais {o.biais_direction} (~{o.biais_confiance}%)</span>
+                      </div>
+                    )}
                     <div style={{display:"flex",gap:8}}>
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("LONG");
@@ -1730,7 +1738,7 @@ Confirmer ?`
                         setConditionsList([{type:"PRICE_BELOW", value:o.support}]);
                         setInvalidationPrice(String(o.long_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
-                      }} style={{flex:1,background:"#0f3d2e",border:"1px solid #34d399",borderRadius:6,padding:"8px 6px",color:"#34d399",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                      }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:6,padding:"8px 6px",color:"#34d399",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}}>
                         → LONG au support ${o.support}
                       </button>
                       <button onClick={()=>{
@@ -1739,7 +1747,7 @@ Confirmer ?`
                         setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}]);
                         setInvalidationPrice(String(o.short_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
-                      }} style={{flex:1,background:"#3d0f1a",border:"1px solid #f87171",borderRadius:6,padding:"8px 6px",color:"#f87171",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                      }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:6,padding:"8px 6px",color:"#f87171",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}}>
                         → SHORT à la résistance ${o.resistance}
                       </button>
                     </div>
