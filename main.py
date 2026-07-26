@@ -2086,36 +2086,6 @@ async def scan_markets(user_id: int):
             vols = [cd["v"] for cd in candles]
             coin_recent_closes[coin] = closes[-CORRELATION_LOOKBACK:]  # cache pour anti-corrélation, avant tout 'continue'
 
-            # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
-            # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion) —
-            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS.
-            # Inclut toutes les valeurs prêtes à copier dans un ordre programmé manuel :
-            # niveau d'entrée, invalidation (buffer 0.5% au-delà du niveau), et le niveau de
-            # retournement en cas de rupture confirmée (même niveau, direction opposée).
-            support, resistance = detect_support_resistance(candles)
-            if detect_range_market(candles, support, resistance):
-                cache_key = (user_id, coin)
-                last_sugg = range_suggestion_cache.get(cache_key)
-                if not last_sugg or (datetime.utcnow() - last_sugg["timestamp"]).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
-                    long_invalidation = support * 0.995
-                    short_invalidation = resistance * 1.005
-                    channel_pct = (resistance - support) / support * 100
-                    range_suggestion_cache[cache_key] = {
-                        "timestamp": datetime.utcnow(), "coin": coin, "support": round(support, 6),
-                        "resistance": round(resistance, 6), "long_invalidation": round(long_invalidation, 6),
-                        "short_invalidation": round(short_invalidation, 6), "channel_pct": round(channel_pct, 2)
-                    }
-                    msg = (
-                        f"📊 {coin}: marché en RANGE détecté (canal {channel_pct:.1f}%)\n"
-                        f"   → LONG au support ~${support:.4g} | invalidation ~${long_invalidation:.4g} | si rupture confirmée, envisager SHORT de retournement\n"
-                        f"   → SHORT à la résistance ~${resistance:.4g} | invalidation ~${short_invalidation:.4g} | si rupture confirmée, envisager LONG de retournement\n"
-                        f"   → Vérifier les bougies: https://app.hyperliquid.xyz/trade/{coin}\n"
-                        f"   → Suggestion uniquement, aucun ordre créé automatiquement"
-                    )
-                    add_bot_log(user_id, msg, "info")
-                    # Email retiré sur demande (trop de mails) — la suggestion reste visible
-                    # dans les logs, le Tableau de bord et Trading Manuel.
-
             e20 = calc_ema(closes, 20)
             e50 = calc_ema(closes, 50)
             e200 = calc_ema(closes, 200)
@@ -2126,6 +2096,69 @@ async def scan_markets(user_id: int):
             rsi = calc_rsi(closes, int(rsi_period))
             vol_avg = sum(vols[-20:]) / 20
             vol_cur = vols[-1]
+
+            # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
+            # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion) —
+            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS.
+            # Enrichi d'un BIAIS DIRECTIONNEL (LONG/SHORT + confiance) basé sur 3 facteurs déjà
+            # calculés à ce stade : position du prix dans le canal (proche support/résistance),
+            # RSI, et MACD — pour que la suggestion pointe vers un sens plutôt que de présenter
+            # les deux options à égalité. Inclut toutes les valeurs prêtes à copier dans un
+            # ordre programmé manuel : niveau d'entrée, invalidation (buffer 0.5%), retournement.
+            support, resistance = detect_support_resistance(candles)
+            if detect_range_market(candles, support, resistance):
+                cache_key = (user_id, coin)
+                last_sugg = range_suggestion_cache.get(cache_key)
+                if not last_sugg or (datetime.utcnow() - last_sugg["timestamp"]).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
+                    long_invalidation = support * 0.995
+                    short_invalidation = resistance * 1.005
+                    channel_pct = (resistance - support) / support * 100
+
+                    # Biais directionnel : position dans le canal (0=support, 1=résistance) +
+                    # RSI + MACD, chacun votant pour LONG ou SHORT avec un poids donné.
+                    position_in_range = (price - support) / (resistance - support) if resistance > support else 0.5
+                    score_long, score_short, raisons_long, raisons_short = 0, 0, [], []
+                    if position_in_range <= 0.35:
+                        score_long += 15; raisons_long.append(f"proche du support ({position_in_range*100:.0f}% du canal)")
+                    elif position_in_range >= 0.65:
+                        score_short += 15; raisons_short.append(f"proche de la résistance ({position_in_range*100:.0f}% du canal)")
+                    if rsi is not None:
+                        if rsi < 40:
+                            score_long += 10; raisons_long.append(f"RSI {rsi:.1f} (survente)")
+                        elif rsi > 60:
+                            score_short += 10; raisons_short.append(f"RSI {rsi:.1f} (surachat)")
+                    macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
+                    if macd_bias:
+                        if macd_bias.get("crossBull"):
+                            score_long += 10; raisons_long.append("MACD haussier")
+                        elif macd_bias.get("crossBear"):
+                            score_short += 10; raisons_short.append("MACD baissier")
+
+                    if score_long > score_short:
+                        biais_direction, biais_confiance, biais_raisons = "LONG", min(50 + score_long, 85), raisons_long
+                    elif score_short > score_long:
+                        biais_direction, biais_confiance, biais_raisons = "SHORT", min(50 + score_short, 85), raisons_short
+                    else:
+                        biais_direction, biais_confiance, biais_raisons = None, 50, []
+
+                    range_suggestion_cache[cache_key] = {
+                        "timestamp": datetime.utcnow(), "coin": coin, "support": round(support, 6),
+                        "resistance": round(resistance, 6), "long_invalidation": round(long_invalidation, 6),
+                        "short_invalidation": round(short_invalidation, 6), "channel_pct": round(channel_pct, 2),
+                        "biais_direction": biais_direction, "biais_confiance": biais_confiance,
+                    }
+                    biais_ligne = f"   🎯 Biais actuel: {biais_direction} (~{biais_confiance}%) — {', '.join(biais_raisons)}\n" if biais_direction else "   🎯 Pas de biais net actuellement — les deux sens restent également valables\n"
+                    msg = (
+                        f"📊 {coin}: marché en RANGE détecté (canal {channel_pct:.1f}%)\n"
+                        f"{biais_ligne}"
+                        f"   → LONG au support ~${support:.4g} | invalidation ~${long_invalidation:.4g} | si rupture confirmée, envisager SHORT de retournement\n"
+                        f"   → SHORT à la résistance ~${resistance:.4g} | invalidation ~${short_invalidation:.4g} | si rupture confirmée, envisager LONG de retournement\n"
+                        f"   → Vérifier les bougies: https://app.hyperliquid.xyz/trade/{coin}\n"
+                        f"   → Suggestion uniquement, aucun ordre créé automatiquement"
+                    )
+                    add_bot_log(user_id, msg, "info")
+                    # Email retiré sur demande (trop de mails) — la suggestion reste visible
+                    # dans les logs, le Tableau de bord et Trading Manuel.
 
             # Distingue un PIC RAPIDE (quelques bougies, mouvement brutal) d'une TENDANCE
             # SOUTENUE (installée sur beaucoup plus de bougies) — évite que MACD/EMA, qui ne
