@@ -754,7 +754,7 @@ Confirmer ?`
                         setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
                         setTab("manuel");
                       }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:5,padding:"6px 4px",color:"#34d399",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}} title={`LONG au support $${o.support}`}>
-                        LONG ${o.support}
+                        LONG ${o.support}{o.biais_direction==="LONG"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
@@ -764,7 +764,7 @@ Confirmer ?`
                         setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
                         setTab("manuel");
                       }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:5,padding:"6px 4px",color:"#f87171",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}} title={`SHORT à la résistance $${o.resistance}`}>
-                        SHORT ${o.resistance}
+                        SHORT ${o.resistance}{o.biais_direction==="SHORT"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
                     </div>
                   </div>
@@ -1739,7 +1739,7 @@ Confirmer ?`
                         setInvalidationPrice(String(o.long_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
                       }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:6,padding:"8px 6px",color:"#34d399",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}}>
-                        → LONG au support ${o.support}
+                        → LONG au support ${o.support}{o.biais_direction==="LONG"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
@@ -1748,7 +1748,7 @@ Confirmer ?`
                         setInvalidationPrice(String(o.short_invalidation));
                         setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
                       }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:6,padding:"8px 6px",color:"#f87171",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}}>
-                        → SHORT à la résistance ${o.resistance}
+                        → SHORT à la résistance ${o.resistance}{o.biais_direction==="SHORT"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
                     </div>
                   </div>
