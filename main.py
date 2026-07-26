@@ -689,6 +689,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Si l'ordre est issu d'une opportunité de range (bouton LONG au support / SHORT à la
+        # résistance), 'support' ou 'resistance' — le niveau de la condition PRICE_BELOW/ABOVE
+        # correspondante est alors mis à jour automatiquement si le niveau détecté se déplace
+        # pendant l'attente. NULL = condition figée (prix tapé manuellement), jamais ajustée.
+        conn.execute("ALTER TABLE pending_orders ADD COLUMN tracks_level TEXT")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("""CREATE TABLE IF NOT EXISTS coin_pause (
             user_id INTEGER,
             coin TEXT,
@@ -4348,6 +4356,7 @@ class PendingOrderRequest(BaseModel):
     leverage: int = 1
     conditions: List[OrderCondition] = []  # combinées en ET — toutes doivent être remplies
     invalidation_price: Optional[float] = None  # LONG: annule si prix <= ce niveau ; SHORT: annule si prix >= ce niveau
+    tracks_level: Optional[str] = None  # 'support' ou 'resistance' — la condition de prix suit ce niveau s'il se déplace
     custom_max_loss_pct: Optional[float] = None
     custom_qp_arm_low_usd: Optional[float] = None
     custom_qp_floor_low_usd: Optional[float] = None
@@ -4524,6 +4533,50 @@ def _evaluate_condition(cond: dict, coin: str, mids: dict) -> bool:
         return bool(data.get("macd_bear"))
     return None
 
+def update_tracking_pending_orders():
+    """Met à jour la condition de prix des ordres programmés (tous utilisateurs) issus d'une
+    opportunité de range (bouton LONG au support / SHORT à la résistance) si le niveau détecté
+    se déplace pendant l'attente — le point d'entrée programmé suit ainsi le marché plutôt que
+    de rester figé sur une valeur potentiellement obsolète. Seuls les ordres avec tracks_level
+    renseigné sont concernés ; une condition de prix tapée manuellement (tracks_level=NULL)
+    n'est jamais modifiée automatiquement."""
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT * FROM pending_orders WHERE status='PENDING' AND tracks_level IS NOT NULL"
+    ).fetchall()
+    for o in orders:
+        order = dict(o)
+        coin = order["coin"]
+        user_id = order["user_id"]
+        md = market_data_cache.get(coin, {})
+        new_level = md.get(order["tracks_level"])  # "support" ou "resistance"
+        if not new_level:
+            continue
+        try:
+            conditions = json.loads(order["conditions"]) if order.get("conditions") else []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        changed = False
+        for c in conditions:
+            if c.get("type") in ("PRICE_BELOW", "PRICE_ABOVE") and c.get("value") is not None:
+                old_value = c["value"]
+                if abs(new_level - old_value) / old_value * 100 > 0.05:  # évite les micro-ajustements bruyants
+                    c["value"] = round(new_level, 6)
+                    changed = True
+        if changed:
+            # Invalidation ajustée dans la même proportion, si elle avait été définie
+            new_invalidation = order["invalidation_price"]
+            if new_invalidation is not None:
+                buffer_ratio = 0.995 if order["tracks_level"] == "support" else 1.005
+                new_invalidation = round(new_level * buffer_ratio, 6)
+            conn.execute(
+                "UPDATE pending_orders SET conditions=?, invalidation_price=? WHERE id=?",
+                (json.dumps(conditions), new_invalidation, order["id"])
+            )
+            conn.commit()
+            add_bot_log(user_id, f"🔄 {coin}: ordre programmé #{order['id']} ajusté — {order['tracks_level']} déplacé à ${new_level:.4g} (point d'entrée mis à jour)", "info")
+    conn.close()
+
 def check_and_execute_pending_orders(mids: dict, conn):
     """Vérifie TOUS les ordres programmés (tous utilisateurs, tous types de condition
     confondus) et déclenche l'ouverture dès que TOUTES les conditions d'un ordre sont
@@ -4590,6 +4643,7 @@ async def pending_orders_loop():
             if ws_connected and ws_prices:
                 check_and_execute_pending_orders(ws_prices, conn)
             conn.close()
+            update_tracking_pending_orders()
         except Exception as e:
             print(f"⚠️ pending_orders_loop error: {e}")
         await asyncio.sleep(10)
@@ -4653,12 +4707,12 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
     # qui lit uniquement la colonne 'conditions' (JSON), mais doit rester non-NULL en base.
     legacy_condition_type = req.conditions[0].type if req.conditions else "PRICE_BELOW"
     conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
-        conditions, condition_type, status, created_at, trading_mode, invalidation_price,
+        conditions, condition_type, status, created_at, trading_mode, invalidation_price, tracks_level,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
-         conditions_json, legacy_condition_type, now_iso, trading_mode, req.invalidation_price,
+         conditions_json, legacy_condition_type, now_iso, trading_mode, req.invalidation_price, req.tracks_level,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
          req.custom_trail_trigger_pct, req.custom_stop_loss_price))
