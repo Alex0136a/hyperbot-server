@@ -562,6 +562,20 @@ function App() {
     } catch(e) { addLog(`❌ ${e.message}`, "error"); }
   };
 
+  const updateManualAccumMode = async (mode) => {
+    if (mode === config?.manual_accum_trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
+    const confirmMsg = mode === "live"
+      ? `Basculer Trading Manuel + Accumulation en LIVE (argent réel) ?\n\nLe bot automatique principal reste inchangé (actuellement ${config?.trading_mode==="live"?"LIVE":"Paper"}), et vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      : `Repasser Trading Manuel + Accumulation en Paper (simulation) ?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiCall("/api/config","PUT",{manual_accum_trading_mode:mode},token);
+      loadData();
+      addLog(`Mode Manuel+Accumulation: ${modeLabel}`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
   const updateTradingMode = async (mode) => {
     if (mode === config?.trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper Trading" : "LIVE (trades reels)";
@@ -1576,8 +1590,7 @@ Confirmer ?`
                     {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées",def:5,step:1,min:1,max:50},
                     {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
                     {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
-                    {key:"accumulation_qp_arm_pct",label:"Accumulation - armement du plancher (%)",def:1.5,step:0.1,min:0.5,max:20},
-                    {key:"accumulation_qp_floor_pct",label:"Accumulation - plancher garanti une fois armé (%)",def:1.0,step:0.1,min:0.1,max:20},
+                    {key:"accumulation_qp_arm_pct",label:"Accumulation - armement du garde-fou RSI/MACD (%)",def:3.0,step:0.1,min:0.5,max:20},
                     {key:"coin_loss_cooldown_minutes",label:"Cooldown après perte — confirmation requise (min, ≈1 bougie, 0=désactivé)",def:15,step:5,min:0,max:360},
                     {key:"accumulation_breakdown_buffer_pct",label:"Accumulation - marge de rupture de support (%)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"btc_eth_2d_trend_threshold",label:"BTC/ETH - tendance 2j (%)",def:6.0,step:0.5,min:1,max:20},
@@ -1686,8 +1699,17 @@ Confirmer ?`
         <div style={{padding:16}}>
           <div style={{background:"#0a1628",border:"1px solid #7c3aed",borderRadius:12,padding:16,marginBottom:16}}>
             <div style={{fontSize:12,fontWeight:700,color:"#c084fc",marginBottom:2}}>🕹️ Trading Manuel</div>
-            <div style={{fontSize:10,color:"#475569",marginBottom:14}}>
-              Prise de trade libre, indépendante du bot — mode actuel : <b style={{color:config?.trading_mode==="live"?"#f87171":"#60a5fa"}}>{config?.trading_mode==="live"?"🔴 LIVE (argent réel)":"🎮 PAPER"}</b>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div style={{fontSize:10,color:"#475569"}}>
+                Prise de trade libre, indépendante du bot principal (mode séparé)
+              </div>
+              <div style={{display:"flex",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,overflow:"hidden"}}>
+                <button onClick={()=>updateManualAccumMode("paper")} style={{padding:"4px 10px",border:"none",background:config?.manual_accum_trading_mode!=="live"?"#1e2d4a":"transparent",color:config?.manual_accum_trading_mode!=="live"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🎮 PAPER</button>
+                <button onClick={()=>updateManualAccumMode("live")} style={{padding:"4px 10px",border:"none",background:config?.manual_accum_trading_mode==="live"?"#052e16":"transparent",color:config?.manual_accum_trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔴 LIVE</button>
+              </div>
+            </div>
+            <div style={{fontSize:9,color:"#334155",marginBottom:14}}>
+              Bot automatique principal : <b style={{color:config?.trading_mode==="live"?"#f87171":"#60a5fa"}}>{config?.trading_mode==="live"?"🔴 LIVE":"🎮 PAPER"}</b> (réglage séparé, non affecté par ce qui précède)
             </div>
 
             {/* Opportunités de range détectées — remplit le formulaire en 1 clic, validez en 2e clic */}
@@ -1958,7 +1980,7 @@ Confirmer ?`
 
             <button onClick={async()=>{
               if(!manualCoin){ setManualStatus("⛔ Choisissez un actif"); return; }
-              const isLive = config?.trading_mode==="live";
+              const isLive = config?.manual_accum_trading_mode==="live";
               if(orderMode==="now" && isLive && !confirm(`Confirmer l'ouverture d'un trade LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
               if(orderMode==="schedule" && isLive && !confirm(`Confirmer la programmation d'un ordre LIVE (argent réel) : ${manualAction} ${manualCoin} x${manualLeverage}, ${manualSize} USDC ?`)) return;
               if(orderMode==="accumulation" && isLive && !confirm(`Confirmer l'achat ACCUMULATION LIVE (argent réel) : ${manualCoin}, ${manualSize} USDC, sans levier, objectif +${accumulationTargetPct||config?.accumulation_target_pct||2}% ?`)) return;
@@ -1996,14 +2018,14 @@ Confirmer ?`
                 }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
-            }} style={{width:"100%",background:config?.trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":orderMode==="accumulation"?"linear-gradient(135deg,#b45309,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            }} style={{width:"100%",background:config?.manual_accum_trading_mode==="live"?"linear-gradient(135deg,#dc2626,#7c2d12)":orderMode==="accumulation"?"linear-gradient(135deg,#b45309,#7c2d12)":"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,padding:12,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
               {orderMode==="now"
-                ? (config?.trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER")
+                ? (config?.manual_accum_trading_mode==="live"?"🔴 OUVRIR EN LIVE (ARGENT RÉEL)":"🎮 OUVRIR EN PAPER")
                 : orderMode==="accumulation"
-                  ? (config?.trading_mode==="live"?"🔴 ACHETER EN LIVE (ARGENT RÉEL)":"💰 ACHETER (ACCUMULATION)")
+                  ? (config?.manual_accum_trading_mode==="live"?"🔴 ACHETER EN LIVE (ARGENT RÉEL)":"💰 ACHETER (ACCUMULATION)")
                 : editingOrderId
                   ? "✏️ ENREGISTRER LES MODIFICATIONS"
-                  : (config?.trading_mode==="live"?"🔴 PROGRAMMER EN LIVE (ARGENT RÉEL)":"⏳ PROGRAMMER L'ORDRE")}
+                  : (config?.manual_accum_trading_mode==="live"?"🔴 PROGRAMMER EN LIVE (ARGENT RÉEL)":"⏳ PROGRAMMER L'ORDRE")}
             </button>
             {editingOrderId && (
               <button onClick={()=>{
