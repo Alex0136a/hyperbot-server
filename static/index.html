@@ -413,6 +413,7 @@ function App() {
   const [newCondValue, setNewCondValue] = useState("");
   const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
   const [rangeOpportunities, setRangeOpportunities] = useState([]);
+  const [activeOpportunity, setActiveOpportunity] = useState(null); // {coin, direction} — retirée de la liste une fois programmée
   const [topPerformingCoins, setTopPerformingCoins] = useState([]);
   const [manualDataLoading, setManualDataLoading] = useState(false);
   const [cap95Freq, setCap95Freq] = useState(null);
@@ -749,9 +750,9 @@ Confirmer ?`
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("LONG");
                         setOrderMode("schedule");
-                        setConditionsList([{type:"PRICE_BELOW", value:o.support}]);
+                        setConditionsList([{type:"PRICE_BELOW", value:o.support}, {type:"MACD_BULLISH", value:null}]);
                         setInvalidationPrice(String(o.long_invalidation));
-                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
+                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support + confirmation MACD haussier, vérifiez puis validez`); setActiveOpportunity({coin:o.coin, direction:"LONG", tracksLevel:"support"});
                         setTab("manuel");
                       }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:5,padding:"6px 4px",color:"#34d399",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}} title={`LONG au support $${o.support}`}>
                         LONG ${o.support}{o.biais_direction==="LONG"?` · 🎯${o.biais_confiance}%`:""}
@@ -759,9 +760,9 @@ Confirmer ?`
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
                         setOrderMode("schedule");
-                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}]);
+                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}, {type:"MACD_BEARISH", value:null}]);
                         setInvalidationPrice(String(o.short_invalidation));
-                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
+                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance + confirmation MACD baissier, vérifiez puis validez`); setActiveOpportunity({coin:o.coin, direction:"SHORT", tracksLevel:"resistance"});
                         setTab("manuel");
                       }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:5,padding:"6px 4px",color:"#f87171",fontSize:10,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}} title={`SHORT à la résistance $${o.resistance}`}>
                         SHORT ${o.resistance}{o.biais_direction==="SHORT"?` · 🎯${o.biais_confiance}%`:""}
@@ -1735,18 +1736,18 @@ Confirmer ?`
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("LONG");
                         setOrderMode("schedule");
-                        setConditionsList([{type:"PRICE_BELOW", value:o.support}]);
+                        setConditionsList([{type:"PRICE_BELOW", value:o.support}, {type:"MACD_BULLISH", value:null}]);
                         setInvalidationPrice(String(o.long_invalidation));
-                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support, vérifiez puis validez`);
+                        setManualStatus(`✏️ Formulaire rempli — LONG ${o.coin} au support + confirmation MACD haussier, vérifiez puis validez`); setActiveOpportunity({coin:o.coin, direction:"LONG", tracksLevel:"support"});
                       }} style={{flex:1,background:"#0f3d2e",border:o.biais_direction==="LONG"?"2px solid #34d399":"1px solid #34d399",borderRadius:6,padding:"8px 6px",color:"#34d399",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="SHORT"?0.5:1}}>
                         → LONG au support ${o.support}{o.biais_direction==="LONG"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
                       <button onClick={()=>{
                         setManualCoin(o.coin); setManualCoinSearch(o.coin); setManualAction("SHORT");
                         setOrderMode("schedule");
-                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}]);
+                        setConditionsList([{type:"PRICE_ABOVE", value:o.resistance}, {type:"MACD_BEARISH", value:null}]);
                         setInvalidationPrice(String(o.short_invalidation));
-                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance, vérifiez puis validez`);
+                        setManualStatus(`✏️ Formulaire rempli — SHORT ${o.coin} à la résistance + confirmation MACD baissier, vérifiez puis validez`); setActiveOpportunity({coin:o.coin, direction:"SHORT", tracksLevel:"resistance"});
                       }} style={{flex:1,background:"#3d0f1a",border:o.biais_direction==="SHORT"?"2px solid #f87171":"1px solid #f87171",borderRadius:6,padding:"8px 6px",color:"#f87171",fontSize:11,fontWeight:700,cursor:"pointer",opacity:o.biais_direction==="LONG"?0.5:1}}>
                         → SHORT à la résistance ${o.resistance}{o.biais_direction==="SHORT"?` · 🎯${o.biais_confiance}%`:""}
                       </button>
@@ -2017,13 +2018,21 @@ Confirmer ?`
                   setConditionsList([]); setInvalidationPrice("");
                   setEditingOrderId(null);
                 } else {
+                  const matchesActiveOpp = activeOpportunity && activeOpportunity.coin===manualCoin && activeOpportunity.direction===manualAction;
                   const res = await apiCall("/api/pending-orders","POST",{
                     coin:manualCoin, action:manualAction, size_usdc:manualSize, leverage:manualLeverage,
                     conditions:conditionsList, invalidation_price:invalidationPrice?Number(invalidationPrice):null,
+                    tracks_level: matchesActiveOpp ? activeOpportunity.tracksLevel : null,
                     ...manualCustom
                   },token);
                   setManualStatus(`✅ ${res.message}`);
                   setConditionsList([]); setInvalidationPrice("");
+                  // Retire l'opportunité de la liste si ce trade en est issu — évite qu'elle
+                  // reste affichée alors qu'un ordre a déjà été programmé dessus
+                  if(matchesActiveOpp){
+                    setRangeOpportunities(prev=>prev.filter(o=>o.coin!==manualCoin));
+                    setActiveOpportunity(null);
+                  }
                 }
                 loadData();
               } catch(e){ setManualStatus(`⛔ ${e.message}`); }
