@@ -4467,9 +4467,12 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         if not account_address:
             conn.close()
             raise ValueError("Aucune adresse wallet Hyperliquid configurée")
-        if not HL_SDK_AVAILABLE or not HL_AGENT_PRIVATE_KEY:
+        if not HL_SDK_AVAILABLE:
             conn.close()
-            raise ValueError("Mode live non configuré côté serveur (SDK/clé manquants)")
+            raise ValueError("Mode live impossible : le paquet hyperliquid-python-sdk n'est pas installé sur le serveur (absent de requirements.txt ou échec d'installation)")
+        if not HL_AGENT_PRIVATE_KEY:
+            conn.close()
+            raise ValueError("Mode live impossible : la variable d'environnement HL_AGENT_PRIVATE_KEY n'est pas configurée sur Railway")
         max_loss_for_sl = 100.0 if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
             coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
