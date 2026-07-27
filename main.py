@@ -253,7 +253,13 @@ def init_db():
         # Plafond de perte absolu depuis le prix d'achat — vérifié en priorité, avant toute
         # autre logique (armement, support, cible). Protège même si la rupture de support (qui
         # se mesure depuis le support, pas l'entrée) n'a pas encore techniquement déclenché.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_loss_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_loss_pct REAL DEFAULT 0.7")
+        conn.commit()
+    except: pass
+    try:
+        # Réduit de 1.0% à 0.7% après retour d'expérience — marge de sécurité supplémentaire
+        # face aux trous de fréquence de vérification (mouvements rapides entre deux ticks).
+        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=0.7 WHERE accumulation_max_loss_pct=1.0")
         conn.commit()
     except: pass
     try:
@@ -1568,7 +1574,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         # n'a pas encore techniquement déclenché — la perte ne dépasse jamais ce seuil.
         cfg_accum_maxloss = conn.execute(
             "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 1.0
+        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.7
         if pnl_pct_live <= -accum_max_loss_pct:
             accum_close_reason = "ACCUMULATION_MAX_LOSS"
             accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — revente {round(pnl,2)} USDC pour limiter la perte"
@@ -1588,32 +1594,46 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
         if accum_close_reason:
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
-        elif armed:
-            # Sortie au SUPPORT détecté (pas RSI/MACD) — protège le gain à un vrai niveau
-            # technique plutôt que d'attendre une confirmation d'indicateur qui peut tarder
-            # et laisser filer trop de gain. Le support est recalculé en continu (cache
-            # rafraîchi à chaque cycle de scan), donc "suit" naturellement le marché comme
-            # un trailing, sans dépendre du niveau qui avait servi à l'achat initial.
+        else:
+            # Retournement RSI/MACD confirmé : protège TOUT gain positif, pas seulement une
+            # fois armé (3%+) — sans ça, un pic à 2.5% suivi d'un retournement n'était protégé
+            # par rien, la position pouvait retomber jusqu'au plafond de perte (-1%) en pure
+            # perte alors qu'elle avait été en gain. Vérifié en premier, avant même l'armement.
             md = market_data_cache.get(trade["coin"], {})
-            current_support = md.get("support")
-            if current_support and cur <= current_support:
-                accum_close_reason = "ACCUMULATION_SUPPORT_EXIT"
-                accum_log_msg = f"📉 {trade['coin']}: Retour au support (${current_support:.4g}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic avait atteint {round(accum_peak_pct,2)}%) — l'analyse décidera de la suite"
-            # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
-        elif pnl_pct_live >= target_pct:
-            # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
-            accum_close_reason = "ACCUMULATION_TARGET"
-            accum_log_msg = f"💰 {trade['coin']}: Objectif Accumulation atteint +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% ≥ {target_pct}%) — revente"
-        elif trade.get("accumulation_support_price"):
-            # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit passager)
-            # -> on revend même à perte plutôt que d'attendre indéfiniment un support qui a cédé
-            cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-            support_ref = float(trade["accumulation_support_price"])
-            breakdown_level = support_ref * (1 - buffer_pct / 100)
-            if cur < breakdown_level:
-                accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+            macd_still_bullish = not md.get("macd_bear")
+            rsi_still_strong = md.get("rsi") is None or md["rsi"] >= 50
+            reversal_confirmed = not (macd_still_bullish and rsi_still_strong)
+
+            if pnl_pct_live > 0 and reversal_confirmed:
+                accum_close_reason = "ACCUMULATION_TREND_END"
+                accum_log_msg = f"📊 {trade['coin']}: Retournement confirmé (RSI {md.get('rsi')}, MACD {'baissier' if md.get('macd_bear') else 'neutre'}) — revente +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%) avant que le gain ne s'échappe"
+            elif armed:
+                # Pas de retournement détecté, mais déjà armé (pic ≥ 3%) : filet de sécurité
+                # supplémentaire si le gain recule trop vite sans confirmation d'indicateur —
+                # pas de sortie sur simple contact de résistance, continuer au-delà, c'est
+                # seulement plus de profit potentiel tant qu'aucun retournement n'est confirmé.
+                cfg_accum_trail = conn.execute(
+                    "SELECT accumulation_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                trailing_gap_pct = cfg_accum_trail["accumulation_trailing_gap_pct"] if cfg_accum_trail and "accumulation_trailing_gap_pct" in cfg_accum_trail.keys() and cfg_accum_trail["accumulation_trailing_gap_pct"] else 0.5
+                if pnl_pct_live <= (accum_peak_pct - trailing_gap_pct):
+                    accum_close_reason = "ACCUMULATION_TRAILING_SAFETY"
+                    accum_log_msg = f"🛡️ {trade['coin']}: Trailing de sécurité déclenché (pic {round(accum_peak_pct,2)}% → {round(pnl_pct_live,2)}%, recul de {trailing_gap_pct}%) — revente +{round(pnl,2)} USDC"
+                # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
+            elif pnl_pct_live >= target_pct:
+                # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
+                accum_close_reason = "ACCUMULATION_TARGET"
+                accum_log_msg = f"💰 {trade['coin']}: Objectif Accumulation atteint +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% ≥ {target_pct}%) — revente"
+            elif trade.get("accumulation_support_price"):
+                # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
+                # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
+                # support qui a cédé
+                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+                support_ref = float(trade["accumulation_support_price"])
+                breakdown_level = support_ref * (1 - buffer_pct / 100)
+                if cur < breakdown_level:
+                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                    accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
             add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TARGET" else "warning")
@@ -3351,10 +3371,14 @@ async def connect_hyperliquid_ws():
                         # Traiter les trades ouverts pour chaque coin mis à jour
                         conn = get_db()
                         try:
+                            # BUG CORRIGÉ : is_running ne doit gater QUE l'ouverture de nouveaux
+                            # trades (scan_markets), jamais la gestion des positions déjà
+                            # ouvertes. Sans ce correctif, désactiver le bot principal tout en
+                            # gardant des positions Accumulation/Manuel ouvertes les laissait
+                            # sans AUCUNE surveillance temps réel via WebSocket — seul le filet
+                            # de secours à 5s (si WS coupé) ou le scan périodique les couvrait.
                             open_trades = conn.execute(
-                                "SELECT pt.*, bc.user_id FROM paper_trades pt "
-                                "JOIN bot_config bc ON pt.user_id = bc.user_id "
-                                "WHERE pt.status='OPEN' AND bc.is_running=1"
+                                "SELECT * FROM paper_trades WHERE status='OPEN'"
                             ).fetchall()
                             for trade in open_trades:
                                 trade = dict(trade)
@@ -3853,7 +3877,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
-        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 1.0,
+        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.7,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
