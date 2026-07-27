@@ -1176,22 +1176,29 @@ Confirmer ?`
             </div>
 
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🔑 Clé API Privée (Mode LIVE uniquement)</div>
-              <input type="password"
-                placeholder={config?.has_hl_api_key ? "✅ Clé active — saisir pour changer" : "Clé privée Hyperliquid..."}
-                value={hlApiKey} onChange={e=>setHlApiKey(e.target.value)}
-                style={{width:"100%",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"9px 12px",color:"#e2e8f0",fontSize:11,boxSizing:"border-box",marginBottom:8}}/>
-              <div style={{fontSize:9,color:"#334155"}}>⚠️ Ne partagez jamais votre clé privée — stockée de façon sécurisée sur votre serveur</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:6,fontWeight:700}}>🔑 Signature des ordres LIVE (côté serveur)</div>
+              <div style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"10px 12px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{fontSize:10,color:"#94a3b8"}}>Paquet hyperliquid-python-sdk</span>
+                  <span style={{fontSize:10,fontWeight:700,color:config?.hl_sdk_available?"#34d399":"#f87171"}}>{config?.hl_sdk_available?"✅ Installé":"❌ Absent"}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:10,color:"#94a3b8"}}>Variable HL_AGENT_PRIVATE_KEY</span>
+                  <span style={{fontSize:10,fontWeight:700,color:config?.hl_agent_key_configured?"#34d399":"#f87171"}}>{config?.hl_agent_key_configured?"✅ Configurée":"❌ Absente"}</span>
+                </div>
+              </div>
+              <div style={{fontSize:9,color:"#334155",marginTop:6}}>
+                ⚠️ La clé privée n'est jamais saisie ni stockée ici, par sécurité — elle se configure uniquement comme variable d'environnement sur Railway (onglet Variables du service). Ce panneau reflète le statut réel du serveur, mis à jour automatiquement.
+              </div>
             </div>
 
             <button onClick={()=>{
               const payload = {};
               if(hlWallet) payload.hl_wallet = hlWallet;
-              if(hlApiKey && hlApiKey !== "****") payload.hl_api_key = hlApiKey;
               if(Object.keys(payload).length > 0)
                 apiCall("/api/config/hyperliquid","PUT",payload,token).then(loadData);
             }} style={{width:"100%",background:"linear-gradient(135deg,#6d28d9,#7c3aed)",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontWeight:700,fontSize:11,cursor:"pointer"}}>
-              ⚡ Sauvegarder config Hyperliquid
+              ⚡ Sauvegarder l'adresse wallet
             </button>
           </div>
 
