@@ -1894,62 +1894,6 @@ Confirmer ?`
               )}
             </div>
 
-            {/* Liste des ordres programmés en attente */}
-            {pendingOrders.pending.length > 0 && (
-              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10,marginBottom:14}}>
-                <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:6}}>⏳ Ordres en attente ({pendingOrders.pending.length})</div>
-                {pendingOrders.pending.map(o=>(
-                  <div key={o.id} style={{padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
-                    <div style={{fontSize:10,color:"#e2e8f0",marginBottom:4}}>
-                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
-                    </div>
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>{
-                        setEditingOrderId(o.id);
-                        setManualCoin(o.coin); setManualCoinSearch(o.coin);
-                        setManualAction(o.action); setManualSize(o.size_usdc); setManualLeverage(o.leverage);
-                        setConditionsList(o.conditions||[]);
-                        setInvalidationPrice(o.invalidation_price??"");
-                        setManualCustom({
-                          custom_max_loss_pct:o.custom_max_loss_pct, custom_qp_arm_low_usd:o.custom_qp_arm_low_usd,
-                          custom_qp_floor_low_usd:o.custom_qp_floor_low_usd, custom_qp_lock_trigger_usd:o.custom_qp_lock_trigger_usd,
-                          custom_quick_profit_usd:o.custom_quick_profit_usd, custom_trailing_gap_usd:o.custom_trailing_gap_usd,
-                          custom_trail_trigger_pct:o.custom_trail_trigger_pct, custom_stop_loss_price:o.custom_stop_loss_price
-                        });
-                        setOrderMode("schedule");
-                        setManualStatus(`✏️ Modification de l'ordre #${o.id} — ajustez puis validez ci-dessous`);
-                      }} style={{background:"transparent",border:"1px solid #60a5fa",borderRadius:4,padding:"2px 8px",color:"#60a5fa",fontSize:9,cursor:"pointer"}}>Modifier</button>
-                      <button onClick={async()=>{
-                        if(!confirm(`Exécuter immédiatement cet ordre (${o.action} ${o.coin}), sans attendre la condition ?`)) return;
-                        try {
-                          const res = await apiCall(`/api/pending-orders/${o.id}/execute-now`,"POST",null,token);
-                          addLog(`⚡ ${res.message}`, "system");
-                        } catch(e){ addLog(`❌ ${e.message}`, "error"); }
-                        loadData();
-                      }} style={{background:"transparent",border:"1px solid #34d399",borderRadius:4,padding:"2px 8px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Exécuter</button>
-                      <button onClick={async()=>{
-                        await apiCall(`/api/pending-orders/${o.id}`,"DELETE",null,token);
-                        loadData();
-                      }} style={{background:"transparent",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",color:"#f87171",fontSize:9,cursor:"pointer"}}>Annuler</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Historique des ordres programmés (déclenchés / annulés) */}
-            {pendingOrders.history.length > 0 && (
-              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10,marginBottom:14}}>
-                <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:6}}>📜 Historique des ordres ({pendingOrders.history.length})</div>
-                {pendingOrders.history.map(o=>(
-                  <div key={o.id} style={{padding:"5px 0",borderBottom:"1px solid #0a0e1a",fontSize:10,color:"#94a3b8"}}>
-                    <span style={{background:o.status==="EXECUTED"?"#0f3d2e":"#3d1a1a",color:o.status==="EXECUTED"?"#34d399":"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,marginRight:6}}>{o.status}</span>
-                    <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
-                  </div>
-                ))}
-              </div>
-            )}
-
             {/* Réglages avancés simplifiés : 3 outils seulement — SL, QP, TTP */}
             <div style={{marginBottom:14}}>
               <button onClick={()=>setManualAdvanced(!manualAdvanced)}
@@ -2060,6 +2004,63 @@ Confirmer ?`
               </button>
             )}
             {manualStatus && <div style={{marginTop:8,fontSize:11,color:"#94a3b8"}}>{manualStatus}</div>}
+
+            {/* Liste des ordres programmés en attente — sous le bouton de validation, pas besoin
+                de la parcourir pour valider un nouveau trade */}
+            {pendingOrders.pending.length > 0 && (
+              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10,marginTop:14}}>
+                <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:6}}>⏳ Ordres en attente ({pendingOrders.pending.length})</div>
+                {pendingOrders.pending.map(o=>(
+                  <div key={o.id} style={{padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <div style={{fontSize:10,color:"#e2e8f0",marginBottom:4}}>
+                      <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{
+                        setEditingOrderId(o.id);
+                        setManualCoin(o.coin); setManualCoinSearch(o.coin);
+                        setManualAction(o.action); setManualSize(o.size_usdc); setManualLeverage(o.leverage);
+                        setConditionsList(o.conditions||[]);
+                        setInvalidationPrice(o.invalidation_price??"");
+                        setManualCustom({
+                          custom_max_loss_pct:o.custom_max_loss_pct, custom_qp_arm_low_usd:o.custom_qp_arm_low_usd,
+                          custom_qp_floor_low_usd:o.custom_qp_floor_low_usd, custom_qp_lock_trigger_usd:o.custom_qp_lock_trigger_usd,
+                          custom_quick_profit_usd:o.custom_quick_profit_usd, custom_trailing_gap_usd:o.custom_trailing_gap_usd,
+                          custom_trail_trigger_pct:o.custom_trail_trigger_pct, custom_stop_loss_price:o.custom_stop_loss_price
+                        });
+                        setOrderMode("schedule");
+                        setManualStatus(`✏️ Modification de l'ordre #${o.id} — ajustez puis validez ci-dessus`);
+                      }} style={{background:"transparent",border:"1px solid #60a5fa",borderRadius:4,padding:"2px 8px",color:"#60a5fa",fontSize:9,cursor:"pointer"}}>Modifier</button>
+                      <button onClick={async()=>{
+                        if(!confirm(`Exécuter immédiatement cet ordre (${o.action} ${o.coin}), sans attendre la condition ?`)) return;
+                        try {
+                          const res = await apiCall(`/api/pending-orders/${o.id}/execute-now`,"POST",null,token);
+                          addLog(`⚡ ${res.message}`, "system");
+                        } catch(e){ addLog(`❌ ${e.message}`, "error"); }
+                        loadData();
+                      }} style={{background:"transparent",border:"1px solid #34d399",borderRadius:4,padding:"2px 8px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Exécuter</button>
+                      <button onClick={async()=>{
+                        await apiCall(`/api/pending-orders/${o.id}`,"DELETE",null,token);
+                        loadData();
+                      }} style={{background:"transparent",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",color:"#f87171",fontSize:9,cursor:"pointer"}}>Annuler</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Historique des ordres programmés (déclenchés / annulés) */}
+            {pendingOrders.history.length > 0 && (
+              <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,padding:10,marginTop:14}}>
+                <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:6}}>📜 Historique des ordres ({pendingOrders.history.length})</div>
+                {pendingOrders.history.map(o=>(
+                  <div key={o.id} style={{padding:"5px 0",borderBottom:"1px solid #0a0e1a",fontSize:10,color:"#94a3b8"}}>
+                    <span style={{background:o.status==="EXECUTED"?"#0f3d2e":"#3d1a1a",color:o.status==="EXECUTED"?"#34d399":"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,marginRight:6}}>{o.status}</span>
+                    <b style={{color:o.action==="LONG"?"#34d399":"#f87171"}}>{o.action}</b> {o.coin} x{o.leverage} — {o.size_usdc}$ — dès {condsLabel(o.conditions)}{o.invalidation_price!=null?` (invalidation: ${o.invalidation_price})`:""}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
