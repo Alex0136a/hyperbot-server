@@ -1139,6 +1139,20 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec ouverture position Hyperliquid: {result}")
 
+    # BUG CORRIGÉ : "status: ok" au niveau de la réponse ne garantit PAS que l'ordre a été
+    # rempli — Hyperliquid peut accepter la requête (status global ok) tout en rejetant
+    # l'ordre lui-même (marge insuffisante, taille invalide...) dans le statut imbriqué. Sans
+    # cette vérification, un rejet passait inaperçu : le code retombait sur cur_price comme
+    # "fill_price" et renvoyait un succès, alors qu'aucun ordre réel n'avait été exécuté.
+    try:
+        inner_statuses = result["response"]["data"]["statuses"]
+    except Exception:
+        inner_statuses = []
+    if inner_statuses and "error" in inner_statuses[0]:
+        raise RuntimeError(f"Ordre rejeté par Hyperliquid: {inner_statuses[0]['error']}")
+    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+        raise RuntimeError(f"Statut d'ordre inattendu/non confirmé par Hyperliquid: {result}")
+
     # Prix de fill réel (si l'exchange le renvoie) — plus fiable qu'une estimation locale
     # potentiellement périmée. Fallback sur cur_price si la structure est inattendue.
     fill_price = cur_price
