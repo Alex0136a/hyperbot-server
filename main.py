@@ -250,6 +250,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plafond de perte absolu depuis le prix d'achat — vérifié en priorité, avant toute
+        # autre logique (armement, support, cible). Protège même si la rupture de support (qui
+        # se mesure depuis le support, pas l'entrée) n'a pas encore techniquement déclenché.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_loss_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
         # Fenêtre de cooldown (minutes) après une perte sur un coin — pendant cette fenêtre,
         # une confirmation de mouvement (bougie dans le bon sens) est exigée en plus de la
         # confiance normale, plutôt que d'appliquer cette exigence à tous les coins.
@@ -1556,6 +1563,16 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         accum_close_reason = None
         accum_log_msg = None
 
+        # Plafond de perte ABSOLU depuis le prix d'achat — vérifié en priorité, avant tout le
+        # reste. Protège même si la rupture de support (mesurée depuis le support, pas l'entrée)
+        # n'a pas encore techniquement déclenché — la perte ne dépasse jamais ce seuil.
+        cfg_accum_maxloss = conn.execute(
+            "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 1.0
+        if pnl_pct_live <= -accum_max_loss_pct:
+            accum_close_reason = "ACCUMULATION_MAX_LOSS"
+            accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — revente {round(pnl,2)} USDC pour limiter la perte"
+
         # Suivi du pic de gain (même principe que le trailing du bot principal, mais sur le
         # PnL réel puisque l'Accumulation est sans levier — pnl_pct = mouvement de prix ici).
         accum_peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
@@ -1569,7 +1586,9 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         qp_arm_pct = cfg_accum_qp["accumulation_qp_arm_pct"] if cfg_accum_qp and "accumulation_qp_arm_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_arm_pct"] else 3.0
         armed = accum_peak_pct >= qp_arm_pct
 
-        if armed:
+        if accum_close_reason:
+            pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
+        elif armed:
             # Sortie au SUPPORT détecté (pas RSI/MACD) — protège le gain à un vrai niveau
             # technique plutôt que d'attendre une confirmation d'indicateur qui peut tarder
             # et laisser filer trop de gain. Le support est recalculé en continu (cache
@@ -2456,7 +2475,12 @@ async def scan_markets(user_id: int):
         # (plafond de positions atteint), mais SANS exclure les autres — n'importe quel coin
         # qui remplit les 3 conditions peut être acheté si de la place reste après les
         # candidats prioritaires. Recheck du plafond à chaque achat (change au fil du traitement).
-        if accumulation_candidates and config and config["accumulation_enabled"] and not auto_trading_paused:
+        # L'Accumulation tourne 24/7, indépendamment des heures bloquées (session creuse,
+        # tranches ponctuelles, week-end) — ces filtres ont été calibrés pour le bot principal
+        # à effet de levier, où le timing d'entrée compte énormément. L'Accumulation, sans
+        # levier et patiente par conception, n'a pas la même sensibilité : un bon support
+        # détecté à 3h du matin reste un bon support, peu importe l'heure.
+        if accumulation_candidates and config and config["accumulation_enabled"]:
             accumulation_candidates.sort(key=lambda c: 0 if c["coin"] in accumulation_top_coins else 1)
             for cand in accumulation_candidates:
                 coin, support_c, rsi_c = cand["coin"], cand["support"], cand["rsi"]
@@ -3664,6 +3688,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_rsi_min: Optional[float] = None
     accumulation_rsi_max: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
+    accumulation_max_loss_pct: Optional[float] = None
     accumulation_qp_arm_pct: Optional[float] = None
     accumulation_qp_floor_pct: Optional[float] = None
     accumulation_trailing_gap_pct: Optional[float] = None
@@ -3828,6 +3853,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
+        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 1.0,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
@@ -3948,6 +3974,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_rsi_max=? WHERE user_id=?", (req.accumulation_rsi_max, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
+    if req.accumulation_max_loss_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=? WHERE user_id=?", (req.accumulation_max_loss_pct, user_id))
     if req.accumulation_qp_arm_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=? WHERE user_id=?", (req.accumulation_qp_arm_pct, user_id))
     if req.accumulation_qp_floor_pct is not None:
