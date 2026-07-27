@@ -3785,8 +3785,13 @@ def get_config(user_id: int = Depends(get_current_user)):
         "has_api_key": bool(user["api_key"]),
         "has_finnhub_key": bool(user["finnhub_key"]),
         "finnhub_key_preview": ("****" + user["finnhub_key"][-4:]) if user["finnhub_key"] else "",
-        "has_hl_api_key": bool(user["hl_api_key"]) if "hl_api_key" in user.keys() else False,
         "hl_wallet": user["hl_wallet"] if "hl_wallet" in user.keys() else "",
+        # Statut RÉEL du serveur pour le live — HL_AGENT_PRIVATE_KEY est une variable
+        # d'environnement Railway, jamais stockée en base (sécurité). L'ancien champ
+        # "hl_api_key" en base était trompeur : il s'affichait comme actif sans jamais être
+        # utilisé par le code de trading réel, qui ne vérifie que cette variable serveur.
+        "hl_sdk_available": HL_SDK_AVAILABLE,
+        "hl_agent_key_configured": bool(HL_AGENT_PRIVATE_KEY),
         "has_sendgrid_key": bool(user["sendgrid_key"]) if "sendgrid_key" in user.keys() else False,
         "alert_email": user["alert_email"] if "alert_email" in user.keys() else "",
         "ws_connected": ws_connected,
