@@ -1115,21 +1115,21 @@ def get_hl_exchange(account_address: str):
     return HLExchange(wallet, hl_base_url(), account_address=account_address)
 
 def get_hl_account_value(account_address: str) -> float:
-    """Récupère la valeur réelle du compte (equity) sur Hyperliquid — utilisé pour le sizing en mode live."""
-    if not HL_SDK_AVAILABLE or not account_address:
-        return 0.0
-    try:
-        info = HLInfo(hl_base_url(), skip_ws=True)
-        state = info.user_state(account_address)
-        return float(state["marginSummary"]["accountValue"])
-    except Exception as e:
-        print(f"HL account_value error: {e}")
-        return 0.0
+    """Récupère la valeur réelle du compte (equity) sur Hyperliquid — utilisé pour le sizing en
+    mode live. Réutilise get_hl_account_value_verbose (repli spot/withdrawable inclus) pour ne
+    pas dupliquer la logique — le bot principal bénéficie ainsi du même correctif que l'Accumulation."""
+    value, error = get_hl_account_value_verbose(account_address)
+    if error:
+        print(f"HL account_value error: {error}")
+    return value
 
 def get_hl_account_value_verbose(account_address: str):
     """Identique à get_hl_account_value mais renvoie aussi le message d'erreur réel (ou None si
     succès) — pour pouvoir le journaliser côté utilisateur (add_bot_log) au lieu de seulement
-    l'imprimer côté serveur, invisible depuis l'interface."""
+    l'imprimer côté serveur, invisible depuis l'interface.
+    Essaie plusieurs champs (accountValue, withdrawable, solde spot) car Hyperliquid a introduit
+    un système de "compte unifié" qui peut faire que marginSummary.accountValue seul ne
+    reflète plus tout le solde réel (ex: 224$ visibles sur le site mais accountValue à 0)."""
     if not HL_SDK_AVAILABLE:
         return 0.0, "hyperliquid-python-sdk non installé sur le serveur"
     if not account_address:
@@ -1137,7 +1137,26 @@ def get_hl_account_value_verbose(account_address: str):
     try:
         info = HLInfo(hl_base_url(), skip_ws=True)
         state = info.user_state(account_address)
-        return float(state["marginSummary"]["accountValue"]), None
+        account_value = float(state.get("marginSummary", {}).get("accountValue", 0) or 0)
+        withdrawable = float(state.get("withdrawable", 0) or 0)
+        best_value = max(account_value, withdrawable)
+        if best_value > 0:
+            return best_value, None
+        # Rien trouvé côté perp — tente le solde spot (compte unifié / USDC spot séparé)
+        try:
+            spot_state = info.spot_user_state(account_address)
+            spot_total = sum(
+                float(b.get("total", 0) or 0) for b in spot_state.get("balances", [])
+                if b.get("coin") in ("USDC", "USD")
+            )
+            if spot_total > 0:
+                return spot_total, None
+        except Exception:
+            pass
+        # Toujours 0 partout — expose la structure brute (clés de premier niveau + valeurs
+        # de marginSummary) pour diagnostiquer précisément au lieu de deviner à l'aveugle.
+        diag = f"accountValue={account_value}, withdrawable={withdrawable}, clés reçues={list(state.keys())}, marginSummary={state.get('marginSummary')}"
+        return 0.0, diag
     except Exception as e:
         return 0.0, str(e)
 
@@ -2601,7 +2620,8 @@ async def scan_markets(user_id: int):
                     hl_wallet_addr = user_row_accum["hl_wallet"] if user_row_accum and "hl_wallet" in user_row_accum.keys() else None
                     capital_disponible, hl_balance_error = get_hl_account_value_verbose(hl_wallet_addr)
                     if capital_disponible <= 0:
-                        add_bot_log(user_id, f"⛔ {coin}: Accumulation live — impossible de lire le solde Hyperliquid réel ({hl_balance_error}), achat annulé par sécurité", "error")
+                        raison = hl_balance_error if hl_balance_error else f"solde lu avec succès mais à {capital_disponible}$ — compte vide, tout en positions, ou adresse incorrecte"
+                        add_bot_log(user_id, f"⛔ {coin}: Accumulation live — solde Hyperliquid réel indisponible ({raison}), achat annulé par sécurité", "error")
                         continue
                 else:
                     capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
