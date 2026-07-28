@@ -1126,6 +1126,21 @@ def get_hl_account_value(account_address: str) -> float:
         print(f"HL account_value error: {e}")
         return 0.0
 
+def get_hl_account_value_verbose(account_address: str):
+    """Identique à get_hl_account_value mais renvoie aussi le message d'erreur réel (ou None si
+    succès) — pour pouvoir le journaliser côté utilisateur (add_bot_log) au lieu de seulement
+    l'imprimer côté serveur, invisible depuis l'interface."""
+    if not HL_SDK_AVAILABLE:
+        return 0.0, "hyperliquid-python-sdk non installé sur le serveur"
+    if not account_address:
+        return 0.0, "Aucune adresse wallet Hyperliquid configurée"
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        state = info.user_state(account_address)
+        return float(state["marginSummary"]["accountValue"]), None
+    except Exception as e:
+        return 0.0, str(e)
+
 def hl_open_position(account_address: str, coin: str, action: str, size_usdc: float,
                       leverage: int, cur_price: float, max_loss_pct: float):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
@@ -2429,21 +2444,36 @@ async def scan_markets(user_id: int):
                 add_bot_log(user_id, f"⛔ {coin}: Confiance insuffisante ({confidence_ia}% < {required_conf}%) — ignoré", "info")
                 continue
 
-            # Confirmation de mouvement CONDITIONNÉE : uniquement pour les coins ayant subi
-            # une perte récente (cooldown), pas pour tous les coins — évite d'exiger une
-            # confirmation systématique qui réduirait la fréquence de trade sans raison sur
-            # les coins qui se comportent normalement. Cas type : TAO/INJ, plusieurs pertes
-            # à pic quasi nul malgré une confiance déjà élevée (75-76%) — le signal était fort
-            # mais le marché venait de se retourner, sans lien avec le niveau de confiance.
+            # Confirmation de mouvement UNIVERSELLE : pour toutes les entrées, pas seulement
+            # après une perte récente. Même logique que l'Accumulation : bougie dans le bon
+            # sens ET (RSI qui confirme la direction OU MACD qui confirme) — évite d'ouvrir
+            # sur un signal fort mais un marché qui n'a pas encore vraiment amorcé le
+            # mouvement (le "pic quasi nul avant Max Loss" observé sur TAO/INJ, puis GMX/ETH).
+            last_candle_confirms = "o" in candles_raw[-1] and (
+                (action_ia == "LONG" and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])) or
+                (action_ia == "SHORT" and float(candles_raw[-1]["c"]) < float(candles_raw[-1]["o"]))
+            )
+            rsi_confirms_direction = False
+            if len(closes) > 17:
+                rsi_prev_check = calc_rsi(closes[:-3], int(rsi_period))
+                rsi_current_check = tech.get("rsi")
+                if rsi_prev_check is not None and rsi_current_check is not None:
+                    if action_ia == "LONG" and rsi_current_check > rsi_prev_check:
+                        rsi_confirms_direction = True
+                    elif action_ia == "SHORT" and rsi_current_check < rsi_prev_check:
+                        rsi_confirms_direction = True
+            macd_confirms_direction = (action_ia == "LONG" and macd and macd.get("crossBull")) or \
+                                       (action_ia == "SHORT" and macd and macd.get("crossBear"))
+            movement_confirmed = last_candle_confirms and (rsi_confirms_direction or macd_confirms_direction)
+
+            if not movement_confirmed:
+                add_bot_log(user_id, f"⏳ {coin}: signal {action_ia} ({confidence_ia}%) mais mouvement pas encore confirmé (bougie/RSI/MACD) — ignoré", "info")
+                continue
+
             cooldown_min = config["coin_loss_cooldown_minutes"] if config and "coin_loss_cooldown_minutes" in config.keys() and config["coin_loss_cooldown_minutes"] else 15
             if cooldown_min > 0 and coin_recently_lost(user_id, coin, cooldown_min):
-                last_candle_confirms = "o" in candles_raw[-1] and (
-                    (action_ia == "LONG" and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])) or
-                    (action_ia == "SHORT" and float(candles_raw[-1]["c"]) < float(candles_raw[-1]["o"]))
-                )
-                if not last_candle_confirms:
-                    add_bot_log(user_id, f"⏳ {coin}: perte récente (<{cooldown_min}min) — confirmation de mouvement requise, pas encore confirmée — ignoré", "info")
-                    continue
+                add_bot_log(user_id, f"⏳ {coin}: perte récente (<{cooldown_min}min) — mouvement confirmé mais on attend un cycle de plus par prudence supplémentaire — ignoré", "info")
+                continue
 
             if is_opportunist:
                 add_bot_log(user_id, f"🎯 {coin}: Trade hors sélection ({confidence_ia}%) — actif ouvert dynamiquement !", "success")
@@ -2565,9 +2595,9 @@ async def scan_markets(user_id: int):
                     user_row_accum = conn_accum2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                     conn_accum2.close()
                     hl_wallet_addr = user_row_accum["hl_wallet"] if user_row_accum and "hl_wallet" in user_row_accum.keys() else None
-                    capital_disponible = get_hl_account_value(hl_wallet_addr) if hl_wallet_addr else 0.0
+                    capital_disponible, hl_balance_error = get_hl_account_value_verbose(hl_wallet_addr)
                     if capital_disponible <= 0:
-                        add_bot_log(user_id, f"⛔ {coin}: Accumulation live — impossible de lire le solde Hyperliquid réel, achat annulé par sécurité", "error")
+                        add_bot_log(user_id, f"⛔ {coin}: Accumulation live — impossible de lire le solde Hyperliquid réel ({hl_balance_error}), achat annulé par sécurité", "error")
                         continue
                 else:
                     capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
