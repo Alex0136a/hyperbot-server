@@ -1718,16 +1718,22 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
         else:
             # Retournement RSI/MACD confirmé : protège TOUT gain positif, pas seulement une
-            # fois armé (3%+). Pour un LONG, un retournement BAISSIER menace le gain (RSI<50
-            # ou MACD baissier) ; pour un SHORT en Accumulation, c'est l'inverse — un
-            # retournement HAUSSIER menace le gain (RSI≥50 ou MACD haussier).
+            # fois armé (3%+). BUG CORRIGÉ : exiger seulement RSI OU MACD (l'un suffisait)
+            # déclenchait une sortie dès que RSI repassait à peine le seuil de 50 — un point
+            # milieu ABSOLU qui ne tient pas compte du RSI d'entrée. Un SHORT ouvert à RSI 65
+            # (surachat) qui redescend à 55 (encore élevé, pas un vrai retournement) déclenchait
+            # déjà une sortie, expliquant des séries de clôtures en quelques minutes avec un pic
+            # quasi nul. Exige maintenant RSI ET MACD ensemble — un signal isolé et bruyant ne
+            # suffit plus, il faut une vraie confirmation des deux indicateurs à la fois.
             md = market_data_cache.get(trade["coin"], {})
             if is_short_accum:
-                reversal_confirmed = bool(md.get("macd_bull")) or (md.get("rsi") is not None and md["rsi"] >= 50)
+                macd_confirms = bool(md.get("macd_bull"))
+                rsi_confirms = md.get("rsi") is not None and md["rsi"] >= 50
+                reversal_confirmed = macd_confirms and rsi_confirms
             else:
-                macd_still_bullish = not md.get("macd_bear")
-                rsi_still_strong = md.get("rsi") is None or md["rsi"] >= 50
-                reversal_confirmed = not (macd_still_bullish and rsi_still_strong)
+                macd_confirms = bool(md.get("macd_bear"))
+                rsi_confirms = md.get("rsi") is not None and md["rsi"] < 50
+                reversal_confirmed = macd_confirms and rsi_confirms
 
             if pnl_pct_live > 0 and reversal_confirmed:
                 accum_close_reason = "ACCUMULATION_TREND_END"
