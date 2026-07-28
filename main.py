@@ -1167,7 +1167,8 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     Retourne (coin_size, sl_oid) ou lève une exception."""
     exchange = get_hl_exchange(account_address)
     is_buy = (action == "LONG")
-    coin_size = round((size_usdc * leverage) / cur_price, 4)
+    size_decimals = get_hl_size_decimals(coin)
+    coin_size = round((size_usdc * leverage) / cur_price, size_decimals)
     if coin_size <= 0:
         raise ValueError("Taille de position calculée nulle ou négative")
 
@@ -3090,6 +3091,26 @@ ws_connected = False
 # Cache des données de marché structurées (indicateurs pré-calculés)
 market_data_cache = {}  # coin -> {rsi, macd, ema, bb, volume, timestamp}
 range_suggestion_cache = {}  # (user_id, coin) -> {"timestamp":..., "support":..., "resistance":..., "long_invalidation":..., "short_invalidation":..., "channel_pct":...}
+hl_asset_meta_cache = {"data": {}, "timestamp": None}  # coin -> szDecimals (précision de taille exigée par Hyperliquid, différente par actif)
+HL_ASSET_META_CACHE_HOURS = 6  # rafraîchi rarement, ces métadonnées changent très peu
+
+def get_hl_size_decimals(coin: str) -> int:
+    """Récupère le nombre de décimales de taille autorisé par Hyperliquid pour ce coin précis
+    (szDecimals) — arrondir systématiquement à 4 décimales causait des rejets "Order has
+    invalid size" sur les actifs qui exigent une précision différente (souvent moins, parfois
+    plus). Mis en cache (rafraîchi toutes les 6h), car ces métadonnées changent très rarement."""
+    now = datetime.utcnow()
+    if not hl_asset_meta_cache["timestamp"] or (now - hl_asset_meta_cache["timestamp"]).total_seconds() > HL_ASSET_META_CACHE_HOURS * 3600:
+        try:
+            info = HLInfo(hl_base_url(), skip_ws=True)
+            meta = info.meta()
+            hl_asset_meta_cache["data"] = {a["name"]: a.get("szDecimals", 4) for a in meta.get("universe", [])}
+            hl_asset_meta_cache["timestamp"] = now
+        except Exception as e:
+            print(f"HL asset meta fetch error: {e}")
+            # Échec du rafraîchissement — garde l'ancien cache s'il existe, sinon défaut à 4
+    return hl_asset_meta_cache["data"].get(coin, 4)
+
 accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
 ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
 RANGE_SUGGESTION_COOLDOWN_HOURS = 4  # ne resignale pas le même coin avant ce délai
