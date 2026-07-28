@@ -2227,56 +2227,68 @@ async def scan_markets(user_id: int):
             vol_cur = vols[-1]
 
             # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
-            # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion) —
-            # limité à une suggestion par coin toutes les RANGE_SUGGESTION_COOLDOWN_HOURS.
+            # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion).
+            # Recalculé à CHAQUE cycle de scan (~3 min) — plus de cooldown de 4h qui figeait
+            # l'affichage. Seules les opportunités avec un biais directionnel ≥ 70% de
+            # confiance sont retenues ; toute opportunité qui ne remplit plus les critères
+            # (range disparu, confiance retombée sous 70%) est activement retirée du cache
+            # plutôt que de continuer à afficher une donnée caduque.
             # Enrichi d'un BIAIS DIRECTIONNEL (LONG/SHORT + confiance) basé sur 3 facteurs déjà
             # calculés à ce stade : position du prix dans le canal (proche support/résistance),
             # RSI, et MACD — pour que la suggestion pointe vers un sens plutôt que de présenter
             # les deux options à égalité. Inclut toutes les valeurs prêtes à copier dans un
             # ordre programmé manuel : niveau d'entrée, invalidation (buffer 0.5%), retournement.
             support, resistance = detect_support_resistance(candles)
-            if detect_range_market(candles, support, resistance):
-                cache_key = (user_id, coin)
-                last_sugg = range_suggestion_cache.get(cache_key)
-                if not last_sugg or (datetime.utcnow() - last_sugg["timestamp"]).total_seconds() >= RANGE_SUGGESTION_COOLDOWN_HOURS * 3600:
-                    long_invalidation = support * 0.995
-                    short_invalidation = resistance * 1.005
-                    channel_pct = (resistance - support) / support * 100
+            cache_key = (user_id, coin)
+            is_range = detect_range_market(candles, support, resistance)
+            qualifies = False
+            if is_range:
+                long_invalidation = support * 0.995
+                short_invalidation = resistance * 1.005
+                channel_pct = (resistance - support) / support * 100
 
-                    # Biais directionnel : position dans le canal (0=support, 1=résistance) +
-                    # RSI + MACD, chacun votant pour LONG ou SHORT avec un poids donné.
-                    position_in_range = (price - support) / (resistance - support) if resistance > support else 0.5
-                    score_long, score_short, raisons_long, raisons_short = 0, 0, [], []
-                    if position_in_range <= 0.35:
-                        score_long += 15; raisons_long.append(f"proche du support ({position_in_range*100:.0f}% du canal)")
-                    elif position_in_range >= 0.65:
-                        score_short += 15; raisons_short.append(f"proche de la résistance ({position_in_range*100:.0f}% du canal)")
-                    if rsi is not None:
-                        if rsi < 40:
-                            score_long += 10; raisons_long.append(f"RSI {rsi:.1f} (survente)")
-                        elif rsi > 60:
-                            score_short += 10; raisons_short.append(f"RSI {rsi:.1f} (surachat)")
-                    macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
-                    if macd_bias:
-                        if macd_bias["macd"] > macd_bias["signal"]:
-                            score_long += 10; raisons_long.append("MACD haussier")
-                        elif macd_bias["macd"] < macd_bias["signal"]:
-                            score_short += 10; raisons_short.append("MACD baissier")
+                # Biais directionnel : position dans le canal (0=support, 1=résistance) +
+                # RSI + MACD, chacun votant pour LONG ou SHORT avec un poids donné.
+                position_in_range = (price - support) / (resistance - support) if resistance > support else 0.5
+                score_long, score_short, raisons_long, raisons_short = 0, 0, [], []
+                if position_in_range <= 0.35:
+                    score_long += 15; raisons_long.append(f"proche du support ({position_in_range*100:.0f}% du canal)")
+                elif position_in_range >= 0.65:
+                    score_short += 15; raisons_short.append(f"proche de la résistance ({position_in_range*100:.0f}% du canal)")
+                if rsi is not None:
+                    if rsi < 40:
+                        score_long += 10; raisons_long.append(f"RSI {rsi:.1f} (survente)")
+                    elif rsi > 60:
+                        score_short += 10; raisons_short.append(f"RSI {rsi:.1f} (surachat)")
+                macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
+                if macd_bias:
+                    if macd_bias["macd"] > macd_bias["signal"]:
+                        score_long += 10; raisons_long.append("MACD haussier")
+                    elif macd_bias["macd"] < macd_bias["signal"]:
+                        score_short += 10; raisons_short.append("MACD baissier")
 
-                    if score_long > score_short:
-                        biais_direction, biais_confiance, biais_raisons = "LONG", min(50 + score_long, 85), raisons_long
-                    elif score_short > score_long:
-                        biais_direction, biais_confiance, biais_raisons = "SHORT", min(50 + score_short, 85), raisons_short
-                    else:
-                        biais_direction, biais_confiance, biais_raisons = None, 50, []
+                if score_long > score_short:
+                    biais_direction, biais_confiance, biais_raisons = "LONG", min(50 + score_long, 85), raisons_long
+                elif score_short > score_long:
+                    biais_direction, biais_confiance, biais_raisons = "SHORT", min(50 + score_short, 85), raisons_short
+                else:
+                    biais_direction, biais_confiance, biais_raisons = None, 50, []
 
-                    range_suggestion_cache[cache_key] = {
-                        "timestamp": datetime.utcnow(), "coin": coin, "support": round(support, 6),
-                        "resistance": round(resistance, 6), "long_invalidation": round(long_invalidation, 6),
-                        "short_invalidation": round(short_invalidation, 6), "channel_pct": round(channel_pct, 2),
-                        "biais_direction": biais_direction, "biais_confiance": biais_confiance,
-                    }
-                    biais_ligne = f"   🎯 Biais actuel: {biais_direction} (~{biais_confiance}%) — {', '.join(biais_raisons)}\n" if biais_direction else "   🎯 Pas de biais net actuellement — les deux sens restent également valables\n"
+                qualifies = biais_direction is not None and biais_confiance >= 70
+
+            if qualifies:
+                was_cached = cache_key in range_suggestion_cache
+                range_suggestion_cache[cache_key] = {
+                    "timestamp": datetime.utcnow(), "coin": coin, "support": round(support, 6),
+                    "resistance": round(resistance, 6), "long_invalidation": round(long_invalidation, 6),
+                    "short_invalidation": round(short_invalidation, 6), "channel_pct": round(channel_pct, 2),
+                    "biais_direction": biais_direction, "biais_confiance": biais_confiance,
+                }
+                if not was_cached:
+                    # Log uniquement à l'apparition d'une NOUVELLE opportunité qualifiante —
+                    # évite de spammer les logs à chaque cycle pour une opportunité déjà connue
+                    # (l'affichage, lui, se met quand même à jour en continu via le cache).
+                    biais_ligne = f"   🎯 Biais actuel: {biais_direction} (~{biais_confiance}%) — {', '.join(biais_raisons)}\n"
                     msg = (
                         f"📊 {coin}: marché en RANGE détecté (canal {channel_pct:.1f}%)\n"
                         f"{biais_ligne}"
@@ -2286,8 +2298,12 @@ async def scan_markets(user_id: int):
                         f"   → Suggestion uniquement, aucun ordre créé automatiquement"
                     )
                     add_bot_log(user_id, msg, "info")
-                    # Email retiré sur demande (trop de mails) — la suggestion reste visible
-                    # dans les logs, le Tableau de bord et Trading Manuel.
+            elif cache_key in range_suggestion_cache:
+                # Ne remplit plus les critères (range disparu ou confiance < 70%) — retrait
+                # actif plutôt que de laisser une donnée caduque continuer à s'afficher.
+                del range_suggestion_cache[cache_key]
+                add_bot_log(user_id, f"🗑️ {coin}: opportunité retirée (critères plus remplis)", "info")
+
 
             # Distingue un PIC/CRASH RAPIDE (jusqu'à quelques heures, plusieurs bougies) d'une
             # TENDANCE SOUTENUE (installée sur beaucoup plus longtemps) — évite que MACD/EMA,
@@ -3113,7 +3129,6 @@ def get_hl_size_decimals(coin: str) -> int:
 
 accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
 ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
-RANGE_SUGGESTION_COOLDOWN_HOURS = 4  # ne resignale pas le même coin avant ce délai
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket.
@@ -5203,17 +5218,17 @@ async def reconnect_websocket(user_id: int = Depends(get_current_user)):
 
 @app.get("/api/range-opportunities")
 def get_range_opportunities(user_id: int = Depends(get_current_user)):
-    """Liste les opportunités de range actuellement détectées (encore fraîches, dans la
-    fenêtre de cooldown) pour cet utilisateur — support/résistance + invalidations, prêtes
-    à être transformées en ordre programmé en un clic depuis Trading Manuel."""
+    """Liste les opportunités de range actuellement détectées pour cet utilisateur — le cache
+    est activement géré (mis à jour à chaque cycle, entrées retirées dès qu'elles ne remplifient
+    plus les critères), donc tout ce qui s'y trouve est par construction à jour et qualifiant
+    (biais ≥ 70% de confiance) — plus de filtre d'âge arbitraire nécessaire ici."""
     now = datetime.utcnow()
     opportunities = []
     for (uid, coin), data in range_suggestion_cache.items():
         if uid != user_id:
             continue
         age_hours = (now - data["timestamp"]).total_seconds() / 3600
-        if age_hours < RANGE_SUGGESTION_COOLDOWN_HOURS:
-            opportunities.append({**{k: v for k, v in data.items() if k != "timestamp"}, "age_minutes": round(age_hours * 60)})
+        opportunities.append({**{k: v for k, v in data.items() if k != "timestamp"}, "age_minutes": round(age_hours * 60)})
     opportunities.sort(key=lambda o: o["age_minutes"])
     return {"opportunities": opportunities}
 
