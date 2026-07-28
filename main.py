@@ -307,6 +307,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Mode paper/live INDÉPENDANT pour l'Accumulation SHORT spécifiquement — séparé de
+        # manual_accum_trading_mode (qui couvre Manuel + Accumulation LONG). Permet par
+        # exemple d'avoir le SHORT en paper pendant que le LONG tourne déjà en live, ou
+        # l'inverse. Défaut 'paper', jamais live sans action explicite.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_short_trading_mode TEXT DEFAULT 'paper'")
+        conn.commit()
+    except: pass
+    try:
         # % du capital total réellement déployable pour le trading automatique (bot principal
         # ET Accumulation) — le reste (100% - ce %) reste en réserve, jamais engagé. Permet de
         # commencer prudemment (ex: 50%) avant de passer à 100% une fois en confiance.
@@ -2744,7 +2752,12 @@ async def scan_markets(user_id: int):
                 # solde Hyperliquid en mode live — il lisait toujours le solde PAPER (simulation,
                 # ~1000$ par défaut), même en live. Résultat : des tailles de position calculées
                 # sur un capital fictif, sans rapport avec le vrai budget engagé.
-                accum_mode = config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper"
+                # Accumulation SHORT lit son propre sélecteur paper/live, indépendant du
+                # LONG/Manuel — cohérent avec execute_manual_trade.
+                if is_short_cand:
+                    accum_mode = config["accumulation_short_trading_mode"] if "accumulation_short_trading_mode" in config.keys() and config["accumulation_short_trading_mode"] else "paper"
+                else:
+                    accum_mode = config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper"
                 if accum_mode == "live":
                     conn_accum2 = get_db()
                     user_row_accum = conn_accum2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
@@ -3951,6 +3964,7 @@ class UpdateConfigRequest(BaseModel):
     active_coins: Optional[List[str]] = None
     trading_mode: Optional[str] = None
     manual_accum_trading_mode: Optional[str] = None
+    accumulation_short_trading_mode: Optional[str] = None
     ai_mode_paper: Optional[str] = None
     resume_now: Optional[bool] = None
     pause_now: Optional[bool] = None
@@ -4120,6 +4134,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "is_running": bool(config["is_running"]),
         "trading_mode": config["trading_mode"] or "paper",
         "manual_accum_trading_mode": config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper",
+        "accumulation_short_trading_mode": config["accumulation_short_trading_mode"] if "accumulation_short_trading_mode" in config.keys() and config["accumulation_short_trading_mode"] else "paper",
         "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
         "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
         "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
@@ -4213,6 +4228,11 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET manual_accum_trading_mode=? WHERE user_id=?",
                     (req.manual_accum_trading_mode, user_id))
         print(f"Mode change (Manuel+Accumulation): {old_mode2['manual_accum_trading_mode'] if old_mode2 else 'unknown'} -> {req.manual_accum_trading_mode} pour user {user_id}")
+    if req.accumulation_short_trading_mode is not None:
+        old_mode3 = conn.execute("SELECT accumulation_short_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        conn.execute("UPDATE bot_config SET accumulation_short_trading_mode=? WHERE user_id=?",
+                    (req.accumulation_short_trading_mode, user_id))
+        print(f"Mode change (Accumulation SHORT): {old_mode3['accumulation_short_trading_mode'] if old_mode3 else 'unknown'} -> {req.accumulation_short_trading_mode} pour user {user_id}")
     if req.ai_mode_paper is not None:
         conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
                     (req.ai_mode_paper, user_id))
@@ -4784,8 +4804,15 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         leverage = 1  # spot-like, pas de levier en mode Accumulation LONG (le SHORT garde le levier transmis)
     conn = get_db()
     ensure_portfolio(user_id, conn)
-    cfg = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    trading_mode = cfg["manual_accum_trading_mode"] if cfg and "manual_accum_trading_mode" in cfg.keys() and cfg["manual_accum_trading_mode"] else "paper"
+    # Accumulation SHORT utilise son propre sélecteur paper/live, indépendant de celui de
+    # Manuel + Accumulation LONG — permet par exemple d'avoir le SHORT en paper pendant que
+    # le LONG (ou le manuel) tourne déjà en live, ou l'inverse.
+    if is_accumulation and action == "SHORT":
+        cfg = conn.execute("SELECT accumulation_short_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        trading_mode = cfg["accumulation_short_trading_mode"] if cfg and "accumulation_short_trading_mode" in cfg.keys() and cfg["accumulation_short_trading_mode"] else "paper"
+    else:
+        cfg = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        trading_mode = cfg["manual_accum_trading_mode"] if cfg and "manual_accum_trading_mode" in cfg.keys() and cfg["manual_accum_trading_mode"] else "paper"
 
     # Prix temps réel via WebSocket en priorité — la table 'prices' n'est mise à jour que
     # toutes les 3 minutes par le scan et peut être significativement périmée.
