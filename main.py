@@ -1735,7 +1735,16 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 rsi_confirms = md.get("rsi") is not None and md["rsi"] < 50
                 reversal_confirmed = macd_confirms and rsi_confirms
 
-            if pnl_pct_live > 0 and reversal_confirmed:
+            # Seuil de pic minimum avant de considérer le retournement comme significatif — un
+            # retournement sur un pic quasi nul (0.005-0.08%) n'est que du bruit de marché
+            # choppy, pas un vrai changement de tendance. Observé concrètement sur JUP : 5
+            # allers-retours en 15 min, chaque clôture "techniquement" confirmée (RSI+MACD
+            # d'accord) mais sur un mouvement de prix trop faible pour représenter une vraie
+            # tendance amorcée. En dessous de ce seuil, on continue de tenir même si RSI/MACD
+            # basculent — le mouvement n'a pas encore eu la place de se développer.
+            pic_significatif = accum_peak_pct >= 0.3
+
+            if pnl_pct_live > 0 and reversal_confirmed and pic_significatif:
                 accum_close_reason = "ACCUMULATION_TREND_END"
                 sens_retournement = "haussier" if is_short_accum else "baissier"
                 accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%) avant que le gain ne s'échappe"
@@ -2478,7 +2487,9 @@ async def scan_markets(user_id: int):
                                     rsi_recovering = True
                             macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
                             reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
-                            if reversal_confirmed:
+                            if reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
+                                add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                            elif reversal_confirmed:
                                 accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi, "action": "LONG"})
                             elif should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
@@ -2516,7 +2527,9 @@ async def scan_markets(user_id: int):
                                     rsi_falling = True
                             macd_bear_confirm = bool(macd and macd["macd"] < macd["signal"])
                             reversal_confirmed_short = last_candle_red and (rsi_falling or macd_bear_confirm)
-                            if reversal_confirmed_short:
+                            if reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
+                                add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                            elif reversal_confirmed_short:
                                 accumulation_candidates.append({"coin": coin, "resistance": resistance, "rsi": rsi, "action": "SHORT"})
                             elif should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
@@ -3023,6 +3036,22 @@ def coin_recently_lost(user_id: int, coin: str, cooldown_minutes: int = 60) -> b
     row = conn.execute(
         "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND status='CLOSED' AND pnl<=0 AND closed_at >= ?",
         (user_id, coin, cutoff)
+    ).fetchone()
+    conn.close()
+    return (row[0] or 0) > 0
+
+def accumulation_coin_recently_closed(user_id: int, coin: str, action: str, cooldown_minutes: int = 15) -> bool:
+    """Vérifie si une position ACCUMULATION (même coin, même direction) a été fermée dans la
+    fenêtre de cooldown récente — PEU IMPORTE le motif (gain ou perte), contrairement à
+    coin_recently_lost qui ne couvre que les pertes. Empêche un rachat quasi immédiat après une
+    clôture ACCUMULATION_TREND_END : observé concrètement sur JUP, 5 allers-retours en 15 min,
+    chaque clôture individuellement correcte (RSI+MACD confirmaient bien un retournement) mais
+    la ré-ouverture immédiate sur un marché choppy fait churner sans laisser la position respirer."""
+    conn = get_db()
+    cutoff = (datetime.utcnow() - timedelta(minutes=cooldown_minutes)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND coin=? AND action=? AND is_accumulation=1 AND status='CLOSED' AND closed_at >= ?",
+        (user_id, coin, action, cutoff)
     ).fetchone()
     conn.close()
     return (row[0] or 0) > 0
