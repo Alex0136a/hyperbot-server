@@ -4656,7 +4656,15 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         if not HL_AGENT_PRIVATE_KEY:
             conn.close()
             raise ValueError("Mode live impossible : la variable d'environnement HL_AGENT_PRIVATE_KEY n'est pas configurée sur Railway")
-        max_loss_for_sl = 100.0 if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
+        # Le SL de sécurité était désactivé (100%) pour l'Accumulation à l'origine, quand le
+        # principe était "jamais de vente forcée en perte". Depuis l'ajout d'un vrai plafond de
+        # perte logiciel (accumulation_max_loss_pct), ce SL exchange doit suivre la même
+        # logique que le bot principal — un filet plus large (x3) en cas de panne du bot,
+        # pas un désengagement total qui laisserait une position live sans aucune protection
+        # côté exchange si le serveur devient injoignable.
+        accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.7
+        max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
             coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
         except Exception as e:
