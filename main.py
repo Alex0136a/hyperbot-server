@@ -1198,14 +1198,30 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     return coin_size, sl_oid, fill_price
 
 def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
-    """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé."""
+    """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé.
+    Lève une exception si la fermeture n'est pas confirmée par l'exchange — symétrique à la
+    correction faite sur hl_open_position : un statut global "ok" ne garantit pas que l'ordre
+    de fermeture a réellement été rempli, il peut être rejeté (marge, taille...) dans le statut
+    imbriqué. Sans cette vérification, le trade était marqué CLOSED en base alors qu'il restait
+    réellement ouvert sur l'exchange, sans plus aucune surveillance (Max Loss, etc.)."""
     exchange = get_hl_exchange(account_address)
     if sl_oid:
         try:
             exchange.cancel(coin, sl_oid)
         except Exception as e:
             print(f"⚠️ Annulation SL Hyperliquid échouée pour {coin} (oid={sl_oid}): {e}")
-    return exchange.market_close(coin)
+    result = exchange.market_close(coin)
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Échec fermeture position Hyperliquid: {result}")
+    try:
+        inner_statuses = result["response"]["data"]["statuses"]
+    except Exception:
+        inner_statuses = []
+    if inner_statuses and "error" in inner_statuses[0]:
+        raise RuntimeError(f"Fermeture rejetée par Hyperliquid: {inner_statuses[0]['error']}")
+    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+        raise RuntimeError(f"Statut de fermeture inattendu/non confirmé par Hyperliquid: {result}")
+    return result
 
 # ── ANALYSE IA ───────────────────────────────────────────────
 def cache_market_data(coin: str, tech: dict, price: float):
@@ -1638,6 +1654,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         if accum_close_reason:
             add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TARGET" else "warning")
             is_live_accum = bool(trade.get("is_live"))
+            close_confirmed = True
             if is_live_accum:
                 user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                 account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
@@ -1645,15 +1662,21 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                     hl_close_position(account_address, trade["coin"], trade.get("hl_sl_oid"))
                     add_bot_log(user_id, f"🔴 {trade['coin']}: position réelle fermée sur Hyperliquid ({accum_close_reason})", "success")
                 except Exception as e:
-                    add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — vérifiez manuellement sur l'exchange !", "error")
-            conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                    add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — position gardée OUVERTE côté suivi, nouvelle tentative au prochain cycle", "error")
+                    close_confirmed = False
+            if close_confirmed:
+                conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
                 closed_at=?, close_reason=? WHERE id=?""",
                 (cur, round(pnl,2), round(pnl_pct_live,2), datetime.utcnow().isoformat(), accum_close_reason, trade["id"]))
-            if not is_live_accum:
-                conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
-                             (trade["size_usdc"], round(pnl,2), user_id))
+                if not is_live_accum:
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                                 (trade["size_usdc"], round(pnl,2), user_id))
+                conn.commit()
+                return {"pnl": pnl, "close_reason": accum_close_reason}
+            # Fermeture live échouée : on ne marque PAS le trade comme fermé — il reste "OPEN"
+            # et sera réévalué (et une nouvelle tentative de fermeture faite) au prochain cycle.
             conn.commit()
-            return {"pnl": pnl, "close_reason": accum_close_reason}
+            return None
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
                     (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
         conn.commit()
@@ -1785,6 +1808,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         return None
 
     is_live = bool(trade.get("is_live"))
+    close_confirmed = True
     if is_live:
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
         account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
@@ -1792,7 +1816,14 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             hl_close_position(account_address, trade["coin"], trade.get("hl_sl_oid"))
             add_bot_log(user_id, f"🔴 {trade['coin']}: position réelle fermée sur Hyperliquid ({close_reason})", "success")
         except Exception as e:
-            add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — vérifiez manuellement sur l'exchange !", "error")
+            add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — position gardée OUVERTE côté suivi, nouvelle tentative au prochain cycle", "error")
+            close_confirmed = False
+
+    if not close_confirmed:
+        # Fermeture live échouée : ne pas marquer CLOSED — le trade reste "OPEN" et sera
+        # réévalué (nouvelle tentative de fermeture) au prochain cycle.
+        conn.commit()
+        return None
 
     conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
         closed_at=?, close_reason=?, close_stop_level_pct=?, close_qp_arm_pct=? WHERE id=?""",
@@ -2221,16 +2252,21 @@ async def scan_markets(user_id: int):
                     # Email retiré sur demande (trop de mails) — la suggestion reste visible
                     # dans les logs, le Tableau de bord et Trading Manuel.
 
-            # Distingue un PIC RAPIDE (quelques bougies, mouvement brutal) d'une TENDANCE
-            # SOUTENUE (installée sur beaucoup plus de bougies) — évite que MACD/EMA, qui ne
-            # font que refléter le même mouvement récent de façon quasi tautologique lors d'un
-            # pic brutal, pénalisent à tort un RSI extrême qui a statistiquement de bonnes
-            # chances de retour à la moyenne (fade). Cf. WIF RSI 81 après poussée verticale.
+            # Distingue un PIC/CRASH RAPIDE (jusqu'à quelques heures, plusieurs bougies) d'une
+            # TENDANCE SOUTENUE (installée sur beaucoup plus longtemps) — évite que MACD/EMA,
+            # qui ne font que refléter le même mouvement récent de façon quasi tautologique,
+            # pénalisent à tort un RSI extrême qui a statistiquement de bonnes chances de retour
+            # à la moyenne (fade). Cf. WIF RSI 81 après poussée verticale, et les chutes larges
+            # de marché (BTC+altcoins ensemble) qui s'étalent sur plusieurs bougies, pas
+            # seulement les 3 dernières — d'où DEUX fenêtres vérifiées (courte ET moyenne).
             is_recent_spike = False
             if len(closes) >= 20:
                 move_recent = abs(closes[-1] - closes[-4]) / closes[-4] * 100 if closes[-4] else 0
+                move_medium = abs(closes[-1] - closes[-10]) / closes[-10] * 100 if len(closes) >= 10 and closes[-10] else 0
                 move_longer = abs(closes[-1] - closes[-20]) / closes[-20] * 100 if closes[-20] else 0
-                is_recent_spike = move_longer > 0 and (move_recent / move_longer) > 0.6
+                is_recent_spike = move_longer > 0 and (
+                    (move_recent / move_longer) > 0.6 or (move_medium / move_longer) > 0.75
+                )
 
             tech = {
                 "rsi": round(rsi, 2) if rsi else None,
@@ -2519,7 +2555,22 @@ async def scan_markets(user_id: int):
                 # Taille = (capital alloué × 50%) ÷ nombre de positions simultanées max — même
                 # philosophie de compound que le bot principal (capital ÷ trades max), mais
                 # n'engage que la moitié du capital alloué pour l'Accumulation spécifiquement.
-                capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
+                # BUG CORRIGÉ : le capital utilisé pour la taille ne reflétait jamais le vrai
+                # solde Hyperliquid en mode live — il lisait toujours le solde PAPER (simulation,
+                # ~1000$ par défaut), même en live. Résultat : des tailles de position calculées
+                # sur un capital fictif, sans rapport avec le vrai budget engagé.
+                accum_mode = config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper"
+                if accum_mode == "live":
+                    conn_accum2 = get_db()
+                    user_row_accum = conn_accum2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                    conn_accum2.close()
+                    hl_wallet_addr = user_row_accum["hl_wallet"] if user_row_accum and "hl_wallet" in user_row_accum.keys() else None
+                    capital_disponible = get_hl_account_value(hl_wallet_addr) if hl_wallet_addr else 0.0
+                    if capital_disponible <= 0:
+                        add_bot_log(user_id, f"⛔ {coin}: Accumulation live — impossible de lire le solde Hyperliquid réel, achat annulé par sécurité", "error")
+                        continue
+                else:
+                    capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
                 alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
                 accum_size = round((capital_disponible * alloc_pct / 100 * 0.5) / max_pos, 2)
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
@@ -4998,18 +5049,21 @@ def reset_all(user_id: int = Depends(get_current_user)):
     if open_live > 0:
         conn.close()
         raise HTTPException(status_code=400, detail=f"{open_live} trade(s) LIVE encore ouvert(s) sur Hyperliquid — fermez-les d'abord")
-    # Fermer tous les trades paper ouverts
-    conn.execute("UPDATE paper_trades SET status='CLOSED', close_reason='RESET', closed_at=? WHERE user_id=? AND status='OPEN'",
+    # Fermer tous les trades paper ouverts (jamais les trades live — déjà garanti aucun ouvert
+    # par la vérification ci-dessus, mais on ne cible que is_live=0 par sécurité supplémentaire)
+    conn.execute("UPDATE paper_trades SET status='CLOSED', close_reason='RESET', closed_at=? WHERE user_id=? AND status='OPEN' AND (is_live IS NULL OR is_live=0)",
                 (datetime.utcnow().isoformat(), user_id))
-    # Supprimer tout l'historique paper
-    conn.execute("DELETE FROM paper_trades WHERE user_id=?", (user_id,))
-    # Remettre le portefeuille a zero
+    # Supprimer l'historique PAPER uniquement — l'historique LIVE (trades réels déjà fermés)
+    # est toujours préservé, quel que soit le sens du changement de mode (paper->live ou
+    # live->paper), pour ne jamais perdre une trace de trades ayant impliqué de l'argent réel.
+    conn.execute("DELETE FROM paper_trades WHERE user_id=? AND (is_live IS NULL OR is_live=0)", (user_id,))
+    # Remettre le portefeuille paper a zero (le solde réel vit sur Hyperliquid, non affecté)
     conn.execute("UPDATE paper_portfolio SET balance=1000.0, initial_balance=1000.0 WHERE user_id=?", (user_id,))
-    # Supprimer tous les signaux
+    # Supprimer tous les signaux (analyse, pas des trades — non concernés par la distinction live/paper)
     conn.execute("DELETE FROM signals WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
-    return {"message": "Reinitialisation complete — portefeuille remis a 1000 USDC, signaux et historique effaces"}
+    return {"message": "Reinitialisation complete — portefeuille paper remis a 1000 USDC, signaux et historique PAPER effaces (historique LIVE conservé)"}
 
 # ── LOGS BOT ─────────────────────────────────────────────────
 @app.post("/api/sessions/cleanup")
