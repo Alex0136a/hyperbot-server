@@ -1164,24 +1164,46 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
                       leverage: int, cur_price: float, max_loss_pct: float):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
     (trigger order, reduce_only) sur l'exchange — filet en cas de défaillance du bot.
-    Retourne (coin_size, sl_oid) ou lève une exception."""
+    Retourne (coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison) ou lève une exception.
+    sl_echec_raison est None si le SL a été posé avec succès, sinon la raison de l'échec — la
+    position reste ouverte même si le SL échoue (ce n'est qu'un filet de secours), mais
+    l'appelant doit journaliser cette raison de façon visible plutôt que de la laisser en silence.
+    Si Hyperliquid refuse le levier demandé, replie sur x1 (au lieu de bloquer entièrement) —
+    la taille est alors RECALCULÉE pour ce levier réel, afin que la marge engagée corresponde
+    toujours à size_usdc (l'intention initiale), plutôt que de garder la taille prévue pour le
+    levier demandé et doubler (ou plus) la marge réellement immobilisée."""
     exchange = get_hl_exchange(account_address)
     is_buy = (action == "LONG")
     size_decimals = get_hl_size_decimals(coin)
-    coin_size = round((size_usdc * leverage) / cur_price, size_decimals)
-    if coin_size <= 0:
-        raise ValueError("Taille de position calculée nulle ou négative")
 
     # Régler explicitement le levier sur l'exchange AVANT d'ouvrir — sans ça, l'exchange
     # utilise le levier précédemment configuré pour ce coin (souvent différent de celui
     # décidé par l'IA/les règles), ce qui désynchronise la taille d'ordre calculée ici
     # de la marge réellement engagée sur l'exchange.
+    levier_reel = leverage
+    repli_raison = None
     try:
         lev_result = exchange.update_leverage(int(leverage), coin, is_cross=True)
         if lev_result.get("status") != "ok":
-            print(f"⚠️ update_leverage non confirmé pour {coin} (x{leverage}): {lev_result}")
+            raise RuntimeError(str(lev_result))
     except Exception as e:
-        raise RuntimeError(f"Échec réglage du levier x{leverage} pour {coin} sur Hyperliquid: {e}")
+        # Repli sur x1 plutôt que de bloquer entièrement — la raison du refus est conservée
+        # pour être journalisée côté appelant (traçabilité), et la taille sera recalculée
+        # ci-dessous pour ce levier réel (x1), pas celui initialement demandé.
+        repli_raison = str(e)
+        try:
+            lev_result_fallback = exchange.update_leverage(1, coin, is_cross=True)
+            if lev_result_fallback.get("status") != "ok":
+                raise RuntimeError(f"Repli x1 also refusé: {lev_result_fallback}")
+            levier_reel = 1
+        except Exception as e2:
+            raise RuntimeError(f"Levier x{leverage} refusé ({repli_raison}) ET repli x1 également refusé ({e2}) — ouverture annulée")
+
+    # Taille recalculée avec le levier RÉELLEMENT appliqué (pas celui demandé au départ) —
+    # garantit que la marge engagée correspond toujours à size_usdc, peu importe le levier.
+    coin_size = round((size_usdc * levier_reel) / cur_price, size_decimals)
+    if coin_size <= 0:
+        raise ValueError("Taille de position calculée nulle ou négative")
 
     result = exchange.market_open(coin, is_buy, coin_size, slippage=0.01)
     if result.get("status") != "ok":
@@ -1217,6 +1239,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     sl_price = round(fill_price * (1 - safety_move_pct), 6) if is_buy else round(fill_price * (1 + safety_move_pct), 6)
 
     sl_oid = None
+    sl_echec_raison = None
     try:
         sl_result = exchange.order(
             coin, not is_buy, coin_size, sl_price,
@@ -1227,10 +1250,17 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
             statuses = sl_result["response"]["data"]["statuses"]
             if statuses and "resting" in statuses[0]:
                 sl_oid = statuses[0]["resting"]["oid"]
+            else:
+                # Statut global "ok" mais l'ordre SL lui-même n'a pas été confirmé "resting"
+                # (ex: rejeté dans le statut imbriqué) — même piège que pour l'ouverture/fermeture,
+                # capturé ici pour ne plus jamais laisser passer ça en silence.
+                sl_echec_raison = f"statut inattendu: {statuses}"
+        else:
+            sl_echec_raison = f"statut global non ok: {sl_result}"
     except Exception as e:
-        print(f"⚠️ SL de sécurité Hyperliquid non posé pour {coin}: {e}")
+        sl_echec_raison = str(e)
 
-    return coin_size, sl_oid, fill_price
+    return coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison
 
 def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
     """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé.
@@ -2777,7 +2807,11 @@ async def scan_markets(user_id: int):
                             cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 0.31
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
+                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
+                            if repli_raison:
+                                add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
+                            if sl_echec_raison:
+                                add_bot_log(user_id, f"⛔ {coin}: SL de sécurité NON posé sur Hyperliquid ({sl_echec_raison}) — position ouverte SANS ce filet, surveillance logicielle uniquement", "error")
                             # entry_price = prix de fill réel renvoyé par Hyperliquid (pas une estimation locale
                             # potentiellement périmée) — capital réel en jeu, la précision compte.
                             entry_price = fill_price
@@ -2787,11 +2821,11 @@ async def scan_markets(user_id: int):
                                 session_date, is_live, hl_sl_oid, hl_size)
                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
                             """, (user_id, coin, ai["action"], entry_price, fill_price, size,
-                                   leverage, ai.get("stopLoss"),
+                                   levier_reel, ai.get("stopLoss"),
                                    ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                                    datetime.utcnow().isoformat(),
                                    datetime.utcnow().strftime("%Y-%m-%d"), sl_oid, coin_size))
-                            add_bot_log(user_id, f"🔴 LIVE TRADE ({net_env}): {ai['action']} {coin} @ ${entry_price} | {size} USDC | SL sécurité posé: {'oui' if sl_oid else 'NON — vérifier manuellement'}", "success")
+                            add_bot_log(user_id, f"🔴 LIVE TRADE ({net_env}): {ai['action']} {coin} @ ${entry_price} | {size} USDC (x{levier_reel}) | SL sécurité posé: {'oui' if sl_oid else 'NON — vérifier manuellement'}", "success")
                         except Exception as e:
                             add_bot_log(user_id, f"⛔ {coin}: Échec ouverture live Hyperliquid — {e}", "error")
 
@@ -4681,17 +4715,21 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.7
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
-            coin_size, sl_oid, fill_price = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
+            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
         except Exception as e:
             conn.close()
             raise ValueError(f"Échec ouverture live: {e}")
+        if repli_raison:
+            add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
+        if sl_echec_raison:
+            add_bot_log(user_id, f"⛔ {coin}: SL de sécurité NON posé sur Hyperliquid ({sl_echec_raison}) — position ouverte SANS ce filet, surveillance logicielle uniquement", "error")
         conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
             size_usdc, leverage, opened_at, session_date, is_live, is_manual, hl_sl_oid, hl_size,
             is_accumulation, accumulation_target_pct, accumulation_support_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
             VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (user_id, coin, action, fill_price, fill_price, size_usdc, leverage,
+            (user_id, coin, action, fill_price, fill_price, size_usdc, levier_reel,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
@@ -4700,7 +4738,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         conn.close()
         prefix = "👤" if is_manual else "🤖"
         label = f"{prefix}💰 Achat ACCUMULATION LIVE" if is_accumulation else f"{prefix}🔴 Trade {'MANUEL' if is_manual else 'AUTO'} LIVE"
-        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{leverage})", "success")
+        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{levier_reel})", "success")
         return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
     portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
