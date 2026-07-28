@@ -579,6 +579,20 @@ function App() {
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
   };
 
+  const updateAccumShortMode = async (mode) => {
+    if (mode === config?.accumulation_short_trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
+    const confirmMsg = mode === "live"
+      ? `Basculer Accumulation SHORT en LIVE (argent réel) ?\n\nManuel + Accumulation LONG reste inchangé (actuellement ${config?.manual_accum_trading_mode==="live"?"LIVE":"Paper"}), et vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      : `Repasser Accumulation SHORT en Paper (simulation) ?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiCall("/api/config","PUT",{accumulation_short_trading_mode:mode},token);
+      loadData();
+      addLog(`Mode Accumulation SHORT: ${modeLabel}`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
   const updateTradingMode = async (mode) => {
     if (mode === config?.trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper Trading" : "LIVE (trades reels)";
@@ -1293,6 +1307,17 @@ Confirmer ?`
                 {accumulationShortEnabled?"✅ ON":"⭕ OFF"}
               </button>
             </div>
+            {accumulationShortEnabled && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                <div style={{fontSize:10,color:"#475569"}}>
+                  Mode Accumulation SHORT — indépendant de Manuel+Accumulation LONG (actuellement <b style={{color:config?.manual_accum_trading_mode==="live"?"#f87171":"#60a5fa"}}>{config?.manual_accum_trading_mode==="live"?"LIVE":"Paper"}</b>)
+                </div>
+                <div style={{display:"flex",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,overflow:"hidden"}}>
+                  <button onClick={()=>updateAccumShortMode("paper")} style={{padding:"4px 10px",border:"none",background:config?.accumulation_short_trading_mode!=="live"?"#1e2d4a":"transparent",color:config?.accumulation_short_trading_mode!=="live"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🎮 PAPER</button>
+                  <button onClick={()=>updateAccumShortMode("live")} style={{padding:"4px 10px",border:"none",background:config?.accumulation_short_trading_mode==="live"?"#052e16":"transparent",color:config?.accumulation_short_trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔴 LIVE</button>
+                </div>
+              </div>
+            )}
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
