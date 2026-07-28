@@ -1247,6 +1247,8 @@ def cache_market_data(coin: str, tech: dict, price: float):
         "rsi": round(tech.get("rsi", 0), 2),
         "macd_bull": tech.get("macd_bull", False),
         "macd_bear": tech.get("macd_bear", False),
+        "macd_value": tech.get("macd_value"),
+        "macd_signal_value": tech.get("macd_signal_value"),
         "ema20": round(tech.get("ema20", 0), 4),
         "ema50": round(tech.get("ema50", 0), 4),
         "ema200": round(tech.get("ema200", 0), 4),
@@ -1891,8 +1893,8 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
         vol_avg = sum(vols[-20:])/20
         tech = {
             "rsi": round(rsi,2) if rsi else None,
-            "macd_bull": macd["crossBull"] if macd else False,
-            "macd_bear": macd["crossBear"] if macd else False,
+            "macd_bull": (macd["macd"] > macd["signal"]) if macd else False,
+            "macd_bear": (macd["macd"] < macd["signal"]) if macd else False,
             "ema20": round(e20[-1],4) if e20 else None,
             "ema50": round(e50[-1],4) if e50 else None,
             "ema200": round(e200[-1],4) if e200 else None,
@@ -2236,9 +2238,9 @@ async def scan_markets(user_id: int):
                             score_short += 10; raisons_short.append(f"RSI {rsi:.1f} (surachat)")
                     macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
                     if macd_bias:
-                        if macd_bias.get("crossBull"):
+                        if macd_bias["macd"] > macd_bias["signal"]:
                             score_long += 10; raisons_long.append("MACD haussier")
-                        elif macd_bias.get("crossBear"):
+                        elif macd_bias["macd"] < macd_bias["signal"]:
                             score_short += 10; raisons_short.append("MACD baissier")
 
                     if score_long > score_short:
@@ -2285,8 +2287,10 @@ async def scan_markets(user_id: int):
 
             tech = {
                 "rsi": round(rsi, 2) if rsi else None,
-                "macd_bull": macd["crossBull"] if macd else False,
-                "macd_bear": macd["crossBear"] if macd else False,
+                "macd_bull": (macd["macd"] > macd["signal"]) if macd else False,
+                "macd_bear": (macd["macd"] < macd["signal"]) if macd else False,
+                "macd_value": round(macd["macd"], 6) if macd else None,
+                "macd_signal_value": round(macd["signal"], 6) if macd else None,
                 "ema20": round(e20[-1], 4) if e20 else None,
                 "ema50": round(e50[-1], 4) if e50 else None,
                 "ema200": round(e200[-1], 4) if e200 else None,
@@ -2346,7 +2350,7 @@ async def scan_markets(user_id: int):
                                 rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
                                 if rsi_prev is not None and rsi > rsi_prev:
                                     rsi_recovering = True
-                            macd_bull_confirm = bool(macd and macd.get("crossBull"))
+                            macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
                             reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
                             if reversal_confirmed:
                                 accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi})
@@ -2462,8 +2466,8 @@ async def scan_markets(user_id: int):
                         rsi_confirms_direction = True
                     elif action_ia == "SHORT" and rsi_current_check < rsi_prev_check:
                         rsi_confirms_direction = True
-            macd_confirms_direction = (action_ia == "LONG" and macd and macd.get("crossBull")) or \
-                                       (action_ia == "SHORT" and macd and macd.get("crossBear"))
+            macd_confirms_direction = (action_ia == "LONG" and macd and macd["macd"] > macd["signal"]) or \
+                                       (action_ia == "SHORT" and macd and macd["macd"] < macd["signal"])
             movement_confirmed = last_candle_confirms and (rsi_confirms_direction or macd_confirms_direction)
 
             if not movement_confirmed:
@@ -4683,8 +4687,16 @@ def _evaluate_condition(cond: dict, coin: str, mids: dict) -> bool:
     if ctype == "RSI_BELOW":
         return data["rsi"] <= value if data.get("rsi") is not None else None
     if ctype == "MACD_BULLISH":
+        # État courant (MACD au-dessus du signal), pas seulement l'instant précis du
+        # croisement — sinon la condition redevient fausse dès la bougie suivante même si
+        # MACD reste haussier depuis, ce qui ne correspond pas à l'attente intuitive de
+        # "MACD haussier" pour un ordre programmé qui peut attendre plusieurs cycles.
+        if data.get("macd_value") is not None and data.get("macd_signal_value") is not None:
+            return data["macd_value"] > data["macd_signal_value"]
         return bool(data.get("macd_bull"))
     if ctype == "MACD_BEARISH":
+        if data.get("macd_value") is not None and data.get("macd_signal_value") is not None:
+            return data["macd_value"] < data["macd_signal_value"]
         return bool(data.get("macd_bear"))
     return None
 
@@ -5187,8 +5199,8 @@ async def refresh_market_data_for_coin(coin: str, user_id: int = Depends(get_cur
     vol_cur = vols[-1]
     tech = {
         "rsi": round(rsi, 2) if rsi else None,
-        "macd_bull": macd["crossBull"] if macd else False,
-        "macd_bear": macd["crossBear"] if macd else False,
+        "macd_bull": (macd["macd"] > macd["signal"]) if macd else False,
+        "macd_bear": (macd["macd"] < macd["signal"]) if macd else False,
         "ema20": round(e20[-1], 4) if e20 else None,
         "ema50": round(e50[-1], 4) if e50 else None,
         "ema200": round(e200[-1], 4) if e200 else None,
