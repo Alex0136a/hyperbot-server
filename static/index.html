@@ -375,6 +375,7 @@ function App() {
   const [filterExtraHours, setFilterExtraHours] = useState(true);
   const [hardCapEnabled, setHardCapEnabled] = useState(false);
   const [accumulationEnabled, setAccumulationEnabled] = useState(false);
+  const [accumulationShortEnabled, setAccumulationShortEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -474,6 +475,7 @@ function App() {
       setFilterExtraHours(cfg?.filter_extra_hours !== 0);
       setHardCapEnabled(cfg?.hard_cap_enabled === 1);
       setAccumulationEnabled(cfg?.accumulation_enabled === 1);
+      setAccumulationShortEnabled(!!cfg?.accumulation_short_enabled);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -999,7 +1001,7 @@ Confirmer ?`
                       <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Position ouverte manuellement, pas par le bot">👤 MANUEL</span>
                     )}
                     {!!matchedTrade?.is_accumulation && (
-                      <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Accumulation — sans levier, pas de vente forcée en perte">💰 ACCUMULATION</span>
+                      <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={matchedTrade.action==="SHORT"?"Accumulation SHORT — levier dédié, pas de rachat forcé en perte au-delà du plafond":"Accumulation — sans levier, pas de vente forcée en perte"}>💰 ACCUMULATION</span>
                     )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
@@ -1252,7 +1254,7 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation (achat auto sur RSI {config?.accumulation_rsi_min||15}-{config?.accumulation_rsi_max||40})</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation LONG (achat auto sur RSI {config?.accumulation_rsi_min||15}-{config?.accumulation_rsi_max||40})</div>
                 <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (RSI survente + retournement), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
               </div>
               <button onClick={()=>{
@@ -1278,6 +1280,19 @@ Confirmer ?`
                 )}
               </div>
             )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation SHORT (vente auto sur RSI {config?.accumulation_short_rsi_min||60}-{config?.accumulation_short_rsi_max||85})</div>
+                <div style={{fontSize:10,color:"#334155"}}>Miroir du LONG : vend à découvert sur résistance confirmée (RSI surachat + retournement baissier), levier x{config?.accumulation_short_leverage||2} dédié, plafond de positions séparé du LONG. Rachète au % de gain visé, ou si la résistance casse pour de bon. Désactivé par défaut.</div>
+              </div>
+              <button onClick={()=>{
+                const v=!accumulationShortEnabled; setAccumulationShortEnabled(v);
+                apiCall("/api/config","PUT",{"accumulation_short_enabled":v},token);
+              }} style={{background:accumulationShortEnabled?"#3d1a1a":"#0f1629",border:accumulationShortEnabled?"1px solid #f87171":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:accumulationShortEnabled?"#f87171":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {accumulationShortEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
@@ -1446,7 +1461,7 @@ Confirmer ?`
                           <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
                         )}
                         {!!trade.is_accumulation && (
-                          <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={`Accumulation — objectif +${trade.accumulation_target_pct}%, pas de vente forcée en perte`}>💰 ACCUMULATION</span>
+                          <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={`Accumulation ${trade.action==="SHORT"?"SHORT (levier dédié)":""} — objectif +${trade.accumulation_target_pct}%, pas de ${trade.action==="SHORT"?"rachat":"vente"} forcé${trade.action==="SHORT"?"":"e"} en perte`}>💰 ACCUMULATION</span>
                         )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
@@ -1503,7 +1518,7 @@ Confirmer ?`
                         <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
                       )}
                       {!!trade.is_accumulation && (
-                        <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Accumulation — sans levier, pas de vente forcée en perte">💰 ACCUMULATION</span>
+                        <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={trade.action==="SHORT"?"Accumulation SHORT — levier dédié, pas de rachat forcé en perte au-delà du plafond":"Accumulation — sans levier, pas de vente forcée en perte"}>💰 ACCUMULATION</span>
                       )}
                       {trade.peak_price_pct != null && (
                         <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
@@ -1599,7 +1614,11 @@ Confirmer ?`
                     {key:"accumulation_target_pct",label:"Accumulation - objectif de gain (%)",def:2.0,step:0.5,min:0.5,max:50},
                     {key:"accumulation_size_pct",label:"Accumulation - taille par achat auto (% du capital, compound)",def:2.0,step:0.5,min:0.5,max:20},
                     {key:"accumulation_size_usdc",label:"Accumulation - taille par défaut suggérée en achat manuel ($)",def:20.0,step:5,min:5,max:1000},
-                    {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées",def:5,step:1,min:1,max:50},
+                    {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées (LONG)",def:5,step:1,min:1,max:50},
+                    {key:"accumulation_short_max_positions",label:"Accumulation SHORT - positions max simultanées",def:8,step:1,min:1,max:50},
+                    {key:"accumulation_short_leverage",label:"Accumulation SHORT - levier",def:2,step:1,min:1,max:10},
+                    {key:"accumulation_short_rsi_min",label:"Accumulation SHORT - RSI borne basse (surachat)",def:60,step:1,min:50,max:80},
+                    {key:"accumulation_short_rsi_max",label:"Accumulation SHORT - RSI borne haute (évite l'euphorie extrême)",def:85,step:1,min:60,max:95},
                     {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
                     {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
                     {key:"accumulation_qp_arm_pct",label:"Accumulation - armement du garde-fou RSI/MACD (%)",def:3.0,step:0.1,min:0.5,max:20},
