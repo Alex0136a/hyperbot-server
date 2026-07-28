@@ -2598,7 +2598,7 @@ async def scan_markets(user_id: int):
                 continue
             cache_market_data(coin, tech, price)  # Mettre à jour le cache
             add_bot_log(user_id, f"{'📐' if use_rules_engine else '🤖'} {coin}: {'Règles' if use_rules_engine else 'IA'} → {action_ia} ({confidence_ia}%) RSI={tech.get('rsi','?')}", "info" if action_ia=="WAIT" else "success")
-            required_conf = get_required_confidence(user_id, coin, action_ia, btc_change=btc_change)
+            required_conf = get_required_confidence(user_id, coin, action_ia, btc_change=btc_change, btc_trend=btc_trend)
             if action_ia == "WAIT":
                 add_bot_log(user_id, f"⛔ {coin}: aucun signal net (WAIT) — ignoré", "info")
                 continue
@@ -3021,7 +3021,7 @@ def coin_recently_lost(user_id: int, coin: str, cooldown_minutes: int = 60) -> b
     conn.close()
     return (row[0] or 0) > 0
 
-def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None, btc_change: float = 0.0) -> int:
+def get_required_confidence(user_id: int, coin: str, action: str, base_confidence: int = None, btc_change: float = 0.0, btc_trend: str = "neutral") -> int:
     """Retourne la confiance requise selon l'historique récent du coin/direction :
     - pertes consécutives → paliers réglables à la hausse (défaut 60/72/82/90), plus dur à déclencher
     - gains consécutifs (≥3) → baisse symétrique sous la base (5%/3 gains, plancher 50%), plus facile
@@ -3049,31 +3049,51 @@ def get_required_confidence(user_id: int, coin: str, action: str, base_confidenc
     ).fetchone()
     min_conf_floor = min_row["min_confidence"] if min_row else 0
 
-    # Bonus de contexte marché : BTC bouge fort et dans le même sens que ce signal
+    # Bonus de contexte marché : BTC bouge fort et dans le même sens que ce signal.
+    # BUG CORRIGÉ (même défaut que la pénalité miroir ci-dessous) : ce bonus ne s'appliquait
+    # qu'au plancher manuel (min_conf_floor), qui vaut 0 pour la quasi-totalité des coins (pas
+    # de plancher spécifique réglé) — le bonus ne faisait alors strictement rien, la tendance
+    # confirmée n'était jamais réellement mise à profit. Appliqué maintenant au résultat final.
     btc_thresh = cfg["btc_trend_threshold"] if cfg and "btc_trend_threshold" in cfg.keys() and cfg["btc_trend_threshold"] else 2.0
-    aligned_with_btc = (btc_change >= btc_thresh and action == "LONG") or (btc_change <= -btc_thresh and action == "SHORT")
-    if aligned_with_btc and min_conf_floor > 0:
-        old_floor = min_conf_floor
-        min_conf_floor = max(0, min_conf_floor - MARKET_CONTEXT_BONUS)
-        add_bot_log(user_id, f"📉📈 {coin} {action}: plancher manuel réduit {old_floor}%→{min_conf_floor}% (BTC {btc_change:+.1f}%, mouvement aligné)", "info")
+    aligned_with_btc = (btc_trend == "bullish" and action == "LONG") or (btc_trend == "bearish" and action == "SHORT")
+
+    # Miroir du bonus ci-dessus : pénalité si le signal va À CONTRE-COURANT d'une tendance BTC
+    # CONFIRMÉE (4h ET 8h alignées, pas juste un mouvement ponctuel). BUG CORRIGÉ : appliquer
+    # cette pénalité au plancher manuel (min_conf_floor) ne servait à rien pour la plupart des
+    # coins — celui-ci vaut 0 par défaut (pas de plancher spécifique), et se fait alors écraser
+    # par max(steps[...], 15) puisque steps[...] (souvent 60-90%) est presque toujours bien plus
+    # élevé que 15%. La pénalité doit s'appliquer au résultat FINAL, pas seulement au plancher.
+    is_counter_trend = (btc_trend == "bullish" and action == "SHORT") or (btc_trend == "bearish" and action == "LONG")
 
     losses = row["consecutive_losses"] if row else 0
     wins = row["consecutive_wins"] if row and "consecutive_wins" in row.keys() else 0
     steps = get_confidence_steps(cfg)
     if losses > 0:
         conn.close()
-        return max(steps[min(losses, len(steps) - 1)], min_conf_floor)
-    if wins >= REWARD_WIN_THRESHOLD:
+        result = max(steps[min(losses, len(steps) - 1)], min_conf_floor)
+    elif wins >= REWARD_WIN_THRESHOLD:
         if is_coin_penalizing(user_id, coin, conn):
             conn.close()
             add_bot_log(user_id, f"⚠️ {coin} {action}: récompense ignorée — bilan cumulé pénalisant malgré {wins} gains récents", "warning")
-            return max(steps[0], min_conf_floor)
+            result = max(steps[0], min_conf_floor)
+        else:
+            conn.close()
+            base = steps[0]
+            reward_tiers = wins // REWARD_WIN_THRESHOLD
+            result = max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT, min_conf_floor)
+    else:
         conn.close()
-        base = steps[0]
-        reward_tiers = wins // REWARD_WIN_THRESHOLD
-        return max(REWARD_FLOOR_PCT, base - reward_tiers * REWARD_STEP_PCT, min_conf_floor)
-    conn.close()
-    return max(steps[0], min_conf_floor)
+        result = max(steps[0], min_conf_floor)
+
+    if aligned_with_btc:
+        old_result_bonus = result
+        result = max(REWARD_FLOOR_PCT, result - MARKET_CONTEXT_BONUS)
+        add_bot_log(user_id, f"📉📈 {coin} {action}: exigence réduite {old_result_bonus}%→{result}% (signal aligné avec un BTC {('haussier' if btc_trend=='bullish' else 'baissier')} confirmé)", "info")
+    elif is_counter_trend:
+        old_result = result
+        result = min(95, result + MARKET_CONTEXT_BONUS)
+        add_bot_log(user_id, f"⚠️📉 {coin} {action}: exigence renforcée {old_result}%→{result}% (signal à contre-courant d'un BTC {('haussier' if btc_trend=='bullish' else 'baissier')} confirmé)", "warning")
+    return result
 
 def get_confidence_steps(cfg) -> list:
     """Construit la liste des paliers [base, step1, step2, step3] à partir de la config utilisateur,
