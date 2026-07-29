@@ -3768,7 +3768,7 @@ async def connect_hyperliquid_ws():
                             # Ordres programmés à condition de PRIX — vérifiés à chaque tick temps
                             # réel (pas seulement au cycle de scan ~3min), indépendamment de
                             # is_running (une intention manuelle de l'utilisateur, pas de l'auto-trading)
-                            check_and_execute_pending_orders(mids, conn)
+                            await check_and_execute_pending_orders(mids, conn)
                         except Exception as e:
                             print(f"WS trades error: {e}")
                         finally:
@@ -4029,6 +4029,10 @@ async def lifespan(app: FastAPI):
     # Boucle des ordres programmés — indépendante de is_running, tourne toujours
     asyncio.create_task(pending_orders_loop())
     print("⏳ Boucle des ordres programmés démarrée (indépendante de l'état du bot)")
+    # Boucle de rafraîchissement RSI/MACD frais (toutes les 45s) pour l'Accumulation et les
+    # conditions programmées — corrige la dépendance au cache du cycle de scan (~3min périmé)
+    asyncio.create_task(fresh_macd_rsi_loop())
+    print("📊 Boucle de rafraîchissement RSI/MACD frais démarrée (45s, coins actifs uniquement)")
     yield
 
 app = FastAPI(title="HyperBot AI", lifespan=lifespan)
@@ -5097,13 +5101,20 @@ def update_tracking_pending_orders():
             add_bot_log(user_id, f"🔄 {coin}: ordre programmé #{order['id']} ajusté — {order['tracks_level']} déplacé à ${new_level:.4g} (point d'entrée mis à jour)", "info")
     conn.close()
 
-def check_and_execute_pending_orders(mids: dict, conn):
+async def check_and_execute_pending_orders(mids: dict, conn):
     """Vérifie TOUS les ordres programmés (tous utilisateurs, tous types de condition
     confondus) et déclenche l'ouverture dès que TOUTES les conditions d'un ordre sont
     remplies simultanément (ET logique — permet de combiner prix + RSI + MACD ensemble).
     Appelée à la fois à chaque tick WebSocket (réactivité sur le prix) et depuis la boucle
-    dédiée toutes les 10s (couvre aussi RSI/MACD, qui ne changent qu'au rythme du scan)."""
+    dédiée toutes les 10s.
+    BUG CORRIGÉ : la condition MACD_BULLISH/MACD_BEARISH lisait market_data_cache, qui ne se
+    rafraîchit qu'au rythme du cycle de scan (~3 min) — un ordre pouvait donc se déclencher sur
+    un état MACD vieux de plusieurs minutes, alors que le marché avait déjà tourné entre-temps
+    (observé concrètement : ordres ouverts sous condition haussière, puis en baisse la seconde
+    suivante). Le MACD est maintenant recalculé en TEMPS RÉEL (bougies fraîches) pour tout ordre
+    dont une condition porte sur MACD, au moment exact de la vérification."""
     orders = conn.execute("SELECT * FROM pending_orders WHERE status='PENDING'").fetchall()
+    fresh_macd_par_coin = {}  # cache local à cet appel — évite de refetch plusieurs fois le même coin
     for o in orders:
         order = dict(o)
         coin = order["coin"]
@@ -5128,7 +5139,31 @@ def check_and_execute_pending_orders(mids: dict, conn):
             conditions = []
         if not conditions:
             continue
-        results = [_evaluate_condition(c, coin, mids) for c in conditions]
+
+        has_macd_condition = any(c.get("type") in ("MACD_BULLISH", "MACD_BEARISH") for c in conditions)
+        if has_macd_condition and coin not in fresh_macd_par_coin:
+            try:
+                async with httpx.AsyncClient() as client:
+                    candles_fresh = await fetch_candles(client, coin)
+                closes_fresh = [float(c["c"]) for c in candles_fresh] if candles_fresh else []
+                macd_fresh = calc_macd(closes_fresh, 12, 26, 9) if len(closes_fresh) >= 35 else None
+                fresh_macd_par_coin[coin] = macd_fresh
+            except Exception as e:
+                print(f"⚠️ Impossible de recalculer un MACD frais pour {coin}: {e}")
+                fresh_macd_par_coin[coin] = None
+
+        results = []
+        for c in conditions:
+            if c.get("type") in ("MACD_BULLISH", "MACD_BEARISH"):
+                macd_fresh = fresh_macd_par_coin.get(coin)
+                if not macd_fresh:
+                    results.append(None)
+                elif c["type"] == "MACD_BULLISH":
+                    results.append(macd_fresh["macd"] > macd_fresh["signal"])
+                else:
+                    results.append(macd_fresh["macd"] < macd_fresh["signal"])
+            else:
+                results.append(_evaluate_condition(c, coin, mids))
         if any(r is None for r in results) or not all(results):
             continue  # au moins une condition pas encore remplie (ou donnée pas dispo) -> on attend
 
@@ -5152,6 +5187,70 @@ def check_and_execute_pending_orders(mids: dict, conn):
             conn.commit()
             add_bot_log(order["user_id"], f"⏳⛔ Ordre programmé #{order['id']} annulé (échec: {e})", "error")
 
+def get_coins_needing_fresh_macd(conn) -> set:
+    """Identifie les coins qui ont besoin d'un RSI/MACD FRAIS (pas le cache du cycle de scan,
+    périmé jusqu'à 3 min) : positions Accumulation ouvertes (le retournement confirmé s'appuie
+    dessus) et ordres programmés avec une condition MACD/RSI en attente. Limité à ces coins
+    précisément pour ne pas multiplier les appels API sur l'ensemble du marché à haute fréquence."""
+    coins = set()
+    accum_rows = conn.execute("SELECT DISTINCT coin FROM paper_trades WHERE status='OPEN' AND is_accumulation=1").fetchall()
+    coins.update(r["coin"] for r in accum_rows)
+    pending_rows = conn.execute("SELECT coin, conditions FROM pending_orders WHERE status='PENDING'").fetchall()
+    for r in pending_rows:
+        try:
+            conds = json.loads(r["conditions"]) if r["conditions"] else []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if any(c.get("type") in ("MACD_BULLISH", "MACD_BEARISH", "RSI_ABOVE", "RSI_BELOW") for c in conds):
+            coins.add(r["coin"])
+    return coins
+
+async def refresh_fresh_macd_rsi():
+    """Rafraîchit RSI/MACD en direct (pas le cache périmé du cycle de scan ~3min) pour les
+    coins identifiés comme actifs — corrige un vrai bug observé : des ordres programmés et des
+    sorties Accumulation se déclenchaient sur un MACD vieux de plusieurs minutes, alors que le
+    marché avait déjà tourné entre-temps. Mise à jour du même market_data_cache utilisé
+    partout ailleurs (Accumulation, conditions programmées), donc aucun autre changement de
+    code nécessaire pour que les deux en bénéficient."""
+    try:
+        conn = get_db()
+        coins = get_coins_needing_fresh_macd(conn)
+        conn.close()
+        if not coins:
+            return
+        async with httpx.AsyncClient() as client:
+            for coin in coins:
+                try:
+                    candles_raw = await fetch_candles(client, coin)
+                    if not candles_raw or len(candles_raw) < 30:
+                        continue
+                    closes = [float(c["c"]) for c in candles_raw]
+                    rsi = calc_rsi(closes, 14)
+                    macd = calc_macd(closes, 12, 26, 9)
+                    existing = market_data_cache.get(coin, {})
+                    existing["rsi"] = round(rsi, 2) if rsi else existing.get("rsi")
+                    if macd:
+                        existing["macd_value"] = round(macd["macd"], 6)
+                        existing["macd_signal_value"] = round(macd["signal"], 6)
+                        existing["macd_bull"] = macd["macd"] > macd["signal"]
+                        existing["macd_bear"] = macd["macd"] < macd["signal"]
+                    market_data_cache[coin] = existing
+                except Exception as e:
+                    print(f"⚠️ refresh_fresh_macd_rsi error pour {coin}: {e}")
+    except Exception as e:
+        print(f"⚠️ refresh_fresh_macd_rsi error: {e}")
+
+async def fresh_macd_rsi_loop():
+    """Boucle dédiée, indépendante de is_running — tourne toutes les 45s (bien plus fréquent
+    que le cycle de scan ~3min, mais sans marteler l'API sur tout le marché puisque limité aux
+    coins réellement actifs)."""
+    while True:
+        try:
+            await refresh_fresh_macd_rsi()
+        except Exception as e:
+            print(f"⚠️ fresh_macd_rsi_loop error: {e}")
+        await asyncio.sleep(45)
+
 async def pending_orders_loop():
     """Boucle dédiée aux ordres programmés — totalement INDÉPENDANTE de l'état du bot
     (is_running). Tourne en permanence dès le démarrage du serveur, même si l'auto-trading
@@ -5161,7 +5260,7 @@ async def pending_orders_loop():
         try:
             conn = get_db()
             if ws_connected and ws_prices:
-                check_and_execute_pending_orders(ws_prices, conn)
+                await check_and_execute_pending_orders(ws_prices, conn)
             conn.close()
             update_tracking_pending_orders()
         except Exception as e:
