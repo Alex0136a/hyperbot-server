@@ -1708,23 +1708,11 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             accum_peak_pct = pnl_pct_live
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
 
-        cfg_accum_qp = conn.execute(
-            "SELECT accumulation_qp_arm_pct, accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?",
-            (user_id,)).fetchone()
-        qp_arm_pct = cfg_accum_qp["accumulation_qp_arm_pct"] if cfg_accum_qp and "accumulation_qp_arm_pct" in cfg_accum_qp.keys() and cfg_accum_qp["accumulation_qp_arm_pct"] else 3.0
-        armed = accum_peak_pct >= qp_arm_pct
-
         if accum_close_reason:
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
         else:
-            # Retournement RSI/MACD confirmé : protège TOUT gain positif, pas seulement une
-            # fois armé (3%+). BUG CORRIGÉ : exiger seulement RSI OU MACD (l'un suffisait)
-            # déclenchait une sortie dès que RSI repassait à peine le seuil de 50 — un point
-            # milieu ABSOLU qui ne tient pas compte du RSI d'entrée. Un SHORT ouvert à RSI 65
-            # (surachat) qui redescend à 55 (encore élevé, pas un vrai retournement) déclenchait
-            # déjà une sortie, expliquant des séries de clôtures en quelques minutes avec un pic
-            # quasi nul. Exige maintenant RSI ET MACD ensemble — un signal isolé et bruyant ne
-            # suffit plus, il faut une vraie confirmation des deux indicateurs à la fois.
+            # Retournement RSI/MACD confirmé : exige les DEUX indicateurs d'accord ensemble
+            # (pas l'un ou l'autre) — un signal isolé et bruyant ne suffit plus.
             md = market_data_cache.get(trade["coin"], {})
             if is_short_accum:
                 macd_confirms = bool(md.get("macd_bull"))
@@ -1735,60 +1723,50 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 rsi_confirms = md.get("rsi") is not None and md["rsi"] < 50
                 reversal_confirmed = macd_confirms and rsi_confirms
 
-            # Seuil de pic minimum avant de considérer le retournement comme significatif — un
-            # retournement sur un pic quasi nul (0.005-0.08%) n'est que du bruit de marché
-            # choppy, pas un vrai changement de tendance. Observé concrètement sur JUP : 5
-            # allers-retours en 15 min, chaque clôture "techniquement" confirmée (RSI+MACD
-            # d'accord) mais sur un mouvement de prix trop faible pour représenter une vraie
-            # tendance amorcée. En dessous de ce seuil, on continue de tenir même si RSI/MACD
-            # basculent — le mouvement n'a pas encore eu la place de se développer.
-            pic_significatif = accum_peak_pct >= 0.3
-
-            if pnl_pct_live > 0 and reversal_confirmed and pic_significatif:
-                accum_close_reason = "ACCUMULATION_TREND_END"
-                sens_retournement = "haussier" if is_short_accum else "baissier"
-                accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%) avant que le gain ne s'échappe"
-            elif armed:
-                # Pas de retournement détecté, mais déjà armé (pic ≥ 3%) : filet de sécurité
-                # supplémentaire si le gain recule trop vite sans confirmation d'indicateur —
-                # pas de sortie sur simple contact du niveau opposé, continuer au-delà, c'est
-                # seulement plus de profit potentiel tant qu'aucun retournement n'est confirmé.
-                cfg_accum_trail = conn.execute(
-                    "SELECT accumulation_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                trailing_gap_pct = cfg_accum_trail["accumulation_trailing_gap_pct"] if cfg_accum_trail and "accumulation_trailing_gap_pct" in cfg_accum_trail.keys() and cfg_accum_trail["accumulation_trailing_gap_pct"] else 0.5
-                if pnl_pct_live <= (accum_peak_pct - trailing_gap_pct):
-                    accum_close_reason = "ACCUMULATION_TRAILING_SAFETY"
-                    accum_log_msg = f"🛡️ {trade['coin']}: Trailing de sécurité déclenché (pic {round(accum_peak_pct,2)}% → {round(pnl_pct_live,2)}%, recul de {trailing_gap_pct}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC"
-                # sinon : rien à faire, on continue de tenir (pas de close_reason, la position court)
-            elif pnl_pct_live >= target_pct:
-                # Pas encore armé (jamais atteint qp_arm_pct) mais objectif de base atteint
-                accum_close_reason = "ACCUMULATION_TARGET"
-                accum_log_msg = f"💰 {trade['coin']}: Objectif Accumulation atteint +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}% ≥ {target_pct}%) — {'rachat' if is_short_accum else 'revente'}"
-            elif is_short_accum and trade.get("accumulation_resistance_price"):
-                # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
-                # avec une marge de confirmation) -> on rachète même à perte plutôt que
-                # d'attendre indéfiniment une résistance qui a cédé
-                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                resistance_ref = float(trade["accumulation_resistance_price"])
-                breakout_level = resistance_ref * (1 + buffer_pct / 100)
-                if cur > breakout_level:
-                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                    accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
-            elif not is_short_accum and trade.get("accumulation_support_price"):
-                # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
-                # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
-                # support qui a cédé
-                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                support_ref = float(trade["accumulation_support_price"])
-                breakdown_level = support_ref * (1 - buffer_pct / 100)
-                if cur < breakdown_level:
-                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                    accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+            if accum_peak_pct >= target_pct and pnl_pct_live < target_pct:
+                # Plancher ABSOLU : une fois l'objectif de base (2%) touché, on ne redonne
+                # plus jamais en dessous — peu importe RSI/MACD. "À partir de 2%, on ne cède
+                # plus rien." Le trade peut continuer à courir AU-DELÀ de 2% (voir ci-dessous),
+                # ce plancher protège juste le minimum garanti une fois atteint.
+                accum_close_reason = "ACCUMULATION_FLOOR"
+                accum_log_msg = f"🔒 {trade['coin']}: Plancher {target_pct}% touché puis entamé (pic {round(accum_peak_pct,2)}% → {round(pnl_pct_live,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC, rien cédé au-delà de l'objectif"
+            else:
+                # Tolérance DYNAMIQUE avant/au-delà du plancher : minimum absolu 0.3% (évite le
+                # bruit sur un tout petit pic — cas JUP/XRP/AAVE observés), OU 30% du pic déjà
+                # atteint si plus grand — donne plus de marge à mesure qu'une vraie tendance se
+                # développe, sans se faire éjecter par un simple soubresaut RSI/MACD pendant un
+                # mouvement continu. S'applique aussi bien avant qu'après le plancher de 2%.
+                tolerance_donnee = max(0.3, accum_peak_pct * 0.3)
+                a_assez_recule = pnl_pct_live <= (accum_peak_pct - tolerance_donnee)
+                if pnl_pct_live > 0 and reversal_confirmed and a_assez_recule:
+                    accum_close_reason = "ACCUMULATION_TREND_END"
+                    sens_retournement = "haussier" if is_short_accum else "baissier"
+                    accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%, tolérance {round(tolerance_donnee,2)}%)"
+                elif is_short_accum and trade.get("accumulation_resistance_price"):
+                    # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
+                    # avec une marge de confirmation) -> on rachète même à perte plutôt que
+                    # d'attendre indéfiniment une résistance qui a cédé
+                    cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                    buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+                    resistance_ref = float(trade["accumulation_resistance_price"])
+                    breakout_level = resistance_ref * (1 + buffer_pct / 100)
+                    if cur > breakout_level:
+                        accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                        accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+                elif not is_short_accum and trade.get("accumulation_support_price"):
+                    # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
+                    # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
+                    # support qui a cédé
+                    cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                    buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+                    support_ref = float(trade["accumulation_support_price"])
+                    breakdown_level = support_ref * (1 - buffer_pct / 100)
+                    if cur < breakdown_level:
+                        accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                        accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TARGET" else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("ACCUMULATION_FLOOR", "ACCUMULATION_TREND_END") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
