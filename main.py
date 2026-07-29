@@ -1274,7 +1274,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss (en %).
     # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré (en % de prix).
     safety_move_pct = max(max_loss_pct, 0.1) * 3 / 100
-    sl_price = round(fill_price * (1 - safety_move_pct), 6) if is_buy else round(fill_price * (1 + safety_move_pct), 6)
+    sl_price = round_hl_price(fill_price * (1 - safety_move_pct), coin) if is_buy else round_hl_price(fill_price * (1 + safety_move_pct), coin)
 
     sl_oid = None
     sl_echec_raison = None
@@ -2806,7 +2806,12 @@ async def scan_markets(user_id: int):
                     niveau_label = "résistance" if is_short_cand else "support"
                     add_bot_log(user_id, f"🤖💰 Accumulation auto {cand_action} ({priority_tag}): {message} (RSI {rsi_c:.1f}, {niveau_label} ${level_c:.4g}, retournement confirmé)", "success")
                 except ValueError as e:
-                    pass  # solde insuffisant ou autre — pas de log d'erreur pour ne pas polluer, juste on retente au prochain cycle
+                    # BUG CORRIGÉ : les échecs étaient avalés en silence (aucun log), y compris
+                    # un échec d'ouverture LIVE (marge insuffisante, rejet Hyperliquid, etc.) —
+                    # impossible de savoir après coup pourquoi un trade attendu en live n'avait
+                    # jamais atteint l'exchange. Journalisé désormais, sans pour autant spammer
+                    # à chaque cycle (le message inclut la raison exacte).
+                    add_bot_log(user_id, f"⛔ {coin}: Accumulation auto {cand_action} — tentative échouée ({e}) — nouvelle tentative au prochain cycle", "warning")
 
         # === Filtre anti-corrélation entre candidats de CE cycle (avant toute ouverture) ===
         # Ne garde que la meilleure moitié (par confiance) de chaque cluster de coins
@@ -3320,6 +3325,23 @@ def get_hl_size_decimals(coin: str) -> int:
             print(f"HL asset meta fetch error: {e}")
             # Échec du rafraîchissement — garde l'ancien cache s'il existe, sinon défaut à 4
     return hl_asset_meta_cache["data"].get(coin, 4)
+
+def round_hl_price(price: float, coin: str) -> float:
+    """Arrondit un prix pour respecter les règles de précision Hyperliquid : maximum 5 chiffres
+    SIGNIFICATIFS, ET maximum (6 - szDecimals) décimales pour les perpétuels. Sans ce double
+    arrondi, un prix calculé "à la main" (ex: SL de sécurité) peut avoir bien plus de précision
+    que ce qu'Hyperliquid accepte, causant un rejet "Order has invalid price" — observé
+    concrètement sur un SL AAVE (103.57024, 8 chiffres significatifs, largement au-delà de 5)."""
+    if price <= 0:
+        return price
+    sz_decimals = get_hl_size_decimals(coin)
+    max_decimals = max(0, 6 - sz_decimals)
+    # 5 chiffres significatifs : arrondir en fonction de l'ordre de grandeur du prix
+    import math
+    magnitude = math.floor(math.log10(abs(price))) if price != 0 else 0
+    sig_fig_decimals = max(0, 4 - magnitude)  # 5 chiffres significatifs = 4 après le 1er chiffre
+    final_decimals = min(max_decimals, sig_fig_decimals)
+    return round(price, final_decimals)
 
 accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
 ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
