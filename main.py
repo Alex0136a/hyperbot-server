@@ -286,6 +286,25 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Tolérance dynamique de sortie Accumulation : minimum absolu (%) avant de considérer
+        # un retournement comme significatif, quel que soit le pic — évite le bruit sur un
+        # tout petit pic.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_min_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        # Ratio proportionnel (0-1) appliqué au pic pour la tolérance dynamique — plus le pic
+        # est développé, plus la marge avant de considérer un retournement est grande.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_ratio REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        # Largeur minimale du canal support/résistance (%) exigée avant d'autoriser un achat/
+        # vente Accumulation — garantit structurellement une marge de mouvement possible.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_min_channel_pct REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
         # Fenêtre de cooldown (minutes) après une perte sur un coin — pendant cette fenêtre,
         # une confirmation de mouvement (bougie dans le bon sens) est exigée en plus de la
         # confiance normale, plutôt que d'appliquer cette exigence à tous les coins.
@@ -1736,7 +1755,12 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 # atteint si plus grand — donne plus de marge à mesure qu'une vraie tendance se
                 # développe, sans se faire éjecter par un simple soubresaut RSI/MACD pendant un
                 # mouvement continu. S'applique aussi bien avant qu'après le plancher de 2%.
-                tolerance_donnee = max(0.3, accum_peak_pct * 0.3)
+                cfg_accum_tol = conn.execute(
+                    "SELECT accumulation_exit_tolerance_min_pct, accumulation_exit_tolerance_ratio FROM bot_config WHERE user_id=?",
+                    (user_id,)).fetchone()
+                tol_min = cfg_accum_tol["accumulation_exit_tolerance_min_pct"] if cfg_accum_tol and "accumulation_exit_tolerance_min_pct" in cfg_accum_tol.keys() and cfg_accum_tol["accumulation_exit_tolerance_min_pct"] is not None else 0.3
+                tol_ratio = cfg_accum_tol["accumulation_exit_tolerance_ratio"] if cfg_accum_tol and "accumulation_exit_tolerance_ratio" in cfg_accum_tol.keys() and cfg_accum_tol["accumulation_exit_tolerance_ratio"] is not None else 0.3
+                tolerance_donnee = max(tol_min, accum_peak_pct * tol_ratio)
                 a_assez_recule = pnl_pct_live <= (accum_peak_pct - tolerance_donnee)
                 if pnl_pct_live > 0 and reversal_confirmed and a_assez_recule:
                     accum_close_reason = "ACCUMULATION_TREND_END"
@@ -2445,10 +2469,21 @@ async def scan_markets(user_id: int):
                     last_diag = accumulation_diagnostic_cache.get(diag_key)
                     should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
+                    channel_pct = (resistance - support) / support * 100 if support and resistance else 0
+                    min_channel_pct = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0
                     if support is None:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
+                    elif resistance is not None and channel_pct < min_channel_pct:
+                        # Canal trop étroit (< 2%) entre support et résistance — structurellement
+                        # trop peu de marge de mouvement possible, même si tout le reste
+                        # (retournement confirmé) s'aligne. Observé concrètement : plusieurs
+                        # trades Accumulation avec un pic de seulement 0.3-0.6%, faute de place
+                        # entre les deux niveaux dès le départ.
+                        if should_log_diag:
+                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support proche, mais canal trop étroit ({channel_pct:.1f}% < {min_channel_pct}%) — pas assez de marge de mouvement, pas d'achat", "info")
                     else:
                         near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
                         if not near_support:
@@ -2485,10 +2520,18 @@ async def scan_markets(user_id: int):
                     last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
                     should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
+                    channel_pct_short = (resistance - support) / support * 100 if support and resistance else 0
+                    min_channel_pct_short = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0
                     if resistance is None:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT Accumulation, mais aucune résistance détectée à proximité — pas de vente", "info")
+                    elif support is not None and channel_pct_short < min_channel_pct_short:
+                        # Miroir LONG : canal trop étroit (< 2%) entre support et résistance —
+                        # pas assez de marge de mouvement structurelle.
+                        if should_log_diag_short:
+                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance proche, mais canal trop étroit ({channel_pct_short:.1f}% < {min_channel_pct_short}%) — pas assez de marge de mouvement, pas de vente", "info")
                     else:
                         near_resistance = abs(price - resistance) / resistance * 100 <= 1.0  # tolérance 1%
                         if not near_resistance:
@@ -4049,6 +4092,9 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_leverage: Optional[int] = None
     accumulation_short_rsi_min: Optional[float] = None
     accumulation_short_rsi_max: Optional[float] = None
+    accumulation_exit_tolerance_min_pct: Optional[float] = None
+    accumulation_exit_tolerance_ratio: Optional[float] = None
+    accumulation_min_channel_pct: Optional[float] = None
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_rsi_min: Optional[float] = None
     accumulation_rsi_max: Optional[float] = None
@@ -4220,6 +4266,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
         "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
+        "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.3,
+        "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
+        "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
@@ -4352,6 +4401,12 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_min=? WHERE user_id=?", (req.accumulation_short_rsi_min, user_id))
     if req.accumulation_short_rsi_max is not None:
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_max=? WHERE user_id=?", (req.accumulation_short_rsi_max, user_id))
+    if req.accumulation_exit_tolerance_min_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_min_pct=? WHERE user_id=?", (req.accumulation_exit_tolerance_min_pct, user_id))
+    if req.accumulation_exit_tolerance_ratio is not None:
+        conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_ratio=? WHERE user_id=?", (req.accumulation_exit_tolerance_ratio, user_id))
+    if req.accumulation_min_channel_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_min_channel_pct=? WHERE user_id=?", (req.accumulation_min_channel_pct, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
     if req.accumulation_rsi_min is not None:
