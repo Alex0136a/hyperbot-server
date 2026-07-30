@@ -410,6 +410,7 @@ function App() {
   const [invalidationPrice, setInvalidationPrice] = useState("");
   const [accumulationTargetPct, setAccumulationTargetPct] = useState("");
   const [conditionsList, setConditionsList] = useState([]);
+  const [tpInputs, setTpInputs] = useState({});
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
   const [pendingOrders, setPendingOrders] = useState({pending:[], history:[]});
@@ -1524,6 +1525,29 @@ Confirmer ?`
                       <span style={{color:"#34d399"}}>TP1: ${trade.take_profit1?.toFixed(4)}</span>
                       <span style={{color:"#34d399"}}>TP2: ${trade.take_profit2?.toFixed(4)}</span>
                     </div>
+                    <div style={{display:"flex",gap:6,marginTop:6,alignItems:"center"}}>
+                      <span style={{fontSize:9,color:"#475569"}}>🎯 TP manuel:</span>
+                      {trade.custom_take_profit_price ? (
+                        <>
+                          <span style={{fontSize:10,color:"#a78bfa",fontWeight:700}}>${trade.custom_take_profit_price}</span>
+                          <button onClick={async()=>{
+                            try{ await apiCall("/api/paper/set-take-profit","POST",{trade_id:trade.id,take_profit_price:null},token); loadData(); }
+                            catch(e){ addLog("Erreur: "+e.message,"error"); }
+                          }} style={{background:"none",border:"1px solid #334155",borderRadius:4,padding:"1px 6px",color:"#64748b",fontSize:9,cursor:"pointer"}}>Retirer</button>
+                        </>
+                      ) : (
+                        <>
+                          <input type="number" placeholder="Prix" value={tpInputs[trade.id]||""} onChange={e=>setTpInputs({...tpInputs,[trade.id]:e.target.value})}
+                            style={{width:70,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"2px 6px",color:"#e2e8f0",fontSize:10}} />
+                          <button onClick={async()=>{
+                            const val = Number(tpInputs[trade.id]);
+                            if(!val) return;
+                            try{ await apiCall("/api/paper/set-take-profit","POST",{trade_id:trade.id,take_profit_price:val},token); setTpInputs({...tpInputs,[trade.id]:""}); loadData(); }
+                            catch(e){ addLog("Erreur: "+e.message,"error"); }
+                          }} style={{background:"#3d2e6622",border:"1px solid #7c3aed",borderRadius:4,padding:"2px 8px",color:"#a78bfa",fontSize:9,fontWeight:700,cursor:"pointer"}}>Définir</button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ))
               }
@@ -1926,7 +1950,7 @@ Confirmer ?`
                     <button onClick={()=>{
                       const needsValue = newCondType.startsWith("PRICE")||newCondType.startsWith("RSI");
                       if(needsValue && !newCondValue) return;
-                      setConditionsList([...conditionsList, {type:newCondType, value:needsValue?Number(newCondValue):null}]);
+                      setConditionsList(prev => [...prev, {type:newCondType, value:needsValue?Number(newCondValue):null}]);
                       setNewCondValue("");
                     }} style={{background:"#7c3aed",border:"none",borderRadius:4,padding:"6px 12px",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>+ Ajouter</button>
                   </div>
