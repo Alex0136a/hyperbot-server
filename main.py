@@ -621,6 +621,12 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Take Profit manuel programmable EN COURS DE TRADE (pas seulement à l'ouverture) —
+        # fonctionne pour tous les modes (bot principal, manuel, Accumulation LONG/SHORT).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_take_profit_price REAL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN session_date TEXT")
         conn.commit()
     except: pass
@@ -1710,13 +1716,23 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         accum_close_reason = None
         accum_log_msg = None
 
+        # TP manuel (prix) — peut être défini/modifié à tout moment en cours de trade,
+        # prioritaire sur tout le reste (même le plafond de perte, puisque c'est un choix
+        # explicite de l'utilisateur qui prime).
+        custom_tp_price = trade.get("custom_take_profit_price")
+        if custom_tp_price is not None:
+            tp_hit = (cur >= custom_tp_price) if not is_short_accum else (cur <= custom_tp_price)
+            if tp_hit:
+                accum_close_reason = "TAKE_PROFIT_MANUEL"
+                accum_log_msg = f"🎯 {trade['coin']}: Take Profit manuel touché à ${cur} (seuil: ${custom_tp_price}) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+
         # Plafond de perte ABSOLU depuis le prix d'achat/vente — vérifié en priorité, avant
         # tout le reste. Protège même si la rupture de niveau (mesurée depuis le support/la
         # résistance, pas l'entrée) n'a pas encore techniquement déclenché.
         cfg_accum_maxloss = conn.execute(
             "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.7
-        if pnl_pct_live <= -accum_max_loss_pct:
+        if not accum_close_reason and pnl_pct_live <= -accum_max_loss_pct:
             accum_close_reason = "ACCUMULATION_MAX_LOSS"
             accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
 
@@ -1895,6 +1911,14 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         if sl_hit:
             close_reason = "STOP_LOSS"
             add_bot_log(user_id, f"🛑 {trade['coin']}: Stop Loss manuel touché à ${cur} (seuil: ${custom_sl_price}) — {round(pnl,2)} USDC", "warning")
+    # TP manuel (prix) — peut être défini/modifié à tout moment EN COURS de trade (pas
+    # seulement à l'ouverture), pour n'importe quel mode. Prioritaire, comme le SL manuel.
+    custom_tp_price = trade.get("custom_take_profit_price")
+    if not close_reason and custom_tp_price is not None:
+        tp_hit = (cur >= custom_tp_price) if direction == 1 else (cur <= custom_tp_price)
+        if tp_hit:
+            close_reason = "TAKE_PROFIT_MANUEL"
+            add_bot_log(user_id, f"🎯 {trade['coin']}: Take Profit manuel touché à ${cur} (seuil: ${custom_tp_price}) — {round(pnl,2)} USDC", "success")
     # Max Loss vérifié ensuite : sans ça, une fois le plancher armé, une chute brutale
     # (saut de prix entre deux vérifications) pouvait être mal étiquetée QP_FLOOR au lieu
     # de MAX_LOSS, car "prix <= seuil" est trivialement vrai pour toute valeur très négative.
@@ -5457,6 +5481,37 @@ def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_
     conn.commit()
     conn.close()
     return {"message": f"Trade {sig['action']} {sig['coin']} ouvert pour {req.size_usdc} USDC"}
+
+class SetTakeProfitRequest(BaseModel):
+    trade_id: int
+    take_profit_price: Optional[float] = None  # None = retire le TP manuel
+
+@app.post("/api/paper/set-take-profit")
+def set_take_profit(req: SetTakeProfitRequest, user_id: int = Depends(get_current_user)):
+    """Définit ou modifie un Take Profit manuel (prix) sur un trade DÉJÀ OUVERT — fonctionne
+    pour tous les modes (bot principal, manuel, Accumulation LONG/SHORT) puisque tous passent
+    par le même champ custom_take_profit_price, vérifié en priorité dans manage_open_trade."""
+    conn = get_db()
+    trade = conn.execute("SELECT * FROM paper_trades WHERE id=? AND user_id=? AND status='OPEN'", (req.trade_id, user_id)).fetchone()
+    if not trade:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Trade introuvable ou déjà fermé")
+    trade = dict(trade)
+    if req.take_profit_price is not None:
+        # Cohérence directionnelle : le TP doit être au-dessus du prix actuel pour un LONG,
+        # en dessous pour un SHORT — sinon il se déclencherait immédiatement, probablement
+        # pas l'intention de l'utilisateur.
+        is_short = trade["action"] == "SHORT"
+        cur_price = trade["current_price"]
+        if (not is_short and req.take_profit_price <= cur_price) or (is_short and req.take_profit_price >= cur_price):
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Le TP doit être {'inférieur' if is_short else 'supérieur'} au prix actuel (${cur_price}) pour ce trade {'SHORT' if is_short else 'LONG'}")
+    conn.execute("UPDATE paper_trades SET custom_take_profit_price=? WHERE id=?", (req.take_profit_price, req.trade_id))
+    conn.commit()
+    conn.close()
+    msg = f"Take Profit manuel retiré pour {trade['coin']}" if req.take_profit_price is None else f"Take Profit manuel défini à ${req.take_profit_price} pour {trade['coin']}"
+    add_bot_log(user_id, f"🎯 {msg}", "info")
+    return {"message": msg}
 
 @app.post("/api/paper/close")
 def close_paper_trade(req: PaperCloseRequest, user_id: int = Depends(get_current_user)):
