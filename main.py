@@ -334,6 +334,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Multiplicateur du SL de sécurité posé sur Hyperliquid (filet en cas de panne du bot)
+        # — élargi par défaut (x5 au lieu de x3) pour que la logique interne du bot (trailing,
+        # tolérance dynamique) ait toujours la priorité en conditions normales.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN hl_safety_sl_multiplier REAL DEFAULT 5.0")
+        conn.commit()
+    except: pass
+    try:
         # % du capital total réellement déployable pour le trading automatique (bot principal
         # ET Accumulation) — le reste (100% - ce %) reste en réserve, jamais engagé. Permet de
         # commencer prudemment (ex: 50%) avant de passer à 100% une fois en confiance.
@@ -624,6 +631,13 @@ def init_db():
         # Take Profit manuel programmable EN COURS DE TRADE (pas seulement à l'ouverture) —
         # fonctionne pour tous les modes (bot principal, manuel, Accumulation LONG/SHORT).
         conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_take_profit_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        # Armement du TP manuel — une fois le % programmé atteint pour la première fois,
+        # mémorisé comme plancher : le trade continue de courir au-delà, ne se ferme qu'au
+        # retour EN DESSOUS de ce niveau. Remis à zéro à chaque changement manuel du seuil.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_tp_armed INTEGER DEFAULT 0")
         conn.commit()
     except: pass
     try:
@@ -1223,8 +1237,28 @@ def get_hl_account_value_verbose(account_address: str):
     except Exception as e:
         return 0.0, str(e)
 
+def get_hl_open_coins(account_address: str) -> Optional[set]:
+    """Retourne l'ensemble des coins pour lesquels une position est RÉELLEMENT ouverte sur
+    Hyperliquid (taille non nulle), ou None si la lecture échoue (à ne jamais confondre avec
+    un ensemble vide, qui signifierait "aucune position ouverte" à raison)."""
+    if not HL_SDK_AVAILABLE or not account_address:
+        return None
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        state = info.user_state(account_address)
+        open_coins = set()
+        for p in state.get("assetPositions", []):
+            pos = p.get("position", {})
+            szi = float(pos.get("szi", 0) or 0)
+            if szi != 0:
+                open_coins.add(pos.get("coin"))
+        return open_coins
+    except Exception as e:
+        print(f"HL open positions fetch error: {e}")
+        return None
+
 def hl_open_position(account_address: str, coin: str, action: str, size_usdc: float,
-                      leverage: int, cur_price: float, max_loss_pct: float):
+                      leverage: int, cur_price: float, max_loss_pct: float, safety_sl_multiplier: float = 5.0):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
     (trigger order, reduce_only) sur l'exchange — filet en cas de défaillance du bot.
     Retourne (coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison) ou lève une exception.
@@ -1296,9 +1330,14 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     except Exception:
         pass
 
-    # SL de sécurité large — le bot ferme normalement bien avant via Trailing Profit/Max Loss (en %).
-    # Ce stop n'est qu'un filet en cas de panne/déconnexion du bot. Marge = 3x le Max Loss configuré (en % de prix).
-    safety_move_pct = max(max_loss_pct, 0.1) * 3 / 100
+    # SL de sécurité large — élargi PAR RAPPORT à ce que la logique interne du bot tolère
+    # (trailing progressif, tolérance dynamique Accumulation), pour que ce soit TOUJOURS le
+    # bot qui décide en premier en conditions normales. Ce stop n'est qu'un filet en dernier
+    # recours si le bot est indisponible (crash, déconnexion) — pas censé jamais interférer
+    # quand le bot tourne normalement. Multiplicateur configurable (défaut x5, contre x3 avant),
+    # suite à des trades gagnants fermés prématurément par ce SL statique sur un creux temporaire
+    # que la logique interne aurait normalement laissé passer.
+    safety_move_pct = max(max_loss_pct, 0.1) * safety_sl_multiplier / 100
     sl_price = round_hl_price(fill_price * (1 - safety_move_pct), coin) if is_buy else round_hl_price(fill_price * (1 + safety_move_pct), coin)
 
     sl_oid = None
@@ -1720,9 +1759,14 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         # prioritaire sur tout le reste (même le plafond de perte, puisque c'est un choix
         # explicite de l'utilisateur qui prime). Comparé au PnL% déjà signé (pnl_pct_live).
         custom_tp_pct = trade.get("custom_take_profit_pct")
-        if custom_tp_pct is not None and pnl_pct_live >= custom_tp_pct:
-            accum_close_reason = "TAKE_PROFIT_MANUEL"
-            accum_log_msg = f"🎯 {trade['coin']}: Take Profit manuel touché à {round(pnl_pct_live,2)}% (seuil: {custom_tp_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+        if custom_tp_pct is not None:
+            tp_armed = bool(trade.get("custom_tp_armed"))
+            if not tp_armed and pnl_pct_live >= custom_tp_pct:
+                conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
+                add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
+            elif tp_armed and pnl_pct_live < custom_tp_pct:
+                accum_close_reason = "TAKE_PROFIT_MANUEL"
+                accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
         # Plafond de perte ABSOLU depuis le prix d'achat/vente — vérifié en priorité, avant
         # tout le reste. Protège même si la rupture de niveau (mesurée depuis le support/la
@@ -1916,9 +1960,13 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     custom_tp_pct = trade.get("custom_take_profit_pct")
     if not close_reason and custom_tp_pct is not None:
         pnl_pct_for_tp = pnl / trade["size_usdc"] * 100
-        if pnl_pct_for_tp >= custom_tp_pct:
+        tp_armed = bool(trade.get("custom_tp_armed"))
+        if not tp_armed and pnl_pct_for_tp >= custom_tp_pct:
+            conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
+            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_for_tp,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
+        elif tp_armed and pnl_pct_for_tp < custom_tp_pct:
             close_reason = "TAKE_PROFIT_MANUEL"
-            add_bot_log(user_id, f"🎯 {trade['coin']}: Take Profit manuel touché à {round(pnl_pct_for_tp,2)}% (seuil: {custom_tp_pct}%) — {round(pnl,2)} USDC", "success")
+            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_for_tp,2)}% — {round(pnl,2)} USDC", "success")
     # Max Loss vérifié ensuite : sans ça, une fois le plancher armé, une chute brutale
     # (saut de prix entre deux vérifications) pouvait être mal étiquetée QP_FLOOR au lieu
     # de MAX_LOSS, car "prix <= seuil" est trivialement vrai pour toute valeur très négative.
@@ -2978,10 +3026,11 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"🔗 {coin}: {ai['action']} bloqué — corrélé à {correlated_coin} déjà ouvert (≥{CORRELATION_THRESHOLD}, même pari)", "warning")
                     else:
                         try:
-                            cfg_ml = conn.execute("SELECT max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                            cfg_ml = conn.execute("SELECT max_loss_pct, hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 0.31
+                            safety_mult = cfg_ml["hl_safety_sl_multiplier"] if cfg_ml and "hl_safety_sl_multiplier" in cfg_ml.keys() and cfg_ml["hl_safety_sl_multiplier"] else 5.0
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val)
+                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val, safety_mult)
                             if repli_raison:
                                 add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
                             if sl_echec_raison:
@@ -4052,6 +4101,7 @@ async def lifespan(app: FastAPI):
     print("🔌 WebSocket Hyperliquid démarré automatiquement")
     # Boucle des ordres programmés — indépendante de is_running, tourne toujours
     asyncio.create_task(pending_orders_loop())
+    asyncio.create_task(reconcile_live_positions_loop())
     print("⏳ Boucle des ordres programmés démarrée (indépendante de l'état du bot)")
     # Boucle de rafraîchissement RSI/MACD frais (toutes les 45s) pour l'Accumulation et les
     # conditions programmées — corrige la dépendance au cache du cycle de scan (~3min périmé)
@@ -4091,6 +4141,7 @@ class UpdateConfigRequest(BaseModel):
     trading_mode: Optional[str] = None
     manual_accum_trading_mode: Optional[str] = None
     accumulation_short_trading_mode: Optional[str] = None
+    hl_safety_sl_multiplier: Optional[float] = None
     ai_mode_paper: Optional[str] = None
     resume_now: Optional[bool] = None
     pause_now: Optional[bool] = None
@@ -4264,6 +4315,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trading_mode": config["trading_mode"] or "paper",
         "manual_accum_trading_mode": config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() and config["manual_accum_trading_mode"] else "paper",
         "accumulation_short_trading_mode": config["accumulation_short_trading_mode"] if "accumulation_short_trading_mode" in config.keys() and config["accumulation_short_trading_mode"] else "paper",
+        "hl_safety_sl_multiplier": config["hl_safety_sl_multiplier"] if "hl_safety_sl_multiplier" in config.keys() and config["hl_safety_sl_multiplier"] else 5.0,
         "ai_mode_paper": config["ai_mode_paper"] if "ai_mode_paper" in config.keys() and config["ai_mode_paper"] else "ai",
         "pause_until": config["pause_until"] if "pause_until" in config.keys() else None,
         "loss_streak_size": config["loss_streak_size"] if "loss_streak_size" in config.keys() and config["loss_streak_size"] else 3,
@@ -4365,6 +4417,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_trading_mode=? WHERE user_id=?",
                     (req.accumulation_short_trading_mode, user_id))
         print(f"Mode change (Accumulation SHORT): {old_mode3['accumulation_short_trading_mode'] if old_mode3 else 'unknown'} -> {req.accumulation_short_trading_mode} pour user {user_id}")
+    if req.hl_safety_sl_multiplier is not None:
+        conn.execute("UPDATE bot_config SET hl_safety_sl_multiplier=? WHERE user_id=?", (req.hl_safety_sl_multiplier, user_id))
     if req.ai_mode_paper is not None:
         conn.execute("UPDATE bot_config SET ai_mode_paper=? WHERE user_id=?",
                     (req.ai_mode_paper, user_id))
@@ -4990,11 +5044,12 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         # logique que le bot principal — un filet plus large (x3) en cas de panne du bot,
         # pas un désengagement total qui laisserait une position live sans aucune protection
         # côté exchange si le serveur devient injoignable.
-        accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct, hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.7
+        safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
-            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl)
+            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
         except Exception as e:
             conn.close()
             raise ValueError(f"Échec ouverture live: {e}")
@@ -5291,6 +5346,58 @@ async def pending_orders_loop():
             print(f"⚠️ pending_orders_loop error: {e}")
         await asyncio.sleep(10)
 
+def reconcile_live_positions():
+    """Vérifie que chaque trade marqué OPEN + is_live=1 dans notre base correspond bien à une
+    position RÉELLEMENT encore ouverte sur Hyperliquid. Sans cette vérification, un trade fermé
+    côté exchange par un mécanisme qu'on ne surveille pas nous-mêmes (le SL de sécurité qui se
+    déclenche, une fermeture manuelle par l'utilisateur directement sur Hyperliquid, une
+    liquidation...) reste indéfiniment affiché comme "ouvert" dans HyperBot, avec un PnL
+    calculé sur une position qui n'existe plus réellement. Marque ces trades comme fermés
+    (raison CLOSED_ON_EXCHANGE) dès qu'on détecte l'écart, en utilisant le dernier prix connu
+    comme meilleure estimation du prix de clôture réel (l'API ne le fournit pas directement ici)."""
+    conn = get_db()
+    try:
+        live_trades = conn.execute(
+            "SELECT pt.*, u.hl_wallet FROM paper_trades pt JOIN users u ON pt.user_id = u.id "
+            "WHERE pt.status='OPEN' AND pt.is_live=1"
+        ).fetchall()
+        # Regroupe par wallet pour ne faire qu'un seul appel Hyperliquid par compte, même si
+        # plusieurs trades live sont ouverts simultanément pour le même utilisateur.
+        par_wallet = {}
+        for t in live_trades:
+            t = dict(t)
+            par_wallet.setdefault(t["hl_wallet"], []).append(t)
+        for wallet, trades in par_wallet.items():
+            if not wallet:
+                continue
+            open_coins = get_hl_open_coins(wallet)
+            if open_coins is None:
+                continue  # échec de lecture — ne rien conclure plutôt que fermer à tort
+            for t in trades:
+                if t["coin"] not in open_coins:
+                    pnl = (t["current_price"] - t["entry_price"]) / t["entry_price"] * t["size_usdc"] * t["leverage"] * (1 if t["action"] == "LONG" else -1)
+                    conn.execute(
+                        "UPDATE paper_trades SET status='CLOSED', close_reason='CLOSED_ON_EXCHANGE', closed_at=?, pnl=? WHERE id=?",
+                        (datetime.utcnow().isoformat(), round(pnl, 2), t["id"])
+                    )
+                    conn.commit()
+                    add_bot_log(t["user_id"], f"⚠️ {t['coin']}: position fermée sur Hyperliquid (SL de sécurité, fermeture manuelle, ou liquidation) sans passer par HyperBot — synchronisé, marqué fermé (PnL estimé au dernier prix connu: {round(pnl,2)} USDC)", "warning")
+    except Exception as e:
+        print(f"⚠️ reconcile_live_positions error: {e}")
+    finally:
+        conn.close()
+
+async def reconcile_live_positions_loop():
+    """Boucle dédiée, intervalle plus large (60s) que les ordres programmés — un appel
+    Hyperliquid par compte à chaque passage, pas besoin d'une fréquence aussi élevée que le
+    suivi de prix en temps réel."""
+    while True:
+        try:
+            reconcile_live_positions()
+        except Exception as e:
+            print(f"⚠️ reconcile_live_positions_loop error: {e}")
+        await asyncio.sleep(60)
+
 @app.post("/api/paper/manual-open")
 def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
     """Prise de trade manuelle libre — coin/direction/taille/levier au choix, indépendante
@@ -5501,7 +5608,10 @@ def set_take_profit(req: SetTakeProfitRequest, user_id: int = Depends(get_curren
     if req.take_profit_pct is not None and req.take_profit_pct <= 0:
         conn.close()
         raise HTTPException(status_code=400, detail="Le TP doit être un pourcentage de gain positif")
-    conn.execute("UPDATE paper_trades SET custom_take_profit_pct=? WHERE id=?", (req.take_profit_pct, req.trade_id))
+    # Chaque changement manuel du seuil réarme le mécanisme à zéro — le nouveau % devient
+    # le nouveau point de référence pour le plancher, sans tenir compte d'un armement précédent
+    # qui correspondait à un seuil différent.
+    conn.execute("UPDATE paper_trades SET custom_take_profit_pct=?, custom_tp_armed=0 WHERE id=?", (req.take_profit_pct, req.trade_id))
     conn.commit()
     conn.close()
     msg = f"Take Profit manuel retiré pour {trade['coin']}" if req.take_profit_pct is None else f"Take Profit manuel défini à {req.take_profit_pct}% pour {trade['coin']}"
