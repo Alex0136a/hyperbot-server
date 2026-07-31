@@ -1258,6 +1258,22 @@ def get_hl_account_value_verbose(account_address: str):
     except Exception as e:
         return 0.0, str(e)
 
+def get_hl_balance_breakdown(account_address: str):
+    """Comme get_hl_account_value_verbose, mais retourne le TOTAL (équité du compte, y
+    compris PnL non réalisé des positions ouvertes) ET le DISPONIBLE (withdrawable — la part
+    libre, non immobilisée en marge) séparément, pour l'affichage. Ne remplace pas
+    get_hl_account_value_verbose, toujours utilisée telle quelle pour le calcul de taille."""
+    if not HL_SDK_AVAILABLE or not account_address:
+        return None, None, "Wallet ou SDK non configuré"
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        state = info.user_state(account_address)
+        account_value = float(state.get("marginSummary", {}).get("accountValue", 0) or 0)
+        withdrawable = float(state.get("withdrawable", 0) or 0)
+        return account_value, withdrawable, None
+    except Exception as e:
+        return None, None, str(e)
+
 def get_hl_open_coins(account_address: str) -> Optional[set]:
     """Retourne l'ensemble des coins pour lesquels une position est RÉELLEMENT ouverte sur
     Hyperliquid (taille non nulle), ou None si la lecture échoue (à ne jamais confondre avec
@@ -5672,11 +5688,38 @@ def get_hl_real_balance(user_id: int = Depends(get_current_user)):
         (config["accumulation_short_trading_mode"] if "accumulation_short_trading_mode" in config.keys() else None) == "live"
     )
     if not any_live or not user or not user["hl_wallet"]:
-        return {"balance": None, "error": None}
-    balance, error = get_hl_account_value_verbose(user["hl_wallet"])
-    if balance <= 0:
-        return {"balance": None, "error": error or "Solde indisponible"}
-    return {"balance": round(balance, 2), "error": None}
+        return {"balance": None, "available": None, "pnl_open": None, "performance_pct": None, "open_trades_count": None, "error": None}
+    account_value, withdrawable, error = get_hl_balance_breakdown(user["hl_wallet"])
+    if account_value is None or account_value <= 0:
+        return {"balance": None, "available": None, "pnl_open": None, "performance_pct": None, "open_trades_count": None, "error": error or "Solde indisponible"}
+
+    # PnL ouvert et nombre de trades LIVE — calculé depuis notre propre base (déjà à jour en
+    # temps réel via le suivi WebSocket), pas besoin d'un appel Hyperliquid supplémentaire.
+    conn2 = get_db()
+    live_open = conn2.execute(
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_live=1", (user_id,)
+    ).fetchall()
+    conn2.close()
+    live_open = [dict(t) for t in live_open]
+    pnl_open = sum(
+        (t["current_price"] - t["entry_price"]) / t["entry_price"] * t["size_usdc"] * t["leverage"] * (1 if t["action"] == "LONG" else -1)
+        for t in live_open
+    )
+    # accountValue Hyperliquid inclut déjà le PnL non réalisé — on "retire" ce PnL pour
+    # obtenir une base de référence, et exprimer la performance comme "part du capital actuel
+    # qui est gain non réalisé en ce moment" (pas besoin de connaître un dépôt initial, jamais
+    # suivi pour le live jusqu'ici).
+    base_avant_pnl = account_value - pnl_open
+    performance_pct = round(pnl_open / base_avant_pnl * 100, 2) if base_avant_pnl > 0 else 0.0
+
+    return {
+        "balance": round(account_value, 2),
+        "available": round(withdrawable, 2) if withdrawable is not None else None,
+        "pnl_open": round(pnl_open, 2),
+        "performance_pct": performance_pct,
+        "open_trades_count": len(live_open),
+        "error": None,
+    }
 
 @app.post("/api/paper/set-take-profit")
 def set_take_profit(req: SetTakeProfitRequest, user_id: int = Depends(get_current_user)):
