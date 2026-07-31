@@ -1260,12 +1260,14 @@ def get_hl_account_value_verbose(account_address: str):
 
 def get_hl_balance_breakdown(account_address: str):
     """Comme get_hl_account_value_verbose, mais retourne le TOTAL et le DISPONIBLE séparément,
-    pour l'affichage. BUG CORRIGÉ : marginSummary.accountValue ne reflète que la portion PERP
-    du compte (marge + PnL des positions ouvertes) — sur le système de "compte unifié"
-    Hyperliquid, les fonds non engagés dorment côté SPOT, complètement absents de ce champ.
-    Résultat observé concrètement : le total affiché ne correspondait qu'à la taille d'entrée
-    du trade + son PnL, pas au vrai solde disponible sur Hyperliquid. Combine maintenant les
-    DEUX (spot + perp) pour matcher le "Balance" que Hyperliquid affiche lui-même."""
+    pour l'affichage.
+    BUG CORRIGÉ (2e itération) : sur ce compte "unifié" Hyperliquid, le solde spot ET
+    marginSummary.accountValue ne sont PAS deux pools complémentaires à additionner — ce sont
+    deux VUES qui se recoupent sur la même collatérale. Additionner les deux double-comptait
+    la marge du trade en cours (observé concrètement : total affiché 244.26$ contre 222.22$
+    réels sur Hyperliquid, écart de 22.04$ quasi identique à la taille du trade + son PnL).
+    Le solde spot, quand disponible et non nul, représente déjà le total réel à lui seul sur ce
+    type de compte — on ne l'additionne plus au perp, on le préfère simplement s'il existe."""
     if not HL_SDK_AVAILABLE or not account_address:
         return None, None, "Wallet ou SDK non configuré"
     try:
@@ -1281,11 +1283,14 @@ def get_hl_balance_breakdown(account_address: str):
                 if b.get("coin") in ("USDC", "USD")
             )
         except Exception:
-            pass  # solde spot non lisible — total = perp seul, mieux que rien plutôt que planter
-        total = perp_account_value + spot_balance
-        # Disponible = withdrawable perp (déjà liquide côté perp) + tout le solde spot (par
-        # définition non engagé en marge, donc entièrement disponible)
-        available = perp_withdrawable + spot_balance
+            pass  # solde spot non lisible — repli sur le perp seul plutôt que planter
+        if spot_balance > 0:
+            total = spot_balance
+            marge_verrouillee = max(0.0, perp_account_value - perp_withdrawable)
+            available = max(0.0, spot_balance - marge_verrouillee)
+        else:
+            total = perp_account_value
+            available = perp_withdrawable
         return total, available, None
     except Exception as e:
         return None, None, str(e)
