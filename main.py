@@ -268,7 +268,7 @@ def init_db():
         # d'un filet trop serré). Remplace le plancher/tolérance précédent par un plancher qui
         # SUIT le pic avec un écart fixe de 0.5% (armé à partir de 1% de pic), élargi à 1.0%
         # d'écart si le canal détecté à l'entrée dépasse 2% et le pic atteint au moins 1.5%.
-        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=0.5 WHERE accumulation_max_loss_pct=0.7")
+        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=0.5 WHERE accumulation_max_loss_pct BETWEEN 0.69 AND 0.71")
         conn.commit()
     except: pass
     try:
@@ -2555,6 +2555,11 @@ async def scan_markets(user_id: int):
                         f"   → Suggestion uniquement, aucun ordre créé automatiquement"
                     )
                     add_bot_log(user_id, msg, "info")
+                    if channel_pct >= 3.0:
+                        # Alerte dédiée, facile à repérer — un canal aussi large offre
+                        # structurellement beaucoup plus de marge de mouvement qu'un canal
+                        # standard (1.5-2%), potentiellement intéressant pour un trade manuel.
+                        add_bot_log(user_id, f"🔔📐 {coin}: CANAL LARGE détecté ({channel_pct:.1f}% ≥ 3%) — marge de mouvement importante, biais {biais_direction} (~{biais_confiance}%)", "warning")
             elif cache_key in range_suggestion_cache:
                 # Ne remplit plus les critères (range disparu ou confiance < 70%) — retrait
                 # actif plutôt que de laisser une donnée caduque continuer à s'afficher.
