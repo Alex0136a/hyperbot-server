@@ -2589,21 +2589,28 @@ async def scan_markets(user_id: int):
                                 dist_pct = abs(price - support) / support * 100
                                 add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette, support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}%) — pas d'achat", "info")
                         else:
-                            last_candle_green = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])
+                            # Remplace la couleur de bougie (figée, jusqu'à 15 min de retard) par
+                            # le prix RÉEL en continu — le prix peut bouger de plus de 2% dans
+                            # les deux sens à l'intérieur d'une même bougie avant sa clôture ;
+                            # attendre la couleur finale revient à ignorer un vrai rebond déjà
+                            # en cours. Compare le prix actuel au plus bas récent (3 dernières
+                            # bougies) pour confirmer un rebond réel, sans attendre la clôture.
+                            recent_low = min(closes[-3:]) if len(closes) >= 3 else price
+                            price_bouncing_up = price > recent_low * 1.001  # marge 0.1%, évite le bruit pur au plus bas exact
                             rsi_recovering = False
                             if len(closes) > 17:
                                 rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
                                 if rsi_prev is not None and rsi > rsi_prev:
                                     rsi_recovering = True
                             macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
-                            reversal_confirmed = last_candle_green and (rsi_recovering or macd_bull_confirm)
+                            reversal_confirmed = price_bouncing_up and (rsi_recovering or macd_bull_confirm)
                             if reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed:
                                 accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi, "action": "LONG"})
                             elif should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                                raison = "bougie encore rouge" if not last_candle_green else "RSI ne remonte pas encore et MACD pas haussier"
+                                raison = "pas encore de rebond confirmé depuis le plus bas récent" if not price_bouncing_up else "RSI ne remonte pas encore et MACD pas haussier"
                                 add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais retournement pas confirmé ({raison}) — pas d'achat", "info")
 
             # Miroir SHORT — switch, plafond de positions et levier séparés du LONG. Même
@@ -2637,21 +2644,25 @@ async def scan_markets(user_id: int):
                                 dist_pct = abs(price - resistance) / resistance * 100
                                 add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT, résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}%) — pas de vente", "info")
                         else:
-                            last_candle_red = "o" in candles_raw[-1] and float(candles_raw[-1]["c"]) < float(candles_raw[-1]["o"])
+                            # Miroir du LONG : compare le prix actuel au plus haut récent (3
+                            # dernières bougies) pour confirmer un rebond baissier réel, sans
+                            # attendre la clôture d'une bougie complète.
+                            recent_high = max(closes[-3:]) if len(closes) >= 3 else price
+                            price_bouncing_down = price < recent_high * 0.999  # marge 0.1%
                             rsi_falling = False
                             if len(closes) > 17:
                                 rsi_prev_short = calc_rsi(closes[:-3], int(rsi_period))
                                 if rsi_prev_short is not None and rsi < rsi_prev_short:
                                     rsi_falling = True
                             macd_bear_confirm = bool(macd and macd["macd"] < macd["signal"])
-                            reversal_confirmed_short = last_candle_red and (rsi_falling or macd_bear_confirm)
+                            reversal_confirmed_short = price_bouncing_down and (rsi_falling or macd_bear_confirm)
                             if reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed_short:
                                 accumulation_candidates.append({"coin": coin, "resistance": resistance, "rsi": rsi, "action": "SHORT"})
                             elif should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                                raison_short = "bougie encore verte" if not last_candle_red else "RSI ne redescend pas encore et MACD pas baissier"
+                                raison_short = "pas encore de rebond baissier confirmé depuis le plus haut récent" if not price_bouncing_down else "RSI ne redescend pas encore et MACD pas baissier"
                                 add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais retournement pas confirmé ({raison_short}) — pas de vente", "info")
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
