@@ -1467,11 +1467,27 @@ Confirmer ?`
       {tab==="paper" && (
         <div style={{padding:16,maxWidth:1400}}>
 
-          {/* SOLDE RÉEL HYPERLIQUID — visible uniquement si un mode live est actif et la lecture réussit */}
+          {/* HYPERLIQUID LIVE — 4 cartes symétriques au Paper Trading, visibles uniquement
+              si un mode live est actif et la lecture réussit */}
           {hlRealBalance?.balance != null && (
-            <div style={{background:"#052e1622",border:"1px solid #34d399",borderRadius:8,padding:"10px 14px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:11,color:"#34d399",fontWeight:700}}>💰 Solde réel Hyperliquid (live)</span>
-              <span style={{fontSize:16,fontWeight:700,color:"#34d399"}}>{hlRealBalance.balance.toFixed(2)} USDC</span>
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:"#34d399",fontWeight:700,marginBottom:6}}>💰 Hyperliquid (live)</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                {[
+                  {l:"SOLDE RÉEL (total)",v:`${hlRealBalance.balance.toFixed(2)} USDC`,c:"#34d399"},
+                  {l:"DISPONIBLE (hors marge)",v:hlRealBalance.available!=null?`${hlRealBalance.available.toFixed(2)} USDC`:"—",c:"#60a5fa"},
+                  {l:"PNL OUVERT (live)",v:`${hlRealBalance.pnl_open>=0?"+":""}${hlRealBalance.pnl_open.toFixed(2)} USDC`,c:hlRealBalance.pnl_open>=0?"#34d399":"#f87171"},
+                  {l:"PERFORMANCE (live)",v:`${hlRealBalance.performance_pct>=0?"+":""}${hlRealBalance.performance_pct.toFixed(2)}%`,c:hlRealBalance.performance_pct>=0?"#34d399":"#f87171"},
+                ].map((s,i)=>(
+                  <div key={i} style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"12px",textAlign:"center"}}>
+                    <div style={{fontSize:15,fontWeight:700,color:s.c}}>{s.v}</div>
+                    <div style={{fontSize:9,color:"#475569",marginTop:2}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{textAlign:"center",fontSize:9,color:"#475569",marginTop:6}}>
+                {hlRealBalance.open_trades_count} trade{hlRealBalance.open_trades_count!==1?"s":""} live ouvert{hlRealBalance.open_trades_count!==1?"s":""}
+              </div>
             </div>
           )}
 
