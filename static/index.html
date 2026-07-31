@@ -687,6 +687,21 @@ Confirmer ?`
         </div>
       </div>
 
+      {/* BANNIÈRE DÉFILANTE — alertes canal large (≥3%), visible peu importe l'onglet actif */}
+      {(() => {
+        const alertesCanalLarge = logs.filter(l => l.message && l.message.includes("CANAL LARGE")).slice(0, 5);
+        if (alertesCanalLarge.length === 0) return null;
+        const texteDefilant = alertesCanalLarge.map(l => l.message.replace(/\n.*/s, "")).join("     •     ");
+        return (
+          <div style={{background:"#3d2e0a",borderBottom:"1px solid #fbbf24",overflow:"hidden",whiteSpace:"nowrap",padding:"4px 0"}}>
+            <div style={{display:"inline-block",animation:"scroll-ticker 25s linear infinite",fontSize:10,color:"#fbbf24",fontWeight:700}}>
+              {texteDefilant}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{texteDefilant}
+            </div>
+            <style>{`@keyframes scroll-ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }`}</style>
+          </div>
+        );
+      })()}
+
       {/* STATS */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:"#1e2d4a"}}>
         {[{l:"SIGNAUX",v:stats.total||0,c:"#60a5fa"},{l:"LONG",v:stats.longs||0,c:"#34d399"},{l:"SHORT",v:stats.shorts||0,c:"#f87171"},{l:"CONFIANCE",v:stats.avg_confidence?`${stats.avg_confidence}%`:"--",c:confColor(stats.avg_confidence||0)}].map((s,i)=>(
