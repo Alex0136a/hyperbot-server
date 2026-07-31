@@ -263,6 +263,15 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Refonte du mécanisme de sortie Accumulation : Max Loss réduit à 0.5% (le SL exchange
+        # reste inchangé, toujours x5 ce plafond — évite de reproduire le problème déjà corrigé
+        # d'un filet trop serré). Remplace le plancher/tolérance précédent par un plancher qui
+        # SUIT le pic avec un écart fixe de 0.5% (armé à partir de 1% de pic), élargi à 1.0%
+        # d'écart si le canal détecté à l'entrée dépasse 2% et le pic atteint au moins 1.5%.
+        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=0.5 WHERE accumulation_max_loss_pct=0.7")
+        conn.commit()
+    except: pass
+    try:
         # Mode SHORT en Accumulation — miroir du LONG (résistance au lieu de support, RSI
         # haut au lieu de bas) mais avec un switch, un plafond de positions et un levier
         # SÉPARÉS du LONG, comme demandé. Désactivé par défaut.
@@ -631,6 +640,13 @@ def init_db():
         # Take Profit manuel programmable EN COURS DE TRADE (pas seulement à l'ouverture) —
         # fonctionne pour tous les modes (bot principal, manuel, Accumulation LONG/SHORT).
         conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_take_profit_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        # Canal support/résistance détecté à l'ENTRÉE (%) — mémorisé sur le trade pour la
+        # refonte de sortie Accumulation : un canal large (>2%) autorise une tolérance de
+        # trailing plus généreuse (1% au lieu de 0.5%) une fois un pic suffisant atteint.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN accumulation_channel_pct REAL")
         conn.commit()
     except: pass
     try:
@@ -1798,7 +1814,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         # résistance, pas l'entrée) n'a pas encore techniquement déclenché.
         cfg_accum_maxloss = conn.execute(
             "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.7
+        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.5
         if not accum_close_reason and pnl_pct_live <= -accum_max_loss_pct:
             accum_close_reason = "ACCUMULATION_MAX_LOSS"
             accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
@@ -1825,55 +1841,61 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 rsi_confirms = md.get("rsi") is not None and md["rsi"] < 50
                 reversal_confirmed = macd_confirms and rsi_confirms
 
-            if accum_peak_pct >= target_pct and pnl_pct_live < target_pct:
-                # Plancher ABSOLU : une fois l'objectif de base (2%) touché, on ne redonne
-                # plus jamais en dessous — peu importe RSI/MACD. "À partir de 2%, on ne cède
-                # plus rien." Le trade peut continuer à courir AU-DELÀ de 2% (voir ci-dessous),
-                # ce plancher protège juste le minimum garanti une fois atteint.
-                accum_close_reason = "ACCUMULATION_FLOOR"
-                accum_log_msg = f"🔒 {trade['coin']}: Plancher {target_pct}% touché puis entamé (pic {round(accum_peak_pct,2)}% → {round(pnl_pct_live,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC, rien cédé au-delà de l'objectif"
+            # Plancher SUIVEUR : armé à partir d'1% de pic, suit le pic avec un écart fixe de
+            # 0.5% (ex: pic 1.8% -> plancher 1.3%). Si le canal détecté à l'ENTRÉE dépassait 2%
+            # et que le pic atteint au moins 1.5%, l'écart s'élargit à 1.0% — une structure plus
+            # large autorise statistiquement un recul plus généreux avant de conclure à un vrai
+            # retournement. Remplace l'ancien plancher figé + tolérance proportionnelle au pic.
+            channel_pct_trade = trade.get("accumulation_channel_pct")
+            wide_channel = channel_pct_trade is not None and channel_pct_trade > 2.0
+            if wide_channel and accum_peak_pct >= 1.5:
+                gap = 1.0
+                armed = True
+            elif accum_peak_pct >= 1.0:
+                gap = 0.5
+                armed = True
             else:
-                # Tolérance DYNAMIQUE avant/au-delà du plancher : minimum absolu 0.3% (évite le
-                # bruit sur un tout petit pic — cas JUP/XRP/AAVE observés), OU 30% du pic déjà
-                # atteint si plus grand — donne plus de marge à mesure qu'une vraie tendance se
-                # développe, sans se faire éjecter par un simple soubresaut RSI/MACD pendant un
-                # mouvement continu. S'applique aussi bien avant qu'après le plancher de 2%.
-                cfg_accum_tol = conn.execute(
-                    "SELECT accumulation_exit_tolerance_min_pct, accumulation_exit_tolerance_ratio FROM bot_config WHERE user_id=?",
-                    (user_id,)).fetchone()
-                tol_min = cfg_accum_tol["accumulation_exit_tolerance_min_pct"] if cfg_accum_tol and "accumulation_exit_tolerance_min_pct" in cfg_accum_tol.keys() and cfg_accum_tol["accumulation_exit_tolerance_min_pct"] is not None else 0.3
-                tol_ratio = cfg_accum_tol["accumulation_exit_tolerance_ratio"] if cfg_accum_tol and "accumulation_exit_tolerance_ratio" in cfg_accum_tol.keys() and cfg_accum_tol["accumulation_exit_tolerance_ratio"] is not None else 0.3
-                tolerance_donnee = max(tol_min, accum_peak_pct * tol_ratio)
-                a_assez_recule = pnl_pct_live <= (accum_peak_pct - tolerance_donnee)
-                if pnl_pct_live > 0 and reversal_confirmed and a_assez_recule:
-                    accum_close_reason = "ACCUMULATION_TREND_END"
-                    sens_retournement = "haussier" if is_short_accum else "baissier"
-                    accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%, tolérance {round(tolerance_donnee,2)}%)"
-                elif is_short_accum and trade.get("accumulation_resistance_price"):
-                    # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
-                    # avec une marge de confirmation) -> on rachète même à perte plutôt que
-                    # d'attendre indéfiniment une résistance qui a cédé
-                    cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                    buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                    resistance_ref = float(trade["accumulation_resistance_price"])
-                    breakout_level = resistance_ref * (1 + buffer_pct / 100)
-                    if cur > breakout_level:
-                        accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                        accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
-                elif not is_short_accum and trade.get("accumulation_support_price"):
-                    # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
-                    # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
-                    # support qui a cédé
-                    cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                    buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                    support_ref = float(trade["accumulation_support_price"])
-                    breakdown_level = support_ref * (1 - buffer_pct / 100)
-                    if cur < breakdown_level:
-                        accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                        accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+                gap = None
+                armed = False
+
+            if armed:
+                floor = accum_peak_pct - gap
+                if pnl_pct_live <= floor:
+                    accum_close_reason = "ACCUMULATION_TRAILING_TP"
+                    accum_log_msg = f"🔒 {trade['coin']}: Plancher suiveur touché (pic {round(accum_peak_pct,2)}%, écart {gap}%, seuil {round(floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+            elif pnl_pct_live > 0 and reversal_confirmed:
+                # Avant l'armement (pic encore < 1%) : retournement RSI+MACD confirmé -> on
+                # récupère la valeur actuellement disponible plutôt que de risquer de tout perdre
+                # en attendant un pic suffisant pour armer le plancher.
+                accum_close_reason = "ACCUMULATION_TREND_END"
+                sens_retournement = "haussier" if is_short_accum else "baissier"
+                accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé avant armement (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%)"
+
+            if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
+                # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
+                # avec une marge de confirmation) -> on rachète même à perte plutôt que
+                # d'attendre indéfiniment une résistance qui a cédé
+                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+                resistance_ref = float(trade["accumulation_resistance_price"])
+                breakout_level = resistance_ref * (1 + buffer_pct / 100)
+                if cur > breakout_level:
+                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                    accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+            elif not accum_close_reason and not is_short_accum and trade.get("accumulation_support_price"):
+                # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
+                # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
+                # support qui a cédé
+                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+                support_ref = float(trade["accumulation_support_price"])
+                breakdown_level = support_ref * (1 - buffer_pct / 100)
+                if cur < breakdown_level:
+                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                    accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("ACCUMULATION_FLOOR", "ACCUMULATION_TREND_END") else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("ACCUMULATION_TRAILING_TP", "ACCUMULATION_TREND_END") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
@@ -2607,7 +2629,7 @@ async def scan_markets(user_id: int):
                             if reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed:
-                                accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi, "action": "LONG"})
+                                accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
                             elif should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                                 raison = "pas encore de rebond confirmé depuis le plus bas récent" if not price_bouncing_up else "RSI ne remonte pas encore et MACD pas haussier"
@@ -2659,7 +2681,7 @@ async def scan_markets(user_id: int):
                             if reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed_short:
-                                accumulation_candidates.append({"coin": coin, "resistance": resistance, "rsi": rsi, "action": "SHORT"})
+                                accumulation_candidates.append({"coin": coin, "resistance": resistance, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
                             elif should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                                 raison_short = "pas encore de rebond baissier confirmé depuis le plus haut récent" if not price_bouncing_down else "RSI ne redescend pas encore et MACD pas baissier"
@@ -2880,6 +2902,7 @@ async def scan_markets(user_id: int):
             accumulation_candidates.sort(key=lambda c: 0 if c["coin"] in accumulation_top_coins else 1)
             for cand in accumulation_candidates:
                 coin, rsi_c, cand_action = cand["coin"], cand["rsi"], cand["action"]
+                channel_pct_c = cand.get("channel_pct")
                 is_short_cand = cand_action == "SHORT"
                 level_c = cand.get("resistance") if is_short_cand else cand.get("support")
                 conn_accum = get_db()
@@ -2926,11 +2949,11 @@ async def scan_markets(user_id: int):
                     if is_short_cand:
                         message, _ = execute_manual_trade(user_id, coin, "SHORT", accum_size, accum_leverage, {},
                                                             is_accumulation=True, accumulation_target_pct=accum_target,
-                                                            accumulation_resistance_price=level_c, is_manual=False)
+                                                            accumulation_resistance_price=level_c, accumulation_channel_pct=channel_pct_c, is_manual=False)
                     else:
                         message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
                                                             is_accumulation=True, accumulation_target_pct=accum_target,
-                                                            accumulation_support_price=level_c, is_manual=False)
+                                                            accumulation_support_price=level_c, accumulation_channel_pct=channel_pct_c, is_manual=False)
                     priority_tag = "priorité top-10" if coin in accumulation_top_coins else "hors top-10"
                     niveau_label = "résistance" if is_short_cand else "support"
                     add_bot_log(user_id, f"🤖💰 Accumulation auto {cand_action} ({priority_tag}): {message} (RSI {rsi_c:.1f}, {niveau_label} ${level_c:.4g}, retournement confirmé)", "success")
@@ -4389,7 +4412,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
-        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.7,
+        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.5,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
@@ -5013,7 +5036,7 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None, accumulation_resistance_price: float = None, is_manual: bool = True):
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None, accumulation_resistance_price: float = None, accumulation_channel_pct: float = None, is_manual: bool = True):
     """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
     'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
     remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
@@ -5082,7 +5105,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         # pas un désengagement total qui laisserait une position live sans aucune protection
         # côté exchange si le serveur devient injoignable.
         accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct, hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.7
+        accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.5
         safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
@@ -5099,13 +5122,13 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             is_accumulation, accumulation_target_pct, accumulation_support_price, accumulation_resistance_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
-            custom_take_profit_pct)
-            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            custom_take_profit_pct, accumulation_channel_pct)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, coin, action, fill_price, fill_price, size_usdc, levier_reel,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"]))
+             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"], accumulation_channel_pct))
         conn.commit()
         conn.close()
         prefix = "👤" if is_manual else "🤖"
@@ -5122,13 +5145,13 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         accumulation_support_price, accumulation_resistance_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
-        custom_take_profit_pct)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        custom_take_profit_pct, accumulation_channel_pct)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, coin, action, price, price, size_usdc, leverage,
          now_iso, today, 1 if is_manual else 0, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"]))
+         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"], accumulation_channel_pct))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
@@ -5632,6 +5655,28 @@ def open_paper_trade(req: PaperTradeRequest, user_id: int = Depends(get_current_
 class SetTakeProfitRequest(BaseModel):
     trade_id: int
     take_profit_pct: Optional[float] = None  # None = retire le TP manuel
+
+@app.get("/api/hl-real-balance")
+def get_hl_real_balance(user_id: int = Depends(get_current_user)):
+    """Solde réel du compte Hyperliquid — endpoint SÉPARÉ de /api/config (appelé toutes les
+    5s) pour ne pas saturer l'API Hyperliquid d'appels inutiles ; à interroger côté frontend
+    à un rythme plus espacé (30-60s). Retourne balance=None si aucun mode live n'est actif ou
+    si la lecture échoue, pour ne jamais afficher un chiffre trompeur."""
+    conn = get_db()
+    user = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+    config = conn.execute("SELECT trading_mode, manual_accum_trading_mode, accumulation_short_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    any_live = config and (
+        config["trading_mode"] == "live" or
+        (config["manual_accum_trading_mode"] if "manual_accum_trading_mode" in config.keys() else None) == "live" or
+        (config["accumulation_short_trading_mode"] if "accumulation_short_trading_mode" in config.keys() else None) == "live"
+    )
+    if not any_live or not user or not user["hl_wallet"]:
+        return {"balance": None, "error": None}
+    balance, error = get_hl_account_value_verbose(user["hl_wallet"])
+    if balance <= 0:
+        return {"balance": None, "error": error or "Solde indisponible"}
+    return {"balance": round(balance, 2), "error": None}
 
 @app.post("/api/paper/set-take-profit")
 def set_take_profit(req: SetTakeProfitRequest, user_id: int = Depends(get_current_user)):
