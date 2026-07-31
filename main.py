@@ -1262,6 +1262,25 @@ def get_hl_open_coins(account_address: str) -> Optional[set]:
         print(f"HL open positions fetch error: {e}")
         return None
 
+def _hl_call_with_retry(fn, *args, max_retries: int = 3, base_delay: float = 1.5, **kwargs):
+    """Exécute un appel Hyperliquid avec nouvelle(s) tentative(s) automatique(s) en cas de
+    limite de débit (429) — un aléa fréquent côté exchange lors d'un pic d'activité, pas un
+    problème de logique. Backoff exponentiel (1.5s, 3s, 6s...) entre chaque tentative. Toute
+    autre erreur (pas un 429) remonte immédiatement, sans nouvelle tentative inutile."""
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            is_rate_limit = "429" in str(e)
+            last_exception = e
+            if not is_rate_limit or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"⏳ Rate limit Hyperliquid (429) — nouvelle tentative dans {delay}s (essai {attempt+1}/{max_retries})")
+            time.sleep(delay)
+    raise last_exception
+
 def hl_open_position(account_address: str, coin: str, action: str, size_usdc: float,
                       leverage: int, cur_price: float, max_loss_pct: float, safety_sl_multiplier: float = 5.0):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
@@ -1285,7 +1304,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     levier_reel = leverage
     repli_raison = None
     try:
-        lev_result = exchange.update_leverage(int(leverage), coin, is_cross=True)
+        lev_result = _hl_call_with_retry(exchange.update_leverage, int(leverage), coin, is_cross=True)
         if lev_result.get("status") != "ok":
             raise RuntimeError(str(lev_result))
     except Exception as e:
@@ -1294,7 +1313,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
         # ci-dessous pour ce levier réel (x1), pas celui initialement demandé.
         repli_raison = str(e)
         try:
-            lev_result_fallback = exchange.update_leverage(1, coin, is_cross=True)
+            lev_result_fallback = _hl_call_with_retry(exchange.update_leverage, 1, coin, is_cross=True)
             if lev_result_fallback.get("status") != "ok":
                 raise RuntimeError(f"Repli x1 also refusé: {lev_result_fallback}")
             levier_reel = 1
@@ -1307,7 +1326,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     if coin_size <= 0:
         raise ValueError("Taille de position calculée nulle ou négative")
 
-    result = exchange.market_open(coin, is_buy, coin_size, slippage=0.01)
+    result = _hl_call_with_retry(exchange.market_open, coin, is_buy, coin_size, slippage=0.01)
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec ouverture position Hyperliquid: {result}")
 
@@ -1348,7 +1367,8 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     sl_oid = None
     sl_echec_raison = None
     try:
-        sl_result = exchange.order(
+        sl_result = _hl_call_with_retry(
+            exchange.order,
             coin, not is_buy, coin_size, sl_price,
             {"trigger": {"triggerPx": sl_price, "isMarket": True, "tpsl": "sl"}},
             reduce_only=True,
@@ -1379,10 +1399,10 @@ def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = N
     exchange = get_hl_exchange(account_address)
     if sl_oid:
         try:
-            exchange.cancel(coin, sl_oid)
+            _hl_call_with_retry(exchange.cancel, coin, sl_oid)
         except Exception as e:
             print(f"⚠️ Annulation SL Hyperliquid échouée pour {coin} (oid={sl_oid}): {e}")
-    result = exchange.market_close(coin)
+    result = _hl_call_with_retry(exchange.market_close, coin)
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec fermeture position Hyperliquid: {result}")
     try:
