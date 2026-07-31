@@ -757,8 +757,13 @@ def init_db():
             custom_quick_profit_usd REAL,
             custom_trailing_gap_usd REAL,
             custom_trail_trigger_pct REAL,
-            custom_stop_loss_price REAL
+            custom_stop_loss_price REAL,
+            take_profit_pct REAL
         )""")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE pending_orders ADD COLUMN take_profit_pct REAL")
         conn.commit()
     except: pass
     try:
@@ -4935,6 +4940,7 @@ class PendingOrderRequest(BaseModel):
     custom_trailing_gap_usd: Optional[float] = None
     custom_trail_trigger_pct: Optional[float] = None
     custom_stop_loss_price: Optional[float] = None
+    take_profit_pct: Optional[float] = None  # TP manuel (%), défini dès la création de l'ordre
 
 class PaperCloseRequest(BaseModel):
     trade_id: int
@@ -5022,7 +5028,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     today = datetime.utcnow().strftime("%Y-%m-%d")
     c = {k: custom.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
         "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
-        "custom_trail_trigger_pct","custom_stop_loss_price")}
+        "custom_trail_trigger_pct","custom_stop_loss_price","take_profit_pct")}
     accum_flag = 1 if is_accumulation else 0
     accum_target = accumulation_target_pct if is_accumulation else None
 
@@ -5061,13 +5067,14 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             size_usdc, leverage, opened_at, session_date, is_live, is_manual, hl_sl_oid, hl_size,
             is_accumulation, accumulation_target_pct, accumulation_support_price, accumulation_resistance_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
-            custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
+            custom_take_profit_pct)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, coin, action, fill_price, fill_price, size_usdc, levier_reel,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
+             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"]))
         conn.commit()
         conn.close()
         prefix = "👤" if is_manual else "🤖"
@@ -5083,13 +5090,14 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         size_usdc, leverage, opened_at, session_date, is_manual, is_accumulation, accumulation_target_pct,
         accumulation_support_price, accumulation_resistance_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
-        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
+        custom_take_profit_pct)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, coin, action, price, price, size_usdc, leverage,
          now_iso, today, 1 if is_manual else 0, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"]))
+         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"]))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
@@ -5103,7 +5111,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
 def _pending_order_custom_dict(order: dict) -> dict:
     return {k: order.get(k) for k in ("custom_max_loss_pct","custom_qp_arm_low_usd","custom_qp_floor_low_usd",
         "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
-        "custom_trail_trigger_pct","custom_stop_loss_price")}
+        "custom_trail_trigger_pct","custom_stop_loss_price","take_profit_pct")}
 
 def _evaluate_condition(cond: dict, coin: str, mids: dict) -> bool:
     """Évalue UNE condition individuelle. Retourne None si la donnée nécessaire n'est pas
@@ -5459,13 +5467,14 @@ def create_pending_order(req: PendingOrderRequest, user_id: int = Depends(get_cu
     conn.execute("""INSERT INTO pending_orders (user_id, coin, action, size_usdc, leverage,
         conditions, condition_type, status, created_at, trading_mode, invalidation_price, tracks_level,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
-        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price)
-        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?,?,?)""",
+        custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
+        take_profit_pct)
+        VALUES (?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, req.coin.upper(), req.action, req.size_usdc, req.leverage,
          conditions_json, legacy_condition_type, now_iso, trading_mode, req.invalidation_price, req.tracks_level,
          req.custom_max_loss_pct, req.custom_qp_arm_low_usd, req.custom_qp_floor_low_usd,
          req.custom_qp_lock_trigger_usd, req.custom_quick_profit_usd, req.custom_trailing_gap_usd,
-         req.custom_trail_trigger_pct, req.custom_stop_loss_price))
+         req.custom_trail_trigger_pct, req.custom_stop_loss_price, req.take_profit_pct))
     conn.commit()
     conn.close()
     conds_str = " ET ".join(f"{c.type} {c.value if c.value is not None else ''}" for c in req.conditions)
