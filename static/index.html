@@ -403,7 +403,7 @@ function App() {
   const [manualSize, setManualSize] = useState(50);
   const [manualLeverage, setManualLeverage] = useState(2);
   const [manualAdvanced, setManualAdvanced] = useState(false);
-  const [manualCustom, setManualCustom] = useState({});
+  const [manualCustom, setManualCustom] = useState({take_profit_pct: 1.5});
   const [manualStatus, setManualStatus] = useState("");
   const [orderMode, setOrderMode] = useState("now"); // "now" ou "schedule"
   const [editingOrderId, setEditingOrderId] = useState(null);
@@ -1980,6 +1980,10 @@ Confirmer ?`
                   <input type="number" placeholder="Prix — aucun par défaut" onChange={e=>setManualCustom(p=>({...p,custom_stop_loss_price:e.target.value?Number(e.target.value):null}))}
                     style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11,marginBottom:10}}/>
 
+                  <div style={{fontSize:10,fontWeight:700,color:"#a78bfa",marginBottom:4}}>🎯 TP manuel (% de PnL — plancher, laisse courir au-delà)</div>
+                  <input type="number" step="0.1" value={manualCustom.take_profit_pct ?? ""} placeholder="% gain" onChange={e=>setManualCustom(p=>({...p,take_profit_pct:e.target.value?Number(e.target.value):null}))}
+                    style={{width:"100%",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"6px 8px",color:"#e2e8f0",fontSize:11,marginBottom:10}}/>
+
                   <div style={{fontSize:10,fontWeight:700,color:"#f59e0b",marginBottom:4}}>⚡ QP — Quick Profit</div>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
                     <div>
@@ -2099,7 +2103,8 @@ Confirmer ?`
                           custom_max_loss_pct:o.custom_max_loss_pct, custom_qp_arm_low_usd:o.custom_qp_arm_low_usd,
                           custom_qp_floor_low_usd:o.custom_qp_floor_low_usd, custom_qp_lock_trigger_usd:o.custom_qp_lock_trigger_usd,
                           custom_quick_profit_usd:o.custom_quick_profit_usd, custom_trailing_gap_usd:o.custom_trailing_gap_usd,
-                          custom_trail_trigger_pct:o.custom_trail_trigger_pct, custom_stop_loss_price:o.custom_stop_loss_price
+                          custom_trail_trigger_pct:o.custom_trail_trigger_pct, custom_stop_loss_price:o.custom_stop_loss_price,
+                          take_profit_pct:o.take_profit_pct
                         });
                         setOrderMode("schedule");
                         setManualStatus(`✏️ Modification de l'ordre #${o.id} — ajustez puis validez ci-dessus`);
