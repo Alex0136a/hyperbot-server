@@ -2773,7 +2773,14 @@ async def scan_markets(user_id: int):
             # (on les analyse quand même mais on filtre après)
 
             ai_mode_paper = config["ai_mode_paper"] if config and "ai_mode_paper" in config.keys() else "ai"
-            use_rules_engine = (config["trading_mode"] == "paper") and (ai_mode_paper == "rules")
+            # BUG CORRIGÉ : le moteur Règles n'était disponible qu'en mode PAPER — dès le
+            # passage en LIVE, le système forçait l'appel IA quoi qu'il arrive, même si
+            # l'utilisateur avait explicitement choisi "Règles (gratuit)". Résultat observé
+            # concrètement : échec systématique "Pas de réponse IA" sur TOUS les coins en live,
+            # dès lors qu'aucune vraie clé API Anthropic n'était configurée (le cas normal pour
+            # qui utilise Règles). Le choix de moteur doit s'appliquer identiquement, peu
+            # importe paper ou live.
+            use_rules_engine = (ai_mode_paper == "rules")
 
             if use_rules_engine:
                 conn_sl = get_db()
