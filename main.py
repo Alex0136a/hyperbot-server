@@ -4191,6 +4191,7 @@ async def lifespan(app: FastAPI):
     # Boucle des ordres programmés — indépendante de is_running, tourne toujours
     asyncio.create_task(pending_orders_loop())
     asyncio.create_task(reconcile_live_positions_loop())
+    asyncio.create_task(watch_market_resume_loop())
     print("⏳ Boucle des ordres programmés démarrée (indépendante de l'état du bot)")
     # Boucle de rafraîchissement RSI/MACD frais (toutes les 45s) pour l'Accumulation et les
     # conditions programmées — corrige la dépendance au cache du cycle de scan (~3min périmé)
@@ -5489,6 +5490,65 @@ async def reconcile_live_positions_loop():
         except Exception as e:
             print(f"⚠️ reconcile_live_positions_loop error: {e}")
         await asyncio.sleep(60)
+
+async def watch_market_resume_loop():
+    """Surveillance LÉGÈRE et INDÉPENDANTE de is_running — pour les utilisateurs ayant
+    complètement arrêté le bot (ex: marché en range jugé peu intéressant), continue de
+    vérifier la tendance BTC (même logique 4h+8h que le scan normal) ET son canal
+    support/résistance, journalisant dès qu'un changement notable survient (tendance qui se
+    confirme, ou canal qui atteint 1.5%+), pour être informé d'une reprise d'activité sans
+    devoir réactiver le bot pour le savoir. L'alerte canal réutilise le même tag "CANAL LARGE"
+    que la bannière défilante existante, pour y apparaître automatiquement.
+    Deux appels de bougies BTC par cycle (1h pour la tendance, 15m pour le canal), partagés
+    pour tous les utilisateurs concernés — coût minimal, pas par utilisateur."""
+    last_trend_par_user = {}
+    last_canal_large_par_user = {}
+    while True:
+        try:
+            conn = get_db()
+            users_stopped = conn.execute(
+                "SELECT bc.user_id, bc.btc_trend_threshold FROM bot_config bc WHERE bc.is_running=0 OR bc.is_running IS NULL"
+            ).fetchall()
+            conn.close()
+            if users_stopped:
+                async with httpx.AsyncClient() as client:
+                    btc_candles_8h = await fetch_candles(client, "BTC", "1h", 8)
+                    btc_candles_15m = await fetch_candles(client, "BTC", "15m", 50)
+                if btc_candles_8h and len(btc_candles_8h) >= 8:
+                    btc_close = float(btc_candles_8h[-1]["c"])
+                    btc_open_4h = float(btc_candles_8h[-4]["c"])
+                    btc_open_8h = float(btc_candles_8h[0]["c"])
+                    btc_change_4h = (btc_close - btc_open_4h) / btc_open_4h * 100
+                    btc_change_8h = (btc_close - btc_open_8h) / btc_open_8h * 100
+                    for row in users_stopped:
+                        uid = row["user_id"]
+                        thresh = row["btc_trend_threshold"] if row["btc_trend_threshold"] else 2.0
+                        if btc_change_4h > thresh and btc_change_8h > thresh:
+                            trend = "bullish"
+                        elif btc_change_4h < -thresh and btc_change_8h < -thresh:
+                            trend = "bearish"
+                        else:
+                            trend = "neutral"
+                        if last_trend_par_user.get(uid) != trend:
+                            if trend != "neutral":
+                                emoji = "🟢" if trend == "bullish" else "🔴"
+                                add_bot_log(uid, f"{emoji} [Bot arrêté] Reprise d'activité détectée sur BTC (4h:{btc_change_4h:+.1f}% / 8h:{btc_change_8h:+.1f}%, {'haussier' if trend=='bullish' else 'baissier'} confirmé) — le marché ne semble plus en range", "warning")
+                            elif last_trend_par_user.get(uid) is not None:
+                                add_bot_log(uid, f"⚪ [Bot arrêté] BTC repassé neutre (4h:{btc_change_4h:+.1f}% / 8h:{btc_change_8h:+.1f}%)", "info")
+                        last_trend_par_user[uid] = trend
+
+                if btc_candles_15m and len(btc_candles_15m) >= 20:
+                    support_btc, resistance_btc = detect_support_resistance(btc_candles_15m)
+                    channel_pct_btc = (resistance_btc - support_btc) / support_btc * 100 if support_btc and resistance_btc else 0
+                    canal_large_now = channel_pct_btc >= 1.5
+                    for row in users_stopped:
+                        uid = row["user_id"]
+                        if canal_large_now and not last_canal_large_par_user.get(uid):
+                            add_bot_log(uid, f"🔔📐 [Bot arrêté] CANAL LARGE détecté sur BTC ({channel_pct_btc:.1f}% ≥ 1.5%) — marge de mouvement en hausse, le marché ne semble plus en range serré", "warning")
+                        last_canal_large_par_user[uid] = canal_large_now
+        except Exception as e:
+            print(f"⚠️ watch_market_resume_loop error: {e}")
+        await asyncio.sleep(180)
 
 @app.post("/api/paper/manual-open")
 def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_current_user)):
