@@ -298,7 +298,14 @@ def init_db():
         # Tolérance dynamique de sortie Accumulation : minimum absolu (%) avant de considérer
         # un retournement comme significatif, quel que soit le pic — évite le bruit sur un
         # tout petit pic.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_min_pct REAL DEFAULT 0.3")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_min_pct REAL DEFAULT 0.15")
+        conn.commit()
+    except: pass
+    try:
+        # Réutilisation de ce réglage pour un nouvel usage (seuil de pic minimum avant de
+        # considérer un retournement pré-armement comme significatif, pas juste du bruit
+        # instantané) — défaut aligné à 0.15% au lieu de l'ancien 0.3%.
+        conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_min_pct=0.15 WHERE accumulation_exit_tolerance_min_pct=0.3")
         conn.commit()
     except: pass
     try:
@@ -1866,47 +1873,28 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         if accum_close_reason:
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
         else:
-            # Retournement RSI/MACD confirmé : exige les DEUX indicateurs d'accord ensemble
-            # (pas l'un ou l'autre) — un signal isolé et bruyant ne suffit plus.
-            md = market_data_cache.get(trade["coin"], {})
-            if is_short_accum:
-                macd_confirms = bool(md.get("macd_bull"))
-                rsi_confirms = md.get("rsi") is not None and md["rsi"] >= 50
-                reversal_confirmed = macd_confirms and rsi_confirms
-            else:
-                macd_confirms = bool(md.get("macd_bear"))
-                rsi_confirms = md.get("rsi") is not None and md["rsi"] < 50
-                reversal_confirmed = macd_confirms and rsi_confirms
+            cfg_min_pic = conn.execute("SELECT accumulation_exit_tolerance_min_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            min_pic_pre_armement = cfg_min_pic["accumulation_exit_tolerance_min_pct"] if cfg_min_pic and "accumulation_exit_tolerance_min_pct" in cfg_min_pic.keys() and cfg_min_pic["accumulation_exit_tolerance_min_pct"] is not None else 0.15
 
-            # Plancher SUIVEUR : armé à partir d'1% de pic, suit le pic avec un écart fixe de
-            # 0.5% (ex: pic 1.8% -> plancher 1.3%). Si le canal détecté à l'ENTRÉE dépassait 2%
-            # et que le pic atteint au moins 1.5%, l'écart s'élargit à 1.0% — une structure plus
-            # large autorise statistiquement un recul plus généreux avant de conclure à un vrai
-            # retournement. Remplace l'ancien plancher figé + tolérance proportionnelle au pic.
+            # Trailing PROGRESSIF CONTINU — même principe que le bot principal (widen_mult),
+            # remplace l'ancien système binaire (armé/pas armé à 1% + retournement RSI/MACD
+            # séparé avant armement). Un seul mécanisme continu : dès qu'un tout petit
+            # déclencheur est dépassé (0.15%), l'écart de protection s'élargit progressivement
+            # avec le pic (jusqu'à x3), sans palier brutal. Évite à la fois le cas "retournement
+            # sur pic quasi nul" (TAO) ET la discontinuité du seuil à 1%.
             channel_pct_trade = trade.get("accumulation_channel_pct")
             wide_channel = channel_pct_trade is not None and channel_pct_trade > 2.0
-            if wide_channel and accum_peak_pct >= 1.5:
-                gap = 1.0
-                armed = True
-            elif accum_peak_pct >= 1.0:
-                gap = 0.5
-                armed = True
-            else:
-                gap = None
-                armed = False
+            base_gap = 1.0 if wide_channel else 0.5
+            trigger = min_pic_pre_armement  # déclencheur, réutilise le même réglage (0.15% par défaut)
+            trail_widen_max_mult = 3.0
 
-            if armed:
+            if accum_peak_pct > trigger:
+                widen_mult = min(trail_widen_max_mult, 1 + (accum_peak_pct - trigger) / trigger)
+                gap = base_gap * widen_mult
                 floor = accum_peak_pct - gap
                 if pnl_pct_live <= floor:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Plancher suiveur touché (pic {round(accum_peak_pct,2)}%, écart {gap}%, seuil {round(floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
-            elif pnl_pct_live > 0 and reversal_confirmed:
-                # Avant l'armement (pic encore < 1%) : retournement RSI+MACD confirmé -> on
-                # récupère la valeur actuellement disponible plutôt que de risquer de tout perdre
-                # en attendant un pic suffisant pour armer le plancher.
-                accum_close_reason = "ACCUMULATION_TREND_END"
-                sens_retournement = "haussier" if is_short_accum else "baissier"
-                accum_log_msg = f"📊 {trade['coin']}: Retournement {sens_retournement} confirmé avant armement (RSI {md.get('rsi')}, MACD {'haussier' if md.get('macd_bull') else 'baissier' if md.get('macd_bear') else 'neutre'}) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%, pic {round(accum_peak_pct,2)}%)"
+                    accum_log_msg = f"🔒 {trade['coin']}: Trailing progressif touché (pic {round(accum_peak_pct,2)}%, écart {round(gap,3)}% x{widen_mult:.2f}, seuil {round(floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
             if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
                 # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
@@ -1932,7 +1920,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                     accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("ACCUMULATION_TRAILING_TP", "ACCUMULATION_TREND_END") else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TRAILING_TP" else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
@@ -4447,7 +4435,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
         "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
-        "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.3,
+        "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.15,
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
         "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
