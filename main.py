@@ -19,7 +19,8 @@ import httpx
 import time
 import math
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 # ── BASE DE DONNÉES ──────────────────────────────────────────
@@ -770,6 +771,44 @@ def init_db():
             user_id INTEGER,
             coin TEXT,
             min_confidence INTEGER NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY (user_id, coin)
+        )""")
+        conn.commit()
+    except: pass
+    try:
+        # Agrégats JOURNALIERS LIVE UNIQUEMENT, incrémentés à chaque clôture de trade live (voir
+        # close_trade) — JAMAIS purgés (contrairement aux lignes individuelles de paper_trades,
+        # supprimées après 72h). Sert de base à la hiérarchie Jour > Semaine > Mois > Année de
+        # l'onglet Bilan (live). Distinct de trading_sessions, qui mélange paper ET live.
+        conn.execute("""CREATE TABLE IF NOT EXISTS live_daily_stats (
+            user_id INTEGER,
+            day TEXT,
+            total INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            gains REAL DEFAULT 0,
+            pertes REAL DEFAULT 0,
+            net REAL DEFAULT 0,
+            PRIMARY KEY (user_id, day)
+        )""")
+        conn.commit()
+    except: pass
+    try:
+        # Agrégats PAR ACTIF, LIVE UNIQUEMENT, jamais purgés (même principe que live_daily_stats
+        # ci-dessus) — utilisé pour le classement par actif du Bilan ET pour la pénalité
+        # automatique de confiance (voir apply_live_confidence_penalty) : winrate cumulé à VIE
+        # sur le live, pas seulement sur les 72 dernières heures de paper_trades.
+        conn.execute("""CREATE TABLE IF NOT EXISTS live_coin_stats (
+            user_id INTEGER,
+            coin TEXT,
+            total INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            gains REAL DEFAULT 0,
+            pertes REAL DEFAULT 0,
+            net REAL DEFAULT 0,
+            total_minutes INTEGER DEFAULT 0,
             updated_at TEXT,
             PRIMARY KEY (user_id, coin)
         )""")
@@ -2286,6 +2325,34 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
     except Exception as e:
         print(f"⚠️ try_rapid_reentry error: {e}")
 
+LIVE_PENALTY_MIN_TRADES = 10        # échantillon minimum (live, à vie) avant d'appliquer la pénalité — évite le bruit sur un petit nombre de trades
+LIVE_PENALTY_WINRATE_THRESHOLD = 60  # % — sous ce winrate cumulé LIVE, pénalité automatique
+LIVE_PENALTY_MIN_CONFIDENCE = 75     # confiance minimale imposée par la pénalité automatique
+
+def apply_live_confidence_penalty(conn, user_id: int, coin: str):
+    """Pénalité automatique de confiance pour un actif LIVE sous-performant (Bilan > par actif) :
+    si le winrate cumulé À VIE en live (live_coin_stats, jamais purgé) tombe sous
+    LIVE_PENALTY_WINRATE_THRESHOLD (60%) avec un échantillon suffisant, impose un plancher de
+    confiance de LIVE_PENALTY_MIN_CONFIDENCE (75%) via coin_min_confidence.
+    Le max() ne redescend JAMAIS un plancher déjà plus strict — un actif déjà sanctionné (à la
+    main ou automatiquement) à 76% ou plus le reste tel quel. Et si le winrate remonte ensuite
+    au-dessus de 60%, la pénalité n'est PAS retirée automatiquement (même principe que les
+    sanctions manuelles ailleurs dans l'app : la récupération est signalée, jamais appliquée
+    d'office — voir recovering_sanctioned_coins) : à vous de la lever manuellement si voulu."""
+    row = conn.execute("SELECT total, wins FROM live_coin_stats WHERE user_id=? AND coin=?", (user_id, coin)).fetchone()
+    if not row or (row["total"] or 0) < LIVE_PENALTY_MIN_TRADES:
+        return
+    win_rate = (row["wins"] or 0) / max(row["total"], 1) * 100
+    if win_rate >= LIVE_PENALTY_WINRATE_THRESHOLD:
+        return
+    existing = conn.execute("SELECT min_confidence FROM coin_min_confidence WHERE user_id=? AND coin=?", (user_id, coin)).fetchone()
+    current = existing["min_confidence"] if existing else 0
+    new_floor = max(current, LIVE_PENALTY_MIN_CONFIDENCE)
+    if new_floor != current:
+        conn.execute("""INSERT OR REPLACE INTO coin_min_confidence (user_id, coin, min_confidence, updated_at)
+            VALUES (?,?,?,?)""", (user_id, coin, new_floor, datetime.utcnow().isoformat()))
+        conn.commit()
+
 async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, close_reason: str = None):
     """Bookkeeping post-fermeture (confiance dynamique + stats de session temps réel).
     À appeler après un manage_open_trade qui a retourné un résultat non-None.
@@ -2319,6 +2386,39 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
             conn.commit()
     except Exception:
         pass
+    # Agrégats LIVE UNIQUEMENT, persistants (jamais purgés) — INCRÉMENTÉS (pas recalculés depuis
+    # paper_trades) précisément parce que les lignes de plus de 72h y sont supprimées : un
+    # recalcul par SUM() perdrait de l'historique au fil du temps. Un seul trade = un seul
+    # appel ici, donc l'incrément (+1, +pnl) est fiable sans double comptage.
+    if trade.get("is_live"):
+        try:
+            day = trade.get("session_date") or (trade.get("opened_at") or "")[:10] or datetime.utcnow().strftime("%Y-%m-%d")
+            won_n = 1 if pnl > 0 else 0
+            lost_n = 1 if pnl <= 0 else 0
+            gain_amt = round(pnl, 2) if pnl > 0 else 0.0
+            loss_amt = round(pnl, 2) if pnl <= 0 else 0.0
+            conn.execute("""INSERT INTO live_daily_stats (user_id, day, total, wins, losses, gains, pertes, net)
+                VALUES (?,?,1,?,?,?,?,?)
+                ON CONFLICT(user_id, day) DO UPDATE SET
+                    total=total+1, wins=wins+excluded.wins, losses=losses+excluded.losses,
+                    gains=gains+excluded.gains, pertes=pertes+excluded.pertes, net=net+excluded.net""",
+                (user_id, day, won_n, lost_n, gain_amt, loss_amt, round(pnl, 2)))
+            try:
+                closed_at_val = trade.get("closed_at") or datetime.utcnow().isoformat()
+                minutes = int((datetime.fromisoformat(closed_at_val) - datetime.fromisoformat(trade["opened_at"])).total_seconds() / 60) if trade.get("opened_at") else 0
+            except Exception:
+                minutes = 0
+            conn.execute("""INSERT INTO live_coin_stats (user_id, coin, total, wins, losses, gains, pertes, net, total_minutes, updated_at)
+                VALUES (?,?,1,?,?,?,?,?,?,?)
+                ON CONFLICT(user_id, coin) DO UPDATE SET
+                    total=total+1, wins=wins+excluded.wins, losses=losses+excluded.losses,
+                    gains=gains+excluded.gains, pertes=pertes+excluded.pertes, net=net+excluded.net,
+                    total_minutes=total_minutes+excluded.total_minutes, updated_at=excluded.updated_at""",
+                (user_id, trade["coin"], won_n, lost_n, gain_amt, loss_amt, round(pnl, 2), minutes, datetime.utcnow().isoformat()))
+            conn.commit()
+            apply_live_confidence_penalty(conn, user_id, trade["coin"])
+        except Exception as e:
+            print(f"⚠️ live_daily_stats/live_coin_stats update error: {e}")
     # Ré-entrée rapide : uniquement après une sortie PROFITABLE du bot (pas manuelle,
     # pas après un Max Loss/SL — on ne "poursuit" pas une position qui vient de perdre)
     if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR"):
@@ -6159,121 +6259,167 @@ PENALIZING_MIN_TRADES = 10       # échantillon minimum avant de tirer une concl
 PENALIZING_WINRATE_THRESHOLD = 35  # % — sous ce winrate, signalé
 PENALIZING_NET_THRESHOLD = -3.0    # $ — net cumulé sous ce montant, signalé
 
+_MONTH_NAMES_FR = ["", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet",
+                   "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
+
+def build_live_calendar_hierarchy(daily_rows):
+    """Construit la hiérarchie Jour > Semaine > Mois > Année à partir des lignes de
+    live_daily_stats (agrégats LIVE persistants, jamais purgés). Chaque semaine est rattachée
+    au mois/année de son LUNDI de départ (pas du jour lui-même) — une semaine à cheval sur deux
+    mois apparaît donc entièrement sous le mois de son lundi, pour ne jamais la scinder en deux.
+    Tri du plus récent au plus ancien à chaque niveau."""
+    day_items = []
+    for r in daily_rows:
+        try:
+            d = datetime.strptime(r["day"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        day_items.append((d, r))
+
+    weeks_map = defaultdict(list)
+    for d, r in day_items:
+        monday = d - timedelta(days=d.weekday())
+        weeks_map[monday].append((d, r))
+
+    week_nodes = []
+    for monday, items in weeks_map.items():
+        sunday = monday + timedelta(days=6)
+        items_sorted = sorted(items, key=lambda x: x[0], reverse=True)
+        tot_total = tot_wins = tot_losses = 0
+        tot_net = tot_gains = tot_pertes = 0.0
+        days_out = []
+        for d, r in items_sorted:
+            total_j = r["total"] or 0
+            wins_j = r["wins"] or 0
+            losses_j = r["losses"] or 0
+            tot_total += total_j; tot_wins += wins_j; tot_losses += losses_j
+            tot_net += r["net"] or 0; tot_gains += r["gains"] or 0; tot_pertes += r["pertes"] or 0
+            days_out.append({
+                "day": d.isoformat(), "total": total_j, "wins": wins_j, "losses": losses_j,
+                "net": round(r["net"] or 0, 2), "gains": round(r["gains"] or 0, 2),
+                "pertes": round(r["pertes"] or 0, 2),
+                "win_rate": round(wins_j / max(total_j, 1) * 100, 1)
+            })
+        week_nodes.append({
+            "week_key": monday.isoformat(),
+            "label": f"Semaine du {monday.strftime('%d/%m')} au {sunday.strftime('%d/%m/%Y')}",
+            "month_key": f"{monday.year}-{monday.month:02d}",
+            "year_key": str(monday.year),
+            "trades": tot_total, "wins": tot_wins, "losses": tot_losses,
+            "net": round(tot_net, 2), "gains": round(tot_gains, 2), "pertes": round(tot_pertes, 2),
+            "win_rate": round(tot_wins / max(tot_total, 1) * 100, 1),
+            "days": days_out
+        })
+
+    months_map = defaultdict(list)
+    for w in week_nodes:
+        months_map[w["month_key"]].append(w)
+
+    month_nodes = []
+    for month_key, ws in months_map.items():
+        ws_sorted = sorted(ws, key=lambda w: w["week_key"], reverse=True)
+        tot_total = sum(w["trades"] for w in ws); tot_wins = sum(w["wins"] for w in ws)
+        tot_losses = sum(w["losses"] for w in ws); tot_net = sum(w["net"] for w in ws)
+        tot_gains = sum(w["gains"] for w in ws); tot_pertes = sum(w["pertes"] for w in ws)
+        month_num = int(month_key.split("-")[1])
+        month_nodes.append({
+            "month_key": month_key,
+            "label": f"{_MONTH_NAMES_FR[month_num]} {month_key.split('-')[0]}",
+            "year_key": ws[0]["year_key"],
+            "trades": tot_total, "wins": tot_wins, "losses": tot_losses,
+            "net": round(tot_net, 2), "gains": round(tot_gains, 2), "pertes": round(tot_pertes, 2),
+            "win_rate": round(tot_wins / max(tot_total, 1) * 100, 1),
+            "weeks": ws_sorted
+        })
+
+    years_map = defaultdict(list)
+    for m in month_nodes:
+        years_map[m["year_key"]].append(m)
+
+    year_nodes = []
+    for year_key, ms in years_map.items():
+        ms_sorted = sorted(ms, key=lambda m: m["month_key"], reverse=True)
+        tot_total = sum(m["trades"] for m in ms); tot_wins = sum(m["wins"] for m in ms)
+        tot_losses = sum(m["losses"] for m in ms); tot_net = sum(m["net"] for m in ms)
+        tot_gains = sum(m["gains"] for m in ms); tot_pertes = sum(m["pertes"] for m in ms)
+        year_nodes.append({
+            "year_key": year_key, "label": year_key,
+            "trades": tot_total, "wins": tot_wins, "losses": tot_losses,
+            "net": round(tot_net, 2), "gains": round(tot_gains, 2), "pertes": round(tot_pertes, 2),
+            "win_rate": round(tot_wins / max(tot_total, 1) * 100, 1),
+            "months": ms_sorted
+        })
+
+    year_nodes.sort(key=lambda y: y["year_key"], reverse=True)
+    return year_nodes
+
 @app.get("/api/bilan")
 def get_bilan(user_id: int = Depends(get_current_user)):
+    """Bilan — EXCLUSIVEMENT LIVE (le paper trading n'apparaît plus ici). Repose sur
+    live_daily_stats et live_coin_stats, deux agrégats persistants incrémentés à chaque clôture
+    de trade live (voir finalize_closed_trade) — jamais purgés, contrairement aux lignes
+    individuelles de paper_trades (supprimées après 72h). Conséquence : l'historique détaillé
+    (calendrier, classement par actif) ne couvre que les trades live clôturés APRÈS la mise en
+    place de ce système — rien n'est reconstitué rétroactivement pour les trades live antérieurs."""
     conn = get_db()
-    # Balance actuelle et initiale
-    portfolio = conn.execute("SELECT balance, initial_balance, reset_at FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
-    
-    # Stats aujourd'hui (UTC)
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    today_stats = conn.execute("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gains,
-            SUM(CASE WHEN pnl <= 0 THEN pnl ELSE 0 END) as pertes,
-            SUM(pnl) as net
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED' AND date(closed_at)=?
-    """, (user_id, today)).fetchone()
-    
-    # Stats totales depuis le début
-    # "Depuis le début" et "7 derniers jours" utilisent trading_sessions (agrégats quotidiens
-    # mis à jour en temps réel à chaque clôture) et PAS paper_trades directement — ces agrégats
-    # ne sont jamais purgés par le nettoyage à 72h, contrairement aux lignes de trades individuelles.
-    total_stats = conn.execute("""
-        SELECT
-            SUM(total_trades) as total,
-            SUM(wins) as wins,
-            SUM(losses) as losses,
-            SUM(CASE WHEN net_pnl > 0 THEN net_pnl ELSE 0 END) as gains,
-            SUM(CASE WHEN net_pnl < 0 THEN net_pnl ELSE 0 END) as pertes,
-            SUM(net_pnl) as net
-        FROM trading_sessions
-        WHERE user_id=?
-    """, (user_id,)).fetchone()
+    user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+    account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
 
-    # Trades ouverts PnL
+    real_total, real_available, balance_error = (None, None, "Aucun wallet Hyperliquid configuré")
+    if account_address:
+        real_total, real_available, balance_error = get_hl_balance_breakdown(account_address)
+
+    # PnL ouvert — trades LIVE ouverts uniquement
     open_pnl = conn.execute("""
-        SELECT SUM(pnl) as open_pnl, COUNT(*) as open_count, SUM(size_usdc) as open_margin
-        FROM paper_trades WHERE user_id=? AND status='OPEN'
+        SELECT SUM(pnl) as open_pnl, COUNT(*) as open_count
+        FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_live=1
     """, (user_id,)).fetchone()
 
-    # Stats par jour (7 derniers) — directement depuis trading_sessions (agrégats persistants,
-    # jamais purgés), pas depuis paper_trades (dont les lignes de plus de 72h sont supprimées)
-    daily = conn.execute("""
-        SELECT session_date as day, total_trades as total, wins, losses, net_pnl as net,
-            capital_start
-        FROM trading_sessions
-        WHERE user_id=?
-        ORDER BY session_date DESC LIMIT 7
-    """, (user_id,)).fetchall()
-    
-    # Stats par actif
-    by_coin = conn.execute("""
-        SELECT coin,
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(pnl) as net,
-            AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_gain,
-            AVG(CASE WHEN pnl <= 0 THEN pnl ELSE NULL END) as avg_loss,
-            SUM(CAST((julianday(closed_at) - julianday(opened_at)) * 24 * 60 AS INTEGER)) as total_minutes
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED'
-        GROUP BY coin
-        ORDER BY net DESC
-    """, (user_id,)).fetchall()
+    # Aujourd'hui — depuis live_daily_stats (persistant), pas paper_trades directement
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today_row = conn.execute("SELECT * FROM live_daily_stats WHERE user_id=? AND day=?", (user_id, today)).fetchone()
 
-    # Décision par actif : winrate/loss-rate + confiance moyenne du signal d'origine,
-    # séparément pour les trades gagnants et perdants — pour voir si la confiance est
-    # réellement prédictive pour ce coin (gagnants avec confiance nettement plus haute
-    # que les perdants = bon signe ; confiances similaires ou inversées = mauvais signe).
-    by_coin_confidence = conn.execute("""
-        SELECT pt.coin,
-            COUNT(*) as total,
-            SUM(CASE WHEN pt.pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pt.pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            AVG(CASE WHEN pt.pnl > 0 THEN s.confidence ELSE NULL END) as avg_conf_wins,
-            AVG(CASE WHEN pt.pnl <= 0 THEN s.confidence ELSE NULL END) as avg_conf_losses
-        FROM paper_trades pt
-        LEFT JOIN signals s ON pt.signal_id = s.id
-        WHERE pt.user_id=? AND pt.status='CLOSED'
-        GROUP BY pt.coin
-    """, (user_id,)).fetchall()
+    # Total à vie — somme de tous les jours live_daily_stats
+    total_row = conn.execute("""
+        SELECT SUM(total) as total, SUM(wins) as wins, SUM(losses) as losses,
+            SUM(gains) as gains, SUM(pertes) as pertes, SUM(net) as net
+        FROM live_daily_stats WHERE user_id=?
+    """, (user_id,)).fetchone()
 
-    # Stats par heure de la journée (UTC, heure d'OUVERTURE du trade) — quelles heures sont productives
-    by_hour = conn.execute("""
-        SELECT CAST(strftime('%H', opened_at) AS INTEGER) as hour,
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(pnl) as net
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED' AND opened_at IS NOT NULL
-        GROUP BY hour
-        ORDER BY hour ASC
-    """, (user_id,)).fetchall()
+    # Calendrier Jour > Semaine > Mois > Année
+    daily_rows = conn.execute("SELECT * FROM live_daily_stats WHERE user_id=? ORDER BY day ASC", (user_id,)).fetchall()
+    calendar_years = build_live_calendar_hierarchy(daily_rows)
 
-    # Croisement actif × heure — uniquement pour les paires avec au moins 3 trades (évite le bruit
-    # statistique sur des échantillons trop petits)
-    by_coin_hour = conn.execute("""
-        SELECT coin, CAST(strftime('%H', opened_at) AS INTEGER) as hour,
-            COUNT(*) as total,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(pnl) as net
-        FROM paper_trades
-        WHERE user_id=? AND status='CLOSED' AND opened_at IS NOT NULL
-        GROUP BY coin, hour
-        HAVING COUNT(*) >= 3
-        ORDER BY net DESC
-    """, (user_id,)).fetchall()
+    # Classement par actif — live_coin_stats (persistant, à vie), du plus performant (net $ le
+    # plus haut) au moins performant. Chaque coin sous LIVE_PENALTY_WINRATE_THRESHOLD (60%) avec
+    # assez de trades (LIVE_PENALTY_MIN_TRADES) est marqué "penalized" — le plancher de confiance
+    # réel appliqué (coin_min_confidence) est joint pour affichage.
+    coin_rows = conn.execute("SELECT * FROM live_coin_stats WHERE user_id=? ORDER BY net DESC", (user_id,)).fetchall()
+    overrides_map = {o["coin"]: o["min_confidence"] for o in
+                      conn.execute("SELECT coin, min_confidence FROM coin_min_confidence WHERE user_id=?", (user_id,)).fetchall()}
 
-    # Coins sanctionnés (plancher de confiance manuel) dont les stats DEPUIS la sanction
-    # sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, rien n'est retiré automatiquement.
-    # (calculé AVANT conn.close() plus bas, sans quoi ces requêtes échoueraient)
+    by_coin = []
+    for r in coin_rows:
+        total_c = r["total"] or 0
+        wins_c = r["wins"] or 0
+        win_rate_c = round(wins_c / max(total_c, 1) * 100, 1)
+        penalized = total_c >= LIVE_PENALTY_MIN_TRADES and win_rate_c < LIVE_PENALTY_WINRATE_THRESHOLD
+        h = (r["total_minutes"] or 0) // 60
+        m = (r["total_minutes"] or 0) % 60
+        by_coin.append({
+            "coin": r["coin"], "total": total_c, "wins": wins_c, "losses": r["losses"] or 0,
+            "net": round(r["net"] or 0, 2),
+            "avg_gain": round((r["gains"] or 0) / max(wins_c, 1), 2) if wins_c else 0,
+            "avg_loss": round((r["pertes"] or 0) / max(r["losses"] or 0, 1), 2) if r["losses"] else 0,
+            "win_rate": win_rate_c,
+            "total_minutes": int(r["total_minutes"] or 0),
+            "penalized": penalized,
+            "min_confidence_applied": overrides_map.get(r["coin"], 0)
+        })
+
+    # Coins sanctionnés (plancher de confiance, manuel OU automatique) dont les stats DEPUIS la
+    # sanction sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, la pénalité n'est jamais retirée
+    # d'office (à faire manuellement via /api/coins/min-confidence si voulu).
     recovering_sanctioned_coins = []
     overrides = conn.execute("SELECT coin, min_confidence, updated_at FROM coin_min_confidence WHERE user_id=?", (user_id,)).fetchall()
     for o in overrides:
@@ -6282,7 +6428,7 @@ def get_bilan(user_id: int = Depends(get_current_user)):
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(pnl) as net
             FROM paper_trades
-            WHERE user_id=? AND coin=? AND status='CLOSED' AND closed_at > ?
+            WHERE user_id=? AND coin=? AND status='CLOSED' AND is_live=1 AND closed_at > ?
         """, (user_id, o["coin"], o["updated_at"])).fetchone()
         total = s["total"] or 0
         if total >= RECOVERY_MIN_TRADES:
@@ -6295,91 +6441,43 @@ def get_bilan(user_id: int = Depends(get_current_user)):
                 })
 
     conn.close()
-    
-    balance = portfolio["balance"] if portfolio else 1000
-    initial = portfolio["initial_balance"] if portfolio else 1000
-    open_margin = open_pnl["open_margin"] or 0
+
     open_pnl_val = open_pnl["open_pnl"] or 0
-    total_capital = balance + open_margin + open_pnl_val
-    
+    open_count = open_pnl["open_count"] or 0
+    total_capital = (real_total or 0) + open_pnl_val
+
     return {
-        "balance": round(balance, 2),
-        "initial_balance": round(initial, 2),
-        "total_capital": round(total_capital, 2),
-        "performance_pct": round((total_capital - initial) / initial * 100, 2),
+        "live_only": True,
+        "balance_error": balance_error,
+        "balance": round(real_available, 2) if real_available is not None else None,
+        "total_capital": round(real_total, 2) if real_total is not None else None,
         "open_pnl": round(open_pnl_val, 2),
-        "open_count": open_pnl["open_count"] or 0,
-        "reset_at": portfolio["reset_at"] if portfolio and portfolio["reset_at"] else None,
+        "open_count": open_count,
         "today": {
-            "total": today_stats["total"] or 0,
-            "wins": today_stats["wins"] or 0,
-            "losses": today_stats["losses"] or 0,
-            "gains": round(today_stats["gains"] or 0, 2),
-            "pertes": round(today_stats["pertes"] or 0, 2),
-            "net": round(today_stats["net"] or 0, 2),
-            "win_rate": round((today_stats["wins"] or 0) / max(today_stats["total"] or 1, 1) * 100, 1)
+            "total": today_row["total"] if today_row else 0,
+            "wins": today_row["wins"] if today_row else 0,
+            "losses": today_row["losses"] if today_row else 0,
+            "gains": round(today_row["gains"], 2) if today_row else 0,
+            "pertes": round(today_row["pertes"], 2) if today_row else 0,
+            "net": round(today_row["net"], 2) if today_row else 0,
+            "win_rate": round((today_row["wins"] if today_row else 0) / max(today_row["total"] if today_row else 1, 1) * 100, 1)
         },
         "total": {
-            "total": total_stats["total"] or 0,
-            "wins": total_stats["wins"] or 0,
-            "losses": total_stats["losses"] or 0,
-            "gains": round(total_stats["gains"] or 0, 2),
-            "pertes": round(total_stats["pertes"] or 0, 2),
-            "net": round(total_stats["net"] or 0, 2),
-            "win_rate": round((total_stats["wins"] or 0) / max(total_stats["total"] or 1, 1) * 100, 1)
+            "total": total_row["total"] or 0,
+            "wins": total_row["wins"] or 0,
+            "losses": total_row["losses"] or 0,
+            "gains": round(total_row["gains"] or 0, 2),
+            "pertes": round(total_row["pertes"] or 0, 2),
+            "net": round(total_row["net"] or 0, 2),
+            "win_rate": round((total_row["wins"] or 0) / max(total_row["total"] or 1, 1) * 100, 1)
         },
-        "daily": [{
-            **dict(r),
-            "pct": round((r["net"] or 0) / r["capital_start"] * 100, 2) if r["capital_start"] else 0
-        } for r in daily],
-        "by_coin": [{
-            "coin": r["coin"],
-            "total": r["total"],
-            "wins": r["wins"],
-            "losses": r["losses"],
-            "net": round(r["net"] or 0, 2),
-            "avg_gain": round(r["avg_gain"] or 0, 2),
-            "avg_loss": round(r["avg_loss"] or 0, 2),
-            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
-            "total_minutes": int(r["total_minutes"] or 0)
-        } for r in by_coin],
-        "decision_matrix": [{
-            "coin": r["coin"],
-            "total": r["total"],
-            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
-            "loss_rate": round((r["losses"] or 0) / max(r["total"] or 1, 1) * 100, 1),
-            "avg_conf_wins": round(r["avg_conf_wins"], 1) if r["avg_conf_wins"] is not None else None,
-            "avg_conf_losses": round(r["avg_conf_losses"], 1) if r["avg_conf_losses"] is not None else None
-        } for r in by_coin_confidence],
-        "by_hour": [{
-            "hour": r["hour"],
-            "total": r["total"],
-            "wins": r["wins"],
-            "losses": r["losses"],
-            "net": round(r["net"] or 0, 2),
-            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1)
-        } for r in by_hour],
-        "by_coin_hour": [{
-            "coin": r["coin"],
-            "hour": r["hour"],
-            "total": r["total"],
-            "wins": r["wins"],
-            "net": round(r["net"] or 0, 2),
-            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1)
-        } for r in by_coin_hour],
-        # Actifs pénalisants — SIGNALEMENT UNIQUEMENT, ne bloque rien automatiquement.
-        # Seuils : minimum 10 trades (évite le bruit statistique), winrate <35% ET net <-3$ (combinés).
-        "penalizing_coins": [{
-            "coin": r["coin"],
-            "total": r["total"],
-            "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1),
-            "net": round(r["net"] or 0, 2)
-        } for r in by_coin
-          if (r["total"] or 0) >= PENALIZING_MIN_TRADES
-          and ((r["wins"] or 0) / max(r["total"] or 1, 1) * 100) < PENALIZING_WINRATE_THRESHOLD
-          and (r["net"] or 0) < PENALIZING_NET_THRESHOLD],
-        # Coins sanctionnés (plancher de confiance manuel) dont les stats DEPUIS la sanction
-        # sont redevenues bonnes — SIGNALEMENT UNIQUEMENT, rien n'est retiré automatiquement.
+        "calendar": calendar_years,
+        "by_coin": by_coin,
+        "penalty_rules": {
+            "min_trades": LIVE_PENALTY_MIN_TRADES,
+            "winrate_threshold": LIVE_PENALTY_WINRATE_THRESHOLD,
+            "min_confidence_imposed": LIVE_PENALTY_MIN_CONFIDENCE
+        },
         "recovering_sanctioned_coins": recovering_sanctioned_coins
     }
 
