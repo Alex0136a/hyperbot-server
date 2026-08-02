@@ -1353,7 +1353,8 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
                       leverage: int, cur_price: float, max_loss_pct: float, safety_sl_multiplier: float = 5.0):
     """Ouvre une position réelle sur Hyperliquid (market order) puis pose un SL de sécurité
     (trigger order, reduce_only) sur l'exchange — filet en cas de défaillance du bot.
-    Retourne (coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison) ou lève une exception.
+    Retourne (coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison,
+    taille_ajustee_min_raison, size_usdc_effectif) ou lève une exception.
     sl_echec_raison est None si le SL a été posé avec succès, sinon la raison de l'échec — la
     position reste ouverte même si le SL échoue (ce n'est qu'un filet de secours), mais
     l'appelant doit journaliser cette raison de façon visible plutôt que de la laisser en silence.
@@ -1390,6 +1391,25 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
 
     # Taille recalculée avec le levier RÉELLEMENT appliqué (pas celui demandé au départ) —
     # garantit que la marge engagée correspond toujours à size_usdc, peu importe le levier.
+    # BUG CORRIGÉ : Hyperliquid rejette tout ordre dont la valeur notionnelle (marge × levier)
+    # est sous 10$ ("Order must have minimum value of $10") — observé concrètement sur des
+    # tailles Accumulation/petits comptes calculées sous ce plancher. Plutôt que de laisser
+    # échouer l'ouverture, la MARGE est relevée au minimum requis (10$ ÷ levier réel, avec une
+    # petite marge de 0.50$ pour absorber l'arrondi de coin_size) — jamais le levier, qui reste
+    # celui décidé par l'IA/les règles. taille_ajustee_min_raison est None si aucun ajustement
+    # n'a été nécessaire, sinon le détail à journaliser côté appelant (traçabilité).
+    HL_MIN_NOTIONAL_USD = 10.0
+    HL_MIN_NOTIONAL_BUFFER_USD = 0.50  # cushion contre l'arrondi de coin_size qui repasserait sous 10$
+    taille_ajustee_min_raison = None
+    notional = size_usdc * levier_reel
+    if notional < HL_MIN_NOTIONAL_USD + HL_MIN_NOTIONAL_BUFFER_USD:
+        size_usdc_originale = size_usdc
+        size_usdc = round((HL_MIN_NOTIONAL_USD + HL_MIN_NOTIONAL_BUFFER_USD) / levier_reel, 2)
+        taille_ajustee_min_raison = (
+            f"marge relevée de {size_usdc_originale}$ à {size_usdc}$ (valeur notionnelle "
+            f"{round(notional,2)}$ < minimum Hyperliquid 10$, levier x{levier_reel} inchangé)"
+        )
+
     coin_size = round((size_usdc * levier_reel) / cur_price, size_decimals)
     if coin_size <= 0:
         raise ValueError("Taille de position calculée nulle ou négative")
@@ -1455,7 +1475,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     except Exception as e:
         sl_echec_raison = str(e)
 
-    return coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison
+    return coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_usdc
 
 def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
     """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé.
@@ -2668,20 +2688,10 @@ async def scan_markets(user_id: int):
                     should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
                     channel_pct = (resistance - support) / support * 100 if support and resistance else 0
-                    min_channel_pct = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0
                     if support is None:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
-                    elif resistance is not None and channel_pct < min_channel_pct:
-                        # Canal trop étroit (< 2%) entre support et résistance — structurellement
-                        # trop peu de marge de mouvement possible, même si tout le reste
-                        # (retournement confirmé) s'aligne. Observé concrètement : plusieurs
-                        # trades Accumulation avec un pic de seulement 0.3-0.6%, faute de place
-                        # entre les deux niveaux dès le départ.
-                        if should_log_diag:
-                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support proche, mais canal trop étroit ({channel_pct:.1f}% < {min_channel_pct}%) — pas assez de marge de mouvement, pas d'achat", "info")
                     else:
                         near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
                         if not near_support:
@@ -2726,17 +2736,10 @@ async def scan_markets(user_id: int):
                     should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
                     channel_pct_short = (resistance - support) / support * 100 if support and resistance else 0
-                    min_channel_pct_short = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0
                     if resistance is None:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT Accumulation, mais aucune résistance détectée à proximité — pas de vente", "info")
-                    elif support is not None and channel_pct_short < min_channel_pct_short:
-                        # Miroir LONG : canal trop étroit (< 2%) entre support et résistance —
-                        # pas assez de marge de mouvement structurelle.
-                        if should_log_diag_short:
-                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance proche, mais canal trop étroit ({channel_pct_short:.1f}% < {min_channel_pct_short}%) — pas assez de marge de mouvement, pas de vente", "info")
                     else:
                         near_resistance = abs(price - resistance) / resistance * 100 <= 1.0  # tolérance 1%
                         if not near_resistance:
@@ -3184,9 +3187,11 @@ async def scan_markets(user_id: int):
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 0.31
                             safety_mult = cfg_ml["hl_safety_sl_multiplier"] if cfg_ml and "hl_safety_sl_multiplier" in cfg_ml.keys() and cfg_ml["hl_safety_sl_multiplier"] else 5.0
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val, safety_mult)
+                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val, safety_mult)
                             if repli_raison:
                                 add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
+                            if taille_ajustee_min_raison:
+                                add_bot_log(user_id, f"📐 {coin}: {taille_ajustee_min_raison}", "warning")
                             if sl_echec_raison:
                                 add_bot_log(user_id, f"⛔ {coin}: SL de sécurité NON posé sur Hyperliquid ({sl_echec_raison}) — position ouverte SANS ce filet, surveillance logicielle uniquement", "error")
                             # entry_price = prix de fill réel renvoyé par Hyperliquid (pas une estimation locale
@@ -3197,7 +3202,7 @@ async def scan_markets(user_id: int):
                                 size_usdc, leverage, stop_loss, take_profit1, take_profit2, signal_id, opened_at,
                                 session_date, is_live, hl_sl_oid, hl_size)
                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
-                            """, (user_id, coin, ai["action"], entry_price, fill_price, size,
+                            """, (user_id, coin, ai["action"], entry_price, fill_price, size_effective,
                                    levier_reel, ai.get("stopLoss"),
                                    ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                                    datetime.utcnow().isoformat(),
@@ -5205,12 +5210,14 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
         try:
-            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
+            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
         except Exception as e:
             conn.close()
             raise ValueError(f"Échec ouverture live: {e}")
         if repli_raison:
             add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
+        if taille_ajustee_min_raison:
+            add_bot_log(user_id, f"📐 {coin}: {taille_ajustee_min_raison}", "warning")
         if sl_echec_raison:
             add_bot_log(user_id, f"⛔ {coin}: SL de sécurité NON posé sur Hyperliquid ({sl_echec_raison}) — position ouverte SANS ce filet, surveillance logicielle uniquement", "error")
         conn.execute("""INSERT INTO paper_trades (user_id, coin, action, entry_price, current_price,
@@ -5220,7 +5227,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
             custom_take_profit_pct, accumulation_channel_pct)
             VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (user_id, coin, action, fill_price, fill_price, size_usdc, levier_reel,
+            (user_id, coin, action, fill_price, fill_price, size_effective, levier_reel,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
