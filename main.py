@@ -2267,8 +2267,10 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
         max_trades = cfg["max_open_trades"] if "max_open_trades" in cfg.keys() and cfg["max_open_trades"] else 5
         portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
         capital = portfolio["balance"] if portfolio else 1000.0
-        alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
-        size = round((capital * alloc_pct / 100) / max_trades, 2)
+        # Taille = 50% du capital (fixe) ÷ nombre de trades simultanés max du bot principal —
+        # remplace l'ancienne formule basée sur capital_allocation_pct (configurable), qui
+        # produisait des tailles imprévisibles/trop petites selon le réglage du compte.
+        size = round((capital * 0.50) / max_trades, 2)
         if not portfolio or portfolio["balance"] < size:
             return
 
@@ -3103,15 +3105,14 @@ async def scan_markets(user_id: int):
                 open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
-                # Taille = (capital total × % alloué) ÷ nombre de trades simultanés max — pour
-                # engager le capital réellement disponible (réserve non touchée) si tous les
-                # slots sont utilisés, en compound sur le solde courant (pas un capital initial
-                # fixe). Sans plafond de sécurité supplémentaire (Max Loss/QP + arrêt manuel jugés suffisants).
+                # Taille = 50% du capital (fixe) ÷ nombre de trades simultanés max — remplace
+                # l'ancienne formule basée sur capital_allocation_pct (configurable), qui
+                # produisait des tailles imprévisibles selon le réglage du compte. Compound sur
+                # le solde courant (pas un capital initial fixe), garde 50% en réserve non touchée.
                 portfolio_now = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 capital = portfolio_now["balance"] if portfolio_now else 1000.0
-                alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
-                size = round((capital * alloc_pct / 100) / max_trades, 2)
-                add_bot_log(user_id, f"📐 Taille trade: {size} USDC ({alloc_pct}% de {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
+                size = round((capital * 0.50) / max_trades, 2)
+                add_bot_log(user_id, f"📐 Taille trade: {size} USDC (50% de {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
                 # Verifier si coin deja en position ouverte
                 coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
@@ -3170,11 +3171,13 @@ async def scan_markets(user_id: int):
                 else:
                     open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
-                    # Taille = (capital réel Hyperliquid × % alloué) ÷ nombre de trades simultanés
-                    # max — même formule qu'en paper, sans plafond de sécurité supplémentaire.
+                    # Taille = 50% du capital réel Hyperliquid (fixe) ÷ nombre de trades simultanés
+                    # max — remplace l'ancienne formule basée sur capital_allocation_pct
+                    # (configurable), qui produisait des tailles imprévisibles/trop petites selon
+                    # le réglage du compte (voir bug observé : trades relevés au strict minimum
+                    # Hyperliquid de 10$ notionnels au lieu d'une taille reflétant le vrai capital).
                     capital = get_hl_account_value(account_address)
-                    alloc_pct = cfg["capital_allocation_pct"] if "capital_allocation_pct" in cfg.keys() and cfg["capital_allocation_pct"] else 100.0
-                    size = round((capital * alloc_pct / 100) / max_trades, 2) if capital > 0 else 0.0
+                    size = round((capital * 0.50) / max_trades, 2) if capital > 0 else 0.0
                     coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
                     same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
