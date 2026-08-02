@@ -321,6 +321,16 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Tolérance de proximité (%) entre le prix actuel et le support/résistance détecté pour
+        # considérer un candidat Accumulation "assez proche" du niveau — auparavant codée en dur
+        # à 1.0%, ce qui rejetait silencieusement des candidats où RSI + niveau étaient réunis
+        # mais le prix à peine trop loin au moment précis du scan (~3min). Réglable désormais :
+        # l'élargir (ex: 2-3%) augmente la fréquence des opportunités détectées, au prix d'une
+        # entrée un peu moins précisément collée au niveau.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
         # Fenêtre de cooldown (minutes) après une perte sur un coin — pendant cette fenêtre,
         # une confirmation de mouvement (bougie dans le bon sens) est exigée en plus de la
         # confiance normale, plutôt que d'appliquer cette exigence à tous les coins.
@@ -2693,12 +2703,13 @@ async def scan_markets(user_id: int):
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
                     else:
-                        near_support = abs(price - support) / support * 100 <= 1.0  # tolérance 1%
+                        accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                        near_support = abs(price - support) / support * 100 <= accum_proximity_pct
                         if not near_support:
                             if should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                                 dist_pct = abs(price - support) / support * 100
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette, support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}%) — pas d'achat", "info")
+                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette, support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct}%) — pas d'achat", "info")
                         else:
                             # Remplace la couleur de bougie (figée, jusqu'à 15 min de retard) par
                             # le prix RÉEL en continu — le prix peut bouger de plus de 2% dans
@@ -2741,12 +2752,13 @@ async def scan_markets(user_id: int):
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT Accumulation, mais aucune résistance détectée à proximité — pas de vente", "info")
                     else:
-                        near_resistance = abs(price - resistance) / resistance * 100 <= 1.0  # tolérance 1%
+                        accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                        near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
                         if not near_resistance:
                             if should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                                 dist_pct = abs(price - resistance) / resistance * 100
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT, résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}%) — pas de vente", "info")
+                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT, résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct_short}%) — pas de vente", "info")
                         else:
                             # Miroir du LONG : compare le prix actuel au plus haut récent (3
                             # dernières bougies) pour confirmer un rebond baissier réel, sans
@@ -4334,6 +4346,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_exit_tolerance_min_pct: Optional[float] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
     accumulation_min_channel_pct: Optional[float] = None
+    accumulation_proximity_pct: Optional[float] = None
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_rsi_min: Optional[float] = None
     accumulation_rsi_max: Optional[float] = None
@@ -4509,6 +4522,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.15,
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
         "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0,
+        "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
@@ -4649,6 +4663,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_ratio=? WHERE user_id=?", (req.accumulation_exit_tolerance_ratio, user_id))
     if req.accumulation_min_channel_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_min_channel_pct=? WHERE user_id=?", (req.accumulation_min_channel_pct, user_id))
+    if req.accumulation_proximity_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_proximity_pct=? WHERE user_id=?", (req.accumulation_proximity_pct, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
     if req.accumulation_rsi_min is not None:
