@@ -612,6 +612,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plancher de PnL% armé dès le premier toucher du niveau CIBLE (résistance pour un
+        # LONG, support pour un SHORT — l'objectif naturel de la stratégie de range). NULL =
+        # pas encore touché. Une fois armé, ce plancher ne redescend jamais et le trade continue
+        # de courir au-delà (trailing normal) — c'est un minimum garanti, pas une clôture forcée.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN accumulation_target_touched_pct REAL")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN custom_max_loss_pct REAL")
         conn.commit()
     except: pass
@@ -1870,6 +1878,33 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             accum_peak_pct = pnl_pct_live
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
 
+        # Toucher du niveau CIBLE (opposé au niveau d'entrée) — résistance pour un LONG, support
+        # pour un SHORT : l'objectif naturel de la stratégie de range. Dès le premier toucher
+        # (même marge de confirmation que la rupture, accumulation_breakdown_buffer_pct), un
+        # plancher de PnL% est armé et MÉMORISÉ À VIE sur le trade (colonne dédiée, jamais
+        # redescendu) — mais ce n'est PAS une clôture forcée : le trade continue de courir
+        # au-delà si le mouvement se poursuit, avec le trailing progressif habituel par-dessus.
+        target_touched_floor = float(trade["accumulation_target_touched_pct"]) if trade.get("accumulation_target_touched_pct") is not None else None
+        if target_touched_floor is None and not accum_close_reason:
+            target_level_raw = trade.get("accumulation_support_price") if is_short_accum else trade.get("accumulation_resistance_price")
+            if target_level_raw:
+                cfg_buf_target = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                buf_pct_target = cfg_buf_target["accumulation_breakdown_buffer_pct"] if cfg_buf_target and "accumulation_breakdown_buffer_pct" in cfg_buf_target.keys() and cfg_buf_target["accumulation_breakdown_buffer_pct"] else 1.0
+                target_level = float(target_level_raw)
+                # Marge appliquée VERS l'intérieur (contrairement à la rupture, qui exige un
+                # dépassement) : on considère le niveau "touché" un peu avant l'atteinte exacte,
+                # pour ne pas rater le toucher entre deux cycles de vérification.
+                target_touched_now = (
+                    (not is_short_accum and cur >= target_level * (1 - buf_pct_target / 100)) or
+                    (is_short_accum and cur <= target_level * (1 + buf_pct_target / 100))
+                )
+                if target_touched_now:
+                    target_touched_floor = pnl_pct_live
+                    conn.execute("UPDATE paper_trades SET accumulation_target_touched_pct=? WHERE id=?",
+                                 (target_touched_floor, trade["id"]))
+                    niveau_label = "support" if is_short_accum else "résistance"
+                    add_bot_log(user_id, f"🎯 {trade['coin']}: niveau cible ({niveau_label} ${target_level:.4g}) touché — plancher de gain verrouillé à {round(target_touched_floor,2)}% (+{round(pnl,2)} USDC), le trade continue de courir au-delà", "success")
+
         if accum_close_reason:
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
         else:
@@ -1888,13 +1923,27 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             trigger = min_pic_pre_armement  # déclencheur, réutilise le même réglage (0.15% par défaut)
             trail_widen_max_mult = 3.0
 
+            trailing_floor = None
+            widen_mult = None
+            gap = None
             if accum_peak_pct > trigger:
                 widen_mult = min(trail_widen_max_mult, 1 + (accum_peak_pct - trigger) / trigger)
                 gap = base_gap * widen_mult
-                floor = accum_peak_pct - gap
-                if pnl_pct_live <= floor:
+                trailing_floor = accum_peak_pct - gap
+
+            # Plancher effectif = le plus protecteur des deux : le trailing progressif normal,
+            # ET le plancher armé au toucher du niveau cible (qui, lui, ne redescend jamais).
+            effective_floor = trailing_floor
+            if target_touched_floor is not None:
+                effective_floor = target_touched_floor if effective_floor is None else max(effective_floor, target_touched_floor)
+
+            if effective_floor is not None and pnl_pct_live <= effective_floor:
+                if target_touched_floor is not None and target_touched_floor >= (trailing_floor if trailing_floor is not None else float("-inf")):
+                    accum_close_reason = "ACCUMULATION_TARGET_TOUCH_TP"
+                    accum_log_msg = f"🎯🔒 {trade['coin']}: retour sous le plancher verrouillé au toucher de la cible ({round(target_touched_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                else:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Trailing progressif touché (pic {round(accum_peak_pct,2)}%, écart {round(gap,3)}% x{widen_mult:.2f}, seuil {round(floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                    accum_log_msg = f"🔒 {trade['coin']}: Trailing progressif touché (pic {round(accum_peak_pct,2)}%, écart {round(gap,3)}% x{widen_mult:.2f}, seuil {round(trailing_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
             if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
                 # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
@@ -2659,7 +2708,7 @@ async def scan_markets(user_id: int):
                             if reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed:
-                                accumulation_candidates.append({"coin": coin, "support": support, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
+                                accumulation_candidates.append({"coin": coin, "support": support, "resistance": resistance, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
                             elif should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                                 raison = "pas encore de rebond confirmé depuis le plus bas récent" if not price_bouncing_up else "RSI ne remonte pas encore et MACD pas haussier"
@@ -2711,7 +2760,7 @@ async def scan_markets(user_id: int):
                             if reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed_short:
-                                accumulation_candidates.append({"coin": coin, "resistance": resistance, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
+                                accumulation_candidates.append({"coin": coin, "resistance": resistance, "support": support, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
                             elif should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                                 raison_short = "pas encore de rebond baissier confirmé depuis le plus haut récent" if not price_bouncing_down else "RSI ne redescend pas encore et MACD pas baissier"
@@ -2983,14 +3032,23 @@ async def scan_markets(user_id: int):
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
                 accum_leverage = (config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2) if is_short_cand else 1
                 try:
+                    # Les DEUX niveaux sont mémorisés sur le trade (pas seulement celui proche de
+                    # l'entrée) : le niveau opposé sert de CIBLE de prise de profit (résistance
+                    # pour un LONG, support pour un SHORT — voir ACCUMULATION_TARGET_TOUCH dans
+                    # manage_open_trade). cand.get(...) peut être None si non calculé ce cycle ;
+                    # dans ce cas le toucher de cible ne s'armera simplement jamais pour ce trade.
                     if is_short_cand:
                         message, _ = execute_manual_trade(user_id, coin, "SHORT", accum_size, accum_leverage, {},
                                                             is_accumulation=True, accumulation_target_pct=accum_target,
-                                                            accumulation_resistance_price=level_c, accumulation_channel_pct=channel_pct_c, is_manual=False)
+                                                            accumulation_resistance_price=level_c,
+                                                            accumulation_support_price=cand.get("support"),
+                                                            accumulation_channel_pct=channel_pct_c, is_manual=False)
                     else:
                         message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
                                                             is_accumulation=True, accumulation_target_pct=accum_target,
-                                                            accumulation_support_price=level_c, accumulation_channel_pct=channel_pct_c, is_manual=False)
+                                                            accumulation_support_price=level_c,
+                                                            accumulation_resistance_price=cand.get("resistance"),
+                                                            accumulation_channel_pct=channel_pct_c, is_manual=False)
                     priority_tag = "priorité top-10" if coin in accumulation_top_coins else "hors top-10"
                     niveau_label = "résistance" if is_short_cand else "support"
                     add_bot_log(user_id, f"🤖💰 Accumulation auto {cand_action} ({priority_tag}): {message} (RSI {rsi_c:.1f}, {niveau_label} ${level_c:.4g}, retournement confirmé)", "success")
