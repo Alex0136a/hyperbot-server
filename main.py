@@ -288,6 +288,12 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Levier dédié à l'Accumulation LONG (achat au support) — auparavant figé à x1 en dur,
+        # jamais configurable ; miroir du levier SHORT (accumulation_short_leverage) déjà réglable.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_long_leverage INTEGER DEFAULT 2")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_short_rsi_min REAL DEFAULT 60.0")
         conn.commit()
     except: pass
@@ -2621,6 +2627,8 @@ async def scan_markets(user_id: int):
         # aucune restriction n'est appliquée (pas encore assez de recul).
         accumulation_top_coins = top_performing_coins if config and config["accumulation_enabled"] else []
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
+        accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
+        accum_short_in_range_count = 0  # idem SHORT
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -2792,6 +2800,7 @@ async def scan_markets(user_id: int):
                 accum_rsi_min = config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0
                 accum_rsi_max = config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0
                 if accum_rsi_min <= rsi < accum_rsi_max:
+                    accum_long_in_range_count += 1
                     # RSI dans la bonne fourchette — diagnostic détaillé de pourquoi ça achète
                     # ou non, pour ne plus jamais avoir à deviner après coup (limité à 1 log
                     # par coin toutes les 2h pour ne pas noyer les logs).
@@ -2844,6 +2853,7 @@ async def scan_markets(user_id: int):
                 accum_short_rsi_min = config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0
                 accum_short_rsi_max = config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0
                 if accum_short_rsi_min <= rsi < accum_short_rsi_max:
+                    accum_short_in_range_count += 1
                     diag_key_short = (user_id, coin, "SHORT")
                     last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
                     should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
@@ -3101,6 +3111,25 @@ async def scan_markets(user_id: int):
         # à effet de levier, où le timing d'entrée compte énormément. L'Accumulation, sans
         # levier et patiente par conception, n'a pas la même sensibilité : un bon support
         # détecté à 3h du matin reste un bon support, peu importe l'heure.
+        # Résumé périodique d'état — indépendant de la découverte d'un candidat : confirme que
+        # l'Accumulation tourne bel et bien (LONG/SHORT actifs, coins actuellement en zone RSI,
+        # positions déjà ouvertes) même quand aucun candidat ne remplit toutes les conditions ce
+        # cycle-ci. Les logs de diagnostic par coin (ci-dessus) ne sortent QUE si le RSI d'un
+        # coin précis tombe dans la fourchette Accumulation — sans ça, silence total qui peut
+        # donner l'impression (à tort) que la fonctionnalité est éteinte ou cassée.
+        if config and (config["accumulation_enabled"] or config["accumulation_short_enabled"]):
+            last_summary = accumulation_summary_log_cache.get(user_id)
+            if not last_summary or (datetime.utcnow() - last_summary).total_seconds() >= ACCUMULATION_SUMMARY_COOLDOWN_MINUTES * 60:
+                accumulation_summary_log_cache[user_id] = datetime.utcnow()
+                open_accum_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)).fetchone()[0]
+                add_bot_log(user_id,
+                    f"💰 Accumulation — LONG {'ON' if config['accumulation_enabled'] else 'OFF'} "
+                    f"({accum_long_in_range_count} coin(s) en zone RSI survente) · "
+                    f"SHORT {'ON' if config['accumulation_short_enabled'] else 'OFF'} "
+                    f"({accum_short_in_range_count} coin(s) en zone RSI surachat) · "
+                    f"{open_accum_count} position(s) ouverte(s) — scan actif, en attente d'un support/résistance proche + retournement confirmé",
+                    "info")
+
         if accumulation_candidates and config and (config["accumulation_enabled"] or config["accumulation_short_enabled"]):
             accumulation_candidates.sort(key=lambda c: 0 if c["coin"] in accumulation_top_coins else 1)
             for cand in accumulation_candidates:
@@ -3147,7 +3176,9 @@ async def scan_markets(user_id: int):
                 alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
                 accum_size = round((capital_disponible * alloc_pct / 100 * 0.5) / max_pos, 2)
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
-                accum_leverage = (config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2) if is_short_cand else 1
+                accum_leverage_short = config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2
+                accum_leverage_long = config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2
+                accum_leverage = accum_leverage_short if is_short_cand else accum_leverage_long
                 try:
                     # Les DEUX niveaux sont mémorisés sur le trade (pas seulement celui proche de
                     # l'entrée) : le niveau opposé sert de CIBLE de prise de profit (résistance
@@ -3161,7 +3192,7 @@ async def scan_markets(user_id: int):
                                                             accumulation_support_price=cand.get("support"),
                                                             accumulation_channel_pct=channel_pct_c, is_manual=False)
                     else:
-                        message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, 1, {},
+                        message, _ = execute_manual_trade(user_id, coin, "LONG", accum_size, accum_leverage, {},
                                                             is_accumulation=True, accumulation_target_pct=accum_target,
                                                             accumulation_support_price=level_c,
                                                             accumulation_resistance_price=cand.get("resistance"),
@@ -3712,6 +3743,8 @@ def round_hl_price(price: float, coin: str) -> float:
     return round(price, final_decimals)
 
 accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
+accumulation_summary_log_cache = {}  # user_id -> datetime du dernier résumé de cycle journalisé
+ACCUMULATION_SUMMARY_COOLDOWN_MINUTES = 20  # fréquence du résumé "état Accumulation" (voir fin de boucle de scan)
 ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
@@ -4444,6 +4477,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_enabled: Optional[bool] = None
     accumulation_short_max_positions: Optional[int] = None
     accumulation_short_leverage: Optional[int] = None
+    accumulation_long_leverage: Optional[int] = None
     accumulation_short_rsi_min: Optional[float] = None
     accumulation_short_rsi_max: Optional[float] = None
     accumulation_exit_tolerance_min_pct: Optional[float] = None
@@ -4620,6 +4654,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_enabled": bool(config["accumulation_short_enabled"]) if "accumulation_short_enabled" in config.keys() else False,
         "accumulation_short_max_positions": config["accumulation_short_max_positions"] if "accumulation_short_max_positions" in config.keys() and config["accumulation_short_max_positions"] else 8,
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
+        "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
         "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
         "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.15,
@@ -4756,6 +4791,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_max_positions=? WHERE user_id=?", (req.accumulation_short_max_positions, user_id))
     if req.accumulation_short_leverage is not None:
         conn.execute("UPDATE bot_config SET accumulation_short_leverage=? WHERE user_id=?", (req.accumulation_short_leverage, user_id))
+    if req.accumulation_long_leverage is not None:
+        conn.execute("UPDATE bot_config SET accumulation_long_leverage=? WHERE user_id=?", (req.accumulation_long_leverage, user_id))
     if req.accumulation_short_rsi_min is not None:
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_min=? WHERE user_id=?", (req.accumulation_short_rsi_min, user_id))
     if req.accumulation_short_rsi_max is not None:
