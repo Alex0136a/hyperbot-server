@@ -5342,6 +5342,11 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         "custom_trail_trigger_pct","custom_stop_loss_price","take_profit_pct")}
     accum_flag = 1 if is_accumulation else 0
     accum_target = accumulation_target_pct if is_accumulation else None
+    # TP manuel = valeur de RÉFÉRENCE dès l'ouverture (visible immédiatement, pas besoin de
+    # cliquer "Définir") : la largeur du canal (%) pour l'Accumulation, sinon le défaut global
+    # de l'utilisateur. Reste modifiable à volonté ensuite — c'est toujours la DERNIÈRE valeur
+    # (via /api/paper/set-take-profit) qui fait foi, ceci n'est qu'une valeur de départ.
+    custom_tp_default = round(accumulation_channel_pct, 2) if (is_accumulation and accumulation_channel_pct) else c["take_profit_pct"]
 
     if trading_mode == "live":
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
@@ -5387,7 +5392,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"], accumulation_channel_pct))
+             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct))
         conn.commit()
         conn.close()
         prefix = "👤" if is_manual else "🤖"
@@ -5410,7 +5415,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
          now_iso, today, 1 if is_manual else 0, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], c["take_profit_pct"], accumulation_channel_pct))
+         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
