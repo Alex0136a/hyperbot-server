@@ -3173,8 +3173,11 @@ async def scan_markets(user_id: int):
                         continue
                 else:
                     capital_disponible = portfolio_row["balance"] if portfolio_row else 1000.0
-                alloc_pct = config["capital_allocation_pct"] if "capital_allocation_pct" in config.keys() and config["capital_allocation_pct"] else 100.0
-                accum_size = round((capital_disponible * alloc_pct / 100 * 0.5) / max_pos, 2)
+                # Taille = 50% du capital (FIXE) ÷ nombre de positions Accumulation simultanées
+                # max — même règle, harmonisée, que le bot principal (voir plus haut). Ne dépend
+                # plus de capital_allocation_pct (qui produisait une taille différente/incohérente
+                # ici selon le réglage du compte — corrigé).
+                accum_size = round((capital_disponible * 0.50) / max_pos, 2)
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
                 accum_leverage_short = config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2
                 accum_leverage_long = config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2
