@@ -316,6 +316,21 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Nouveau trailing simplifié Accumulation (remplace l'ancien système "écart progressif"
+        # basé sur accumulation_exit_tolerance_min_pct, devenu obsolète) : le plancher reste
+        # INACTIF tant que le pic n'a pas atteint ce seuil d'armement — en dessous, seul Max
+        # Loss protège, aucune clôture sur du bruit.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_arm_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        # % du pic verrouillé une fois le trailing armé (voir ci-dessus) — 50% par défaut :
+        # toujours une vraie sortie profitable, proportionnelle au pic atteint, jamais un
+        # montant quasi nul comme avec l'ancien système à écart fixe/progressif.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_lock_ratio_pct REAL DEFAULT 50.0")
+        conn.commit()
+    except: pass
+    try:
         # Ratio proportionnel (0-1) appliqué au pic pour la tolérance dynamique — plus le pic
         # est développé, plus la marge avant de considérer un retournement est grande.
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_ratio REAL DEFAULT 0.3")
@@ -1983,30 +1998,23 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         if accum_close_reason:
             pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
         else:
-            cfg_min_pic = conn.execute("SELECT accumulation_exit_tolerance_min_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            min_pic_pre_armement = cfg_min_pic["accumulation_exit_tolerance_min_pct"] if cfg_min_pic and "accumulation_exit_tolerance_min_pct" in cfg_min_pic.keys() and cfg_min_pic["accumulation_exit_tolerance_min_pct"] is not None else 0.15
+            cfg_trail = conn.execute("SELECT accumulation_trailing_arm_pct, accumulation_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            trail_arm_pct = cfg_trail["accumulation_trailing_arm_pct"] if cfg_trail and "accumulation_trailing_arm_pct" in cfg_trail.keys() and cfg_trail["accumulation_trailing_arm_pct"] is not None else 0.3
+            trail_lock_ratio = cfg_trail["accumulation_trailing_lock_ratio_pct"] if cfg_trail and "accumulation_trailing_lock_ratio_pct" in cfg_trail.keys() and cfg_trail["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
 
-            # Trailing PROGRESSIF CONTINU — même principe que le bot principal (widen_mult),
-            # remplace l'ancien système binaire (armé/pas armé à 1% + retournement RSI/MACD
-            # séparé avant armement). Un seul mécanisme continu : dès qu'un tout petit
-            # déclencheur est dépassé (0.15%), l'écart de protection s'élargit progressivement
-            # avec le pic (jusqu'à x3), sans palier brutal. Évite à la fois le cas "retournement
-            # sur pic quasi nul" (TAO) ET la discontinuité du seuil à 1%.
-            channel_pct_trade = trade.get("accumulation_channel_pct")
-            wide_channel = channel_pct_trade is not None and channel_pct_trade > 2.0
-            base_gap = 1.0 if wide_channel else 0.5
-            trigger = min_pic_pre_armement  # déclencheur, réutilise le même réglage (0.15% par défaut)
-            trail_widen_max_mult = 3.0
-
+            # Trailing simplifié — REMPLACE l'ancien système (déclencheur 0.15% + écart qui
+            # s'élargit progressivement), qui produisait des sorties quasi à 0.0$ : le plancher
+            # s'armait dès un pic minuscule (parfois 0.02-0.05%) et se faisait retoucher aussitôt.
+            # Nouveau principe : le plancher reste INACTIF tant que le pic n'a pas atteint
+            # trail_arm_pct (0.3% par défaut) — en dessous, seul le Max Loss protège, aucune
+            # clôture sur du bruit. Une fois armé, le plancher verrouille trail_lock_ratio (50%
+            # par défaut) du pic atteint — donc toujours une VRAIE sortie profitable (jamais
+            # proche de zéro), et non plus un écart fixe déconnecté du pic.
             trailing_floor = None
-            widen_mult = None
-            gap = None
-            if accum_peak_pct > trigger:
-                widen_mult = min(trail_widen_max_mult, 1 + (accum_peak_pct - trigger) / trigger)
-                gap = base_gap * widen_mult
-                trailing_floor = accum_peak_pct - gap
+            if accum_peak_pct >= trail_arm_pct:
+                trailing_floor = round(accum_peak_pct * (trail_lock_ratio / 100), 4)
 
-            # Plancher effectif = le plus protecteur des deux : le trailing progressif normal,
+            # Plancher effectif = le plus protecteur des deux : le trailing simplifié ci-dessus,
             # ET le plancher armé au toucher du niveau cible (qui, lui, ne redescend jamais).
             effective_floor = trailing_floor
             if target_touched_floor is not None:
@@ -2018,7 +2026,7 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                     accum_log_msg = f"🎯🔒 {trade['coin']}: retour sous le plancher verrouillé au toucher de la cible ({round(target_touched_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
                 else:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Trailing progressif touché (pic {round(accum_peak_pct,2)}%, écart {round(gap,3)}% x{widen_mult:.2f}, seuil {round(trailing_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                    accum_log_msg = f"🔒 {trade['coin']}: Trailing touché (pic {round(accum_peak_pct,2)}%, plancher {trail_lock_ratio:.0f}% du pic = {round(trailing_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
             if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
                 # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
@@ -3026,37 +3034,36 @@ async def scan_markets(user_id: int):
             rsi_now = tech.get("rsi") or 50
             action = ai.get("action")
 
-            # === RÈGLE RENFORCÉE BTC/ETH — ces deux actifs suivent des tendances
-            # persistantes plutôt que des retournements fréquents (contrairement aux alts).
-            # Deux vérifications complémentaires :
-            #  1. Mouvement de PRIX DIRECT sur 2 jours (comble le trou où une tendance naissante,
-            #     pas encore alignée sur les 3 EMA, ne bloquait rien du tout — cas observé d'un
-            #     SHORT BTC pris en pleine tendance haussière).
-            #  2. Structure EMA propre (20/50/200) — capte les tendances déjà pleinement établies.
-            if coin in ("BTC", "ETH"):
-                btc_eth_2d_thresh = config["btc_eth_2d_trend_threshold"] if config and "btc_eth_2d_trend_threshold" in config.keys() and config["btc_eth_2d_trend_threshold"] else 6.0
-                candles_2d = await fetch_candles(client, coin, "4h", 12)  # 12×4h = 48h = 2 jours
-                if candles_2d and len(candles_2d) >= 12:
-                    price_2d_open = float(candles_2d[0]["c"])
-                    price_2d_close = float(candles_2d[-1]["c"])
-                    change_2d_pct = (price_2d_close - price_2d_open) / price_2d_open * 100
-                    if change_2d_pct >= btc_eth_2d_thresh and action == "SHORT":
-                        add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — tendance haussière sur 2j (+{change_2d_pct:.1f}%)", "warning")
-                        continue
-                    if change_2d_pct <= -btc_eth_2d_thresh and action == "LONG":
-                        add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — tendance baissière sur 2j ({change_2d_pct:.1f}%)", "warning")
-                        continue
+            # === RÈGLE DE TENDANCE MACD — TOUS LES COINS (bot principal uniquement, pas
+            # l'Accumulation ni le trading manuel). Remplace l'ancien filtre limité à BTC/ETH
+            # (mouvement 2j + structure EMA). LONG uniquement si tendance haussière confirmée,
+            # SHORT uniquement si tendance baissière confirmée. Si le MACD est ambigu (croisé
+            # d'un côté mais encore du mauvais côté de la ligne zéro — ex: MACD>signal mais
+            # MACD encore négatif, reprise pas encore confirmée), la tendance est jugée NEUTRE
+            # et AUCUN trade n'est pris dans ce cas, dans les deux sens.
+            macd_val = tech.get("macd_value")
+            macd_bull_now = tech.get("macd_bull")
+            macd_bear_now = tech.get("macd_bear")
+            if macd_val is not None and macd_bull_now is not None:
+                if macd_bull_now and macd_val > 0:
+                    trend_macd = "BULL"
+                elif macd_bear_now and macd_val < 0:
+                    trend_macd = "BEAR"
+                else:
+                    trend_macd = "NEUTRAL"
+            else:
+                trend_macd = "NEUTRAL"  # MACD indisponible -> prudence, bloque les deux sens
 
-            if coin in ("BTC", "ETH") and e20 and e50 and e200:
-                own_ema_align = "BULL" if e20[-1] > e50[-1] > e200[-1] else "BEAR" if e20[-1] < e50[-1] < e200[-1] else "MIXED"
-                if own_ema_align == "BULL" and action == "SHORT":
-                    add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — structure EMA haussière (20>50>200)", "warning")
-                    continue
-                if own_ema_align == "BEAR" and action == "LONG":
-                    add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — structure EMA baissière (20<50<200)", "warning")
-                    continue
-                if own_ema_align != "MIXED":
-                    add_bot_log(user_id, f"📈 {coin}: Structure EMA {own_ema_align} confirmée — trade dans le sens de tendance", "success")
+            if trend_macd == "NEUTRAL":
+                add_bot_log(user_id, f"🛡️ {coin}: {action} bloqué — tendance MACD neutre/ambiguë (ni haussière ni baissière confirmée)", "warning")
+                continue
+            if trend_macd == "BULL" and action == "SHORT":
+                add_bot_log(user_id, f"🛡️ {coin}: SHORT bloqué — tendance MACD haussière (MACD {macd_val:.4g} > 0 et > signal)", "warning")
+                continue
+            if trend_macd == "BEAR" and action == "LONG":
+                add_bot_log(user_id, f"🛡️ {coin}: LONG bloqué — tendance MACD baissière (MACD {macd_val:.4g} < 0 et < signal)", "warning")
+                continue
+            add_bot_log(user_id, f"📈 {coin}: tendance MACD {trend_macd} confirmée — trade dans le sens de la tendance", "info")
 
             # Ignorer signaux contradictoires avec signal recent
             if last_action and last_action["action"] != ai.get("action") and last_action["action"] != "WAIT":
@@ -4472,7 +4479,6 @@ class UpdateConfigRequest(BaseModel):
     trailing_gap_usd: Optional[float] = None
     trailing_widen_max_mult: Optional[float] = None
     hard_cap_pct: Optional[float] = None
-    btc_eth_2d_trend_threshold: Optional[float] = None
     accumulation_target_pct: Optional[float] = None
     accumulation_size_usdc: Optional[float] = None
     accumulation_size_pct: Optional[float] = None
@@ -4483,7 +4489,8 @@ class UpdateConfigRequest(BaseModel):
     accumulation_long_leverage: Optional[int] = None
     accumulation_short_rsi_min: Optional[float] = None
     accumulation_short_rsi_max: Optional[float] = None
-    accumulation_exit_tolerance_min_pct: Optional[float] = None
+    accumulation_trailing_arm_pct: Optional[float] = None
+    accumulation_trailing_lock_ratio_pct: Optional[float] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
     accumulation_min_channel_pct: Optional[float] = None
     accumulation_proximity_pct: Optional[float] = None
@@ -4648,7 +4655,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "trailing_widen_max_mult": config["trailing_widen_max_mult"] if "trailing_widen_max_mult" in config.keys() and config["trailing_widen_max_mult"] else 3.0,
         "hard_cap_enabled": config["hard_cap_enabled"] if "hard_cap_enabled" in config.keys() and config["hard_cap_enabled"] is not None else 0,
         "hard_cap_pct": config["hard_cap_pct"] if "hard_cap_pct" in config.keys() and config["hard_cap_pct"] else 2.5,
-        "btc_eth_2d_trend_threshold": config["btc_eth_2d_trend_threshold"] if "btc_eth_2d_trend_threshold" in config.keys() and config["btc_eth_2d_trend_threshold"] else 6.0,
         "accumulation_enabled": config["accumulation_enabled"] if "accumulation_enabled" in config.keys() and config["accumulation_enabled"] is not None else 0,
         "accumulation_target_pct": config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0,
         "accumulation_size_usdc": config["accumulation_size_usdc"] if "accumulation_size_usdc" in config.keys() and config["accumulation_size_usdc"] else 20.0,
@@ -4660,7 +4666,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
         "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
-        "accumulation_exit_tolerance_min_pct": config["accumulation_exit_tolerance_min_pct"] if "accumulation_exit_tolerance_min_pct" in config.keys() and config["accumulation_exit_tolerance_min_pct"] is not None else 0.15,
+        "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.3,
+        "accumulation_trailing_lock_ratio_pct": config["accumulation_trailing_lock_ratio_pct"] if "accumulation_trailing_lock_ratio_pct" in config.keys() and config["accumulation_trailing_lock_ratio_pct"] is not None else 50.0,
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
         "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
@@ -4778,8 +4785,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET trailing_widen_max_mult=? WHERE user_id=?", (req.trailing_widen_max_mult, user_id))
     if req.hard_cap_pct is not None:
         conn.execute("UPDATE bot_config SET hard_cap_pct=? WHERE user_id=?", (req.hard_cap_pct, user_id))
-    if req.btc_eth_2d_trend_threshold is not None:
-        conn.execute("UPDATE bot_config SET btc_eth_2d_trend_threshold=? WHERE user_id=?", (req.btc_eth_2d_trend_threshold, user_id))
     if req.accumulation_target_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_target_pct=? WHERE user_id=?", (req.accumulation_target_pct, user_id))
     if req.accumulation_size_usdc is not None:
@@ -4800,8 +4805,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_min=? WHERE user_id=?", (req.accumulation_short_rsi_min, user_id))
     if req.accumulation_short_rsi_max is not None:
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_max=? WHERE user_id=?", (req.accumulation_short_rsi_max, user_id))
-    if req.accumulation_exit_tolerance_min_pct is not None:
-        conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_min_pct=? WHERE user_id=?", (req.accumulation_exit_tolerance_min_pct, user_id))
+    if req.accumulation_trailing_arm_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
+    if req.accumulation_trailing_lock_ratio_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_lock_ratio_pct=? WHERE user_id=?", (req.accumulation_trailing_lock_ratio_pct, user_id))
     if req.accumulation_exit_tolerance_ratio is not None:
         conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_ratio=? WHERE user_id=?", (req.accumulation_exit_tolerance_ratio, user_id))
     if req.accumulation_min_channel_pct is not None:
