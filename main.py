@@ -339,7 +339,14 @@ def init_db():
     try:
         # Largeur minimale du canal support/résistance (%) exigée avant d'autoriser un achat/
         # vente Accumulation — garantit structurellement une marge de mouvement possible.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_min_channel_pct REAL DEFAULT 2.0")
+        # RÉINTRODUIT après un passage à "aucun minimum", suite à des toucher-de-cible verrouillés
+        # à ~0% de PnL sur des canaux quasi nuls (cible collée à l'entrée) — défaut abaissé de
+        # 2.0% à 0.5% (plus permissif que l'ancien seuil, mais empêche les canaux dégénérés).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_min_channel_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET accumulation_min_channel_pct=0.5 WHERE accumulation_min_channel_pct=2.0")
         conn.commit()
     except: pass
     try:
@@ -1978,8 +1985,9 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         if target_touched_floor is None and not accum_close_reason:
             target_level_raw = trade.get("accumulation_support_price") if is_short_accum else trade.get("accumulation_resistance_price")
             if target_level_raw:
-                cfg_buf_target = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                cfg_buf_target = conn.execute("SELECT accumulation_breakdown_buffer_pct, accumulation_trailing_arm_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                 buf_pct_target = cfg_buf_target["accumulation_breakdown_buffer_pct"] if cfg_buf_target and "accumulation_breakdown_buffer_pct" in cfg_buf_target.keys() and cfg_buf_target["accumulation_breakdown_buffer_pct"] else 1.0
+                target_arm_min_pct = cfg_buf_target["accumulation_trailing_arm_pct"] if cfg_buf_target and "accumulation_trailing_arm_pct" in cfg_buf_target.keys() and cfg_buf_target["accumulation_trailing_arm_pct"] is not None else 0.3
                 target_level = float(target_level_raw)
                 # Marge appliquée VERS l'intérieur (contrairement à la rupture, qui exige un
                 # dépassement) : on considère le niveau "touché" un peu avant l'atteinte exacte,
@@ -1988,7 +1996,13 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                     (not is_short_accum and cur >= target_level * (1 - buf_pct_target / 100)) or
                     (is_short_accum and cur <= target_level * (1 + buf_pct_target / 100))
                 )
-                if target_touched_now:
+                # BUG CORRIGÉ : sur un canal très étroit (plus de largeur minimale imposée), la
+                # cible pouvait être "touchée" quasi immédiatement à ~0% de PnL, verrouillant un
+                # plancher proche de zéro — d'où des sorties à 0.00$ malgré le label TARGET_TOUCH.
+                # Même garde-fou que le trailing : n'arme QUE si le toucher représente déjà au
+                # moins accumulation_trailing_arm_pct de profit réel (0.3% par défaut). En dessous,
+                # on ne verrouille rien — le trade retente au cycle suivant si le prix reste proche.
+                if target_touched_now and pnl_pct_live >= target_arm_min_pct:
                     target_touched_floor = pnl_pct_live
                     conn.execute("UPDATE paper_trades SET accumulation_target_touched_pct=? WHERE id=?",
                                  (target_touched_floor, trade["id"]))
@@ -2841,10 +2855,19 @@ async def scan_markets(user_id: int):
                     should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
                     channel_pct = (resistance - support) / support * 100 if support and resistance else 0
+                    accum_min_channel_pct = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
                     if support is None:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
+                    elif resistance is not None and channel_pct < accum_min_channel_pct:
+                        # Canal trop étroit — bloque l'entrée (pas juste le TP par défaut).
+                        # Réintroduit après avoir observé des toucher-de-cible à ~0% de PnL sur
+                        # des canaux quasi nuls (cible collée à l'entrée) — voir aussi le
+                        # garde-fou d'armement minimum (0.3%) ajouté séparément sur la sortie.
+                        if should_log_diag:
+                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support proche, mais canal trop étroit ({channel_pct:.2f}% < {accum_min_channel_pct}%) — pas assez de marge, pas d'achat", "info")
                     else:
                         accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
                         near_support = abs(price - support) / support * 100 <= accum_proximity_pct
@@ -2891,10 +2914,16 @@ async def scan_markets(user_id: int):
                     should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
                     channel_pct_short = (resistance - support) / support * 100 if support and resistance else 0
+                    accum_min_channel_pct_short = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
                     if resistance is None:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                             add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT Accumulation, mais aucune résistance détectée à proximité — pas de vente", "info")
+                    elif support is not None and channel_pct_short < accum_min_channel_pct_short:
+                        # Miroir LONG — voir commentaire ci-dessus.
+                        if should_log_diag_short:
+                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance proche, mais canal trop étroit ({channel_pct_short:.2f}% < {accum_min_channel_pct_short}%) — pas assez de marge, pas de vente", "info")
                     else:
                         accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
                         near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
@@ -4693,7 +4722,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.3,
         "accumulation_trailing_lock_ratio_pct": config["accumulation_trailing_lock_ratio_pct"] if "accumulation_trailing_lock_ratio_pct" in config.keys() and config["accumulation_trailing_lock_ratio_pct"] is not None else 50.0,
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
-        "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 2.0,
+        "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
@@ -5380,7 +5409,11 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     # cliquer "Définir") : la largeur du canal (%) pour l'Accumulation, sinon le défaut global
     # de l'utilisateur. Reste modifiable à volonté ensuite — c'est toujours la DERNIÈRE valeur
     # (via /api/paper/set-take-profit) qui fait foi, ceci n'est qu'une valeur de départ.
-    custom_tp_default = round(accumulation_channel_pct, 2) if (is_accumulation and accumulation_channel_pct) else c["take_profit_pct"]
+    # Plafonné à 1.5% — un canal plus large donnerait un TP par défaut trop ambitieux/rare à
+    # atteindre ; au-delà de 1.5%, on prend quand même le profit plutôt que d'attendre le canal
+    # entier. Reste modifiable au cas par cas via "TP manuel" sur le trade une fois ouvert.
+    ACCUMULATION_TP_DEFAULT_CAP_PCT = 1.5
+    custom_tp_default = min(round(accumulation_channel_pct, 2), ACCUMULATION_TP_DEFAULT_CAP_PCT) if (is_accumulation and accumulation_channel_pct) else c["take_profit_pct"]
 
     if trading_mode == "live":
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
