@@ -345,6 +345,8 @@ function App() {
   const [hardCapEnabled, setHardCapEnabled] = useState(false);
   const [accumulationEnabled, setAccumulationEnabled] = useState(false);
   const [accumulationShortEnabled, setAccumulationShortEnabled] = useState(false);
+  const [breakoutEnabled, setBreakoutEnabled] = useState(false);
+  const [breakoutShortEnabled, setBreakoutShortEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -457,6 +459,8 @@ function App() {
       setHardCapEnabled(cfg?.hard_cap_enabled === 1);
       setAccumulationEnabled(cfg?.accumulation_enabled === 1);
       setAccumulationShortEnabled(!!cfg?.accumulation_short_enabled);
+      setBreakoutEnabled(!!cfg?.breakout_enabled);
+      setBreakoutShortEnabled(!!cfg?.breakout_short_enabled);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -584,6 +588,20 @@ function App() {
       await apiCall("/api/config","PUT",{accumulation_short_trading_mode:mode},token);
       loadData();
       addLog(`Mode Accumulation SHORT: ${modeLabel}`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
+  const updateBreakoutMode = async (mode) => {
+    if (mode === config?.breakout_trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
+    const confirmMsg = mode === "live"
+      ? `Basculer Breakout (LONG+SHORT) en LIVE (argent réel) ?\n\nIndépendant des autres modes — vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      : `Repasser Breakout en Paper (simulation) ?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiCall("/api/config","PUT",{breakout_trading_mode:mode},token);
+      loadData();
+      addLog(`Mode Breakout: ${modeLabel}`, "system");
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
   };
 
@@ -1026,6 +1044,9 @@ Confirmer ?`
                     {!!matchedTrade?.is_accumulation && (
                       <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={matchedTrade.action==="SHORT"?"Accumulation SHORT — levier dédié, pas de rachat forcé en perte au-delà du plafond":"Accumulation — sans levier, pas de vente forcée en perte"}>💰 ACCUMULATION</span>
                     )}
+                    {!!matchedTrade?.is_breakout && (
+                      <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
+                    )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
                 </div>
@@ -1330,6 +1351,43 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#fb923c",fontWeight:700}}>🚀 Mode Breakout LONG (achat auto sur cassure de résistance)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Système de MOMENTUM, indépendant d'Accumulation : détecte un range puis achète quand le prix CASSE la résistance, confirmé par une expansion de volume (x{config?.breakout_volume_mult||1.5}). Sortie par Max Loss + trailing dédiés, pas de cible fixe. Désactivé par défaut. Réglages dans "Réglages avancés"</div>
+              </div>
+              <button onClick={()=>{
+                const v=!breakoutEnabled; setBreakoutEnabled(v);
+                apiCall("/api/config","PUT",{"breakout_enabled":v},token);
+              }} style={{background:breakoutEnabled?"#3d1f0a":"#0f1629",border:breakoutEnabled?"1px solid #fb923c":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:breakoutEnabled?"#fb923c":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {breakoutEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
+                <div style={{fontSize:11,color:"#fb923c",fontWeight:700}}>🚀 Mode Breakout SHORT (vente auto sur cassure de support)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Miroir du LONG : vend à découvert quand le prix CASSE le support, même confirmation par volume. Levier x{config?.breakout_short_leverage||2} dédié. Désactivé par défaut.</div>
+              </div>
+              <button onClick={()=>{
+                const v=!breakoutShortEnabled; setBreakoutShortEnabled(v);
+                apiCall("/api/config","PUT",{"breakout_short_enabled":v},token);
+              }} style={{background:breakoutShortEnabled?"#3d1f0a":"#0f1629",border:breakoutShortEnabled?"1px solid #fb923c":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:breakoutShortEnabled?"#fb923c":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {breakoutShortEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+            {(breakoutEnabled || breakoutShortEnabled) && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                <div style={{fontSize:10,color:"#475569"}}>
+                  Mode Breakout (LONG+SHORT) — sélecteur unique et indépendant des autres modes
+                </div>
+                <div style={{display:"flex",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,overflow:"hidden"}}>
+                  <button onClick={()=>updateBreakoutMode("paper")} style={{padding:"4px 10px",border:"none",background:config?.breakout_trading_mode!=="live"?"#1e2d4a":"transparent",color:config?.breakout_trading_mode!=="live"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🎮 PAPER</button>
+                  <button onClick={()=>updateBreakoutMode("live")} style={{padding:"4px 10px",border:"none",background:config?.breakout_trading_mode==="live"?"#052e16":"transparent",color:config?.breakout_trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔴 LIVE</button>
+                </div>
+              </div>
+            )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
               </div>
@@ -1521,6 +1579,9 @@ Confirmer ?`
                         {!!trade.is_accumulation && (
                           <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={`Accumulation ${trade.action==="SHORT"?"SHORT (levier dédié)":""} — objectif +${trade.accumulation_target_pct}%, pas de ${trade.action==="SHORT"?"rachat":"vente"} forcé${trade.action==="SHORT"?"":"e"} en perte`}>💰 ACCUMULATION</span>
                         )}
+                        {!!trade.is_breakout && (
+                          <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
                         <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
@@ -1600,6 +1661,9 @@ Confirmer ?`
                       )}
                       {!!trade.is_accumulation && (
                         <span style={{background:"#3d2e0a",color:"#fbbf24",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title={trade.action==="SHORT"?"Accumulation SHORT — levier dédié, pas de rachat forcé en perte au-delà du plafond":"Accumulation — sans levier, pas de vente forcée en perte"}>💰 ACCUMULATION</span>
+                      )}
+                      {!!trade.is_breakout && (
+                        <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
                       )}
                       {trade.peak_price_pct != null && (
                         <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
@@ -1706,6 +1770,13 @@ Confirmer ?`
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
                     {key:"accumulation_trailing_arm_pct",label:"Accumulation - pic minimum avant armement du trailing (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"accumulation_trailing_lock_ratio_pct",label:"Accumulation - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
+                    {key:"breakout_max_positions",label:"Breakout - positions simultanées max (LONG+SHORT confondus)",def:5,step:1,min:1,max:20},
+                    {key:"breakout_long_leverage",label:"Breakout LONG - levier",def:2,step:1,min:1,max:10},
+                    {key:"breakout_short_leverage",label:"Breakout SHORT - levier",def:2,step:1,min:1,max:10},
+                    {key:"breakout_volume_mult",label:"Breakout - expansion de volume requise (x moyenne 20 bougies)",def:1.5,step:0.1,min:1.1,max:5},
+                    {key:"breakout_confirm_buffer_pct",label:"Breakout - marge de confirmation de cassure (%)",def:0.3,step:0.05,min:0.05,max:2},
+                    {key:"breakout_max_loss_pct",label:"Breakout - plafond de perte max (%)",def:0.7,step:0.05,min:0.1,max:5},
+                    {key:"breakout_trailing_arm_pct",label:"Breakout - pic minimum avant armement du trailing (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
                     {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
                     {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
