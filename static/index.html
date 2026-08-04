@@ -1563,11 +1563,11 @@ Confirmer ?`
                         <span style={{fontSize:9,color:"#fbbf24"}} title="Le pic a déjà atteint ce seuil — le trade continue de courir, ne se fermera qu'au retour en dessous">🔒 armé</span>
                       ) : null}
                       <input type="number" step="0.1" placeholder="% gain"
-                        value={tpInputs[trade.id] !== undefined ? tpInputs[trade.id] : (trade.custom_take_profit_pct || (trade.accumulation_channel_pct ? Math.round(trade.accumulation_channel_pct*100)/100 : "") || "")}
+                        value={tpInputs[trade.id] !== undefined ? tpInputs[trade.id] : (trade.custom_take_profit_pct || (trade.accumulation_channel_pct ? Math.min(Math.round(trade.accumulation_channel_pct*100)/100, 1.5) : "") || "")}
                         onChange={e=>setTpInputs({...tpInputs,[trade.id]:e.target.value})}
                         style={{width:70,background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:4,padding:"2px 6px",color:"#e2e8f0",fontSize:10}} />
                       <button onClick={async()=>{
-                        const raw = tpInputs[trade.id] !== undefined ? tpInputs[trade.id] : (trade.custom_take_profit_pct || (trade.accumulation_channel_pct ? Math.round(trade.accumulation_channel_pct*100)/100 : null));
+                        const raw = tpInputs[trade.id] !== undefined ? tpInputs[trade.id] : (trade.custom_take_profit_pct || (trade.accumulation_channel_pct ? Math.min(Math.round(trade.accumulation_channel_pct*100)/100, 1.5) : null));
                         const val = Number(raw);
                         if(!val || val<=0) return;
                         try{ await apiCall("/api/paper/set-take-profit","POST",{trade_id:trade.id,take_profit_pct:val},token); setTpInputs({...tpInputs,[trade.id]:undefined}); loadData(); }
@@ -1701,7 +1701,7 @@ Confirmer ?`
                     {key:"accumulation_long_leverage",label:"Accumulation LONG - levier",def:2,step:1,min:1,max:10},
                     {key:"accumulation_short_rsi_min",label:"Accumulation SHORT - RSI borne basse (surachat)",def:60,step:1,min:50,max:80},
                     {key:"accumulation_short_rsi_max",label:"Accumulation SHORT - RSI borne haute (évite l'euphorie extrême)",def:85,step:1,min:60,max:95},
-                    {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:2.0,step:0.1,min:0.5,max:10},
+                    {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
                     {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
                     {key:"accumulation_trailing_arm_pct",label:"Accumulation - pic minimum avant armement du trailing (%)",def:0.3,step:0.05,min:0.05,max:2},
