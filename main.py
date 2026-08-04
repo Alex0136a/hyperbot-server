@@ -331,6 +331,65 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # ==================== MODE BREAKOUT — nouveau système indépendant ====================
+        # Contrairement à Accumulation (retour à la moyenne, achète bas/vend haut dans un range),
+        # Breakout est un système de MOMENTUM : détecte un range (même détection que la
+        # suggestion RANGE informative) puis entre quand le prix CASSE le range, confirmé par un
+        # dépassement du niveau + une expansion de volume. Toggles séparés LONG/SHORT, sizing et
+        # levier dédiés, sortie par Max Loss + trailing (pas de "toucher de cible" — un breakout
+        # n'a pas de niveau opposé prédéfini comme cible, contrairement à l'Accumulation).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_enabled INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_short_enabled INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_max_positions INTEGER DEFAULT 5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_long_leverage INTEGER DEFAULT 2")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_short_leverage INTEGER DEFAULT 2")
+        conn.commit()
+    except: pass
+    try:
+        # Multiplicateur de volume exigé sur la bougie de cassure vs moyenne des 20 dernières —
+        # indépendant de volume_spike_mult (utilisé ailleurs pour le bot principal).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_volume_mult REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        # Marge de dépassement (%) au-delà du niveau pour confirmer une VRAIE cassure (pas
+        # juste une mèche) — même principe que accumulation_breakdown_buffer_pct.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_confirm_buffer_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_max_loss_pct REAL DEFAULT 0.7")
+        conn.commit()
+    except: pass
+    try:
+        # Même mécanisme que le trailing Accumulation : plancher inactif tant que le pic n'a
+        # pas atteint ce seuil, puis verrouille un % du pic (réglages dédiés, indépendants).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_arm_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_lock_ratio_pct REAL DEFAULT 50.0")
+        conn.commit()
+    except: pass
+    try:
+        # Sélecteur paper/live dédié à Breakout — indépendant de manual_accum_trading_mode et de
+        # accumulation_short_trading_mode (peut tourner en paper pendant que les autres sont live).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trading_mode TEXT DEFAULT 'paper'")
+        conn.commit()
+    except: pass
+    try:
         # Ratio proportionnel (0-1) appliqué au pic pour la tolérance dynamique — plus le pic
         # est développé, plus la marge avant de considérer un retournement est grande.
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_exit_tolerance_ratio REAL DEFAULT 0.3")
@@ -656,6 +715,19 @@ def init_db():
         # pas encore touché. Une fois armé, ce plancher ne redescend jamais et le trade continue
         # de courir au-delà (trailing normal) — c'est un minimum garanti, pas une clôture forcée.
         conn.execute("ALTER TABLE paper_trades ADD COLUMN accumulation_target_touched_pct REAL")
+        conn.commit()
+    except: pass
+    try:
+        # Marque un trade comme ouvert par le mode Breakout (mutuellement exclusif avec
+        # is_accumulation) — sortie par Max Loss + trailing dédiés, pas de TP par défaut ni de
+        # toucher de cible (un breakout n'a pas de niveau opposé prédéfini).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN is_breakout INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        # Niveau cassé à l'entrée (résistance pour un LONG breakout, support pour un SHORT
+        # breakdown) — conservé pour traçabilité/affichage, pas utilisé pour la sortie.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN breakout_level_price REAL")
         conn.commit()
     except: pass
     try:
@@ -2096,6 +2168,63 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         conn.commit()
         return None
 
+    # Mode BREAKOUT : sortie par Max Loss fixe + trailing (armé à partir d'un petit pic, verrouille
+    # un % du pic) — même mécanique que le nouveau trailing Accumulation, réglages indépendants.
+    # Pas de TP manuel, pas de toucher de cible (un breakout n'a pas de niveau opposé prédéfini).
+    if trade.get("is_breakout"):
+        pnl_pct_live = pnl / trade["size_usdc"] * 100
+        bo_close_reason = None
+        bo_log_msg = None
+
+        cfg_bo = conn.execute("SELECT breakout_max_loss_pct, breakout_trailing_arm_pct, breakout_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        bo_max_loss_pct = cfg_bo["breakout_max_loss_pct"] if cfg_bo and "breakout_max_loss_pct" in cfg_bo.keys() and cfg_bo["breakout_max_loss_pct"] is not None else 0.7
+        bo_arm_pct = cfg_bo["breakout_trailing_arm_pct"] if cfg_bo and "breakout_trailing_arm_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_arm_pct"] is not None else 0.3
+        bo_lock_ratio = cfg_bo["breakout_trailing_lock_ratio_pct"] if cfg_bo and "breakout_trailing_lock_ratio_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_lock_ratio_pct"] is not None else 50.0
+
+        if pnl_pct_live <= -bo_max_loss_pct:
+            bo_close_reason = "BREAKOUT_MAX_LOSS"
+            bo_log_msg = f"🛑 {trade['coin']}: Breakout Max Loss atteint ({round(pnl_pct_live,2)}% <= -{bo_max_loss_pct}%) — clôture, {round(pnl,2)} USDC"
+
+        bo_peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
+        if pnl_pct_live > bo_peak_pct:
+            bo_peak_pct = pnl_pct_live
+            conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (bo_peak_pct, trade["id"]))
+
+        if not bo_close_reason and bo_peak_pct >= bo_arm_pct:
+            bo_floor = round(bo_peak_pct * (bo_lock_ratio / 100), 4)
+            if pnl_pct_live <= bo_floor:
+                bo_close_reason = "BREAKOUT_TRAILING_TP"
+                bo_log_msg = f"🔒 {trade['coin']}: Breakout trailing touché (pic {round(bo_peak_pct,2)}%, plancher {bo_lock_ratio:.0f}% du pic = {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+
+        if bo_close_reason:
+            add_bot_log(user_id, bo_log_msg, "success" if bo_close_reason == "BREAKOUT_TRAILING_TP" else "warning")
+            is_live_bo = bool(trade.get("is_live"))
+            close_confirmed = True
+            if is_live_bo:
+                user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+                try:
+                    hl_close_position(account_address, trade["coin"], trade.get("hl_sl_oid"))
+                    add_bot_log(user_id, f"🔴 {trade['coin']}: position réelle fermée sur Hyperliquid ({bo_close_reason})", "success")
+                except Exception as e:
+                    add_bot_log(user_id, f"⛔ {trade['coin']}: ÉCHEC de fermeture réelle sur Hyperliquid — {e} — position gardée OUVERTE côté suivi, nouvelle tentative au prochain cycle", "error")
+                    close_confirmed = False
+            if close_confirmed:
+                conn.execute("""UPDATE paper_trades SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                closed_at=?, close_reason=? WHERE id=?""",
+                (cur, round(pnl,2), round(pnl_pct_live,2), datetime.utcnow().isoformat(), bo_close_reason, trade["id"]))
+                if not is_live_bo:
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                                 (trade["size_usdc"], round(pnl,2), user_id))
+                conn.commit()
+                return {"pnl": pnl, "close_reason": bo_close_reason}
+            conn.commit()
+            return None
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        return None
+
     cfg_qp = conn.execute("""SELECT max_loss_pct, qp_lock_trigger_usd, quick_profit_usd,
         qp_arm_low_usd, qp_floor_low_usd, quick_profit_pct, trailing_activation_mult,
         trailing_gap_pct, trailing_gap_usd, trailing_widen_max_mult, hard_cap_enabled, hard_cap_pct
@@ -2325,7 +2454,7 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
 
         max_same_dir = cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() else 2
         same_dir_count = conn.execute(
-            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, action)
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, action)
         ).fetchone()[0]
         if max_same_dir and same_dir_count >= max_same_dir:
             add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond direction atteint ({same_dir_count}/{max_same_dir})", "info")
@@ -2649,6 +2778,7 @@ async def scan_markets(user_id: int):
         # aucune restriction n'est appliquée (pas encore assez de recul).
         accumulation_top_coins = top_performing_coins if config and config["accumulation_enabled"] else []
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
+        breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
         accum_short_in_range_count = 0  # idem SHORT
 
@@ -2788,6 +2918,38 @@ async def scan_markets(user_id: int):
                 # actif plutôt que de laisser une donnée caduque continuer à s'afficher.
                 del range_suggestion_cache[cache_key]
                 add_bot_log(user_id, f"🗑️ {coin}: opportunité retirée (critères plus remplis)", "info")
+
+            # ==================== MODE BREAKOUT — détection (LONG/SHORT) ====================
+            # Réutilise support/resistance/channel_pct déjà calculés ci-dessus pour RANGE — même
+            # source de données, mais critère de déclenchement opposé : au lieu d'attendre un
+            # retournement DANS le range (Accumulation), on entre quand le prix CASSE le range,
+            # confirmé par un dépassement du niveau (marge de confirmation) ET une expansion de
+            # volume sur la bougie de cassure. Système de momentum, pas de retour à la moyenne.
+            if config and (config["breakout_enabled"] or config["breakout_short_enabled"]) and resistance and support:
+                buf_bo = config["breakout_confirm_buffer_pct"] if "breakout_confirm_buffer_pct" in config.keys() and config["breakout_confirm_buffer_pct"] is not None else 0.3
+                vol_mult_bo = config["breakout_volume_mult"] if "breakout_volume_mult" in config.keys() and config["breakout_volume_mult"] is not None else 1.5
+                vol_expansion = vol_cur >= vol_avg * vol_mult_bo
+
+                if config["breakout_enabled"]:
+                    breakout_up_level = resistance * (1 + buf_bo / 100)
+                    if price >= breakout_up_level and vol_expansion:
+                        already_bo_long = conn.execute(
+                            "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_breakout=1 AND action='LONG'", (user_id, coin)).fetchone()
+                        if not already_bo_long:
+                            breakout_candidates.append({"coin": coin, "action": "LONG", "level": resistance, "vol_ratio": round(vol_cur / max(vol_avg, 0.0001), 2)})
+                    elif price >= resistance and not vol_expansion:
+                        add_bot_log(user_id, f"🚀🔍 {coin}: cassure de résistance ${resistance:.4g} en cours, mais volume insuffisant ({vol_cur/max(vol_avg,0.0001):.2f}x < {vol_mult_bo}x requis) — pas d'achat", "info")
+
+                if config["breakout_short_enabled"]:
+                    breakout_down_level = support * (1 - buf_bo / 100)
+                    if price <= breakout_down_level and vol_expansion:
+                        already_bo_short = conn.execute(
+                            "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_breakout=1 AND action='SHORT'", (user_id, coin)).fetchone()
+                        if not already_bo_short:
+                            breakout_candidates.append({"coin": coin, "action": "SHORT", "level": support, "vol_ratio": round(vol_cur / max(vol_avg, 0.0001), 2)})
+                    elif price <= support and not vol_expansion:
+                        add_bot_log(user_id, f"🚀🔍 {coin}: cassure de support ${support:.4g} en cours, mais volume insuffisant ({vol_cur/max(vol_avg,0.0001):.2f}x < {vol_mult_bo}x requis) — pas de vente", "info")
+
 
 
             # Distingue un PIC/CRASH RAPIDE (jusqu'à quelques heures, plusieurs bougies) d'une
@@ -2996,7 +3158,7 @@ async def scan_markets(user_id: int):
             # et ne doivent jamais empêcher le bot principal d'analyser/trader ce même coin.
             conn_check = get_db()
             coin_already_open = conn_check.execute(
-                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)",
+                "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)",
                 (user_id, coin)
             ).fetchone()
             ai_continuous = config["ai_continuous"] if config and "ai_continuous" in config.keys() else 0
@@ -3271,6 +3433,49 @@ async def scan_markets(user_id: int):
                     # à chaque cycle (le message inclut la raison exacte).
                     add_bot_log(user_id, f"⛔ {coin}: Accumulation auto {cand_action} — tentative échouée ({e}) — nouvelle tentative au prochain cycle", "warning")
 
+        # ==================== MODE BREAKOUT — ouverture ====================
+        # Même architecture que le traitement Accumulation ci-dessus : sizing 50%/max positions,
+        # levier dédié, mode paper/live dédié (breakout_trading_mode) — mais AUCUNE notion de
+        # target_pct/support/resistance mémorisés pour une cible (pas de "toucher de cible" en
+        # Breakout, voir manage_open_trade). Le niveau cassé est juste conservé pour traçabilité.
+        if breakout_candidates and config and (config["breakout_enabled"] or config["breakout_short_enabled"]):
+            for cand in breakout_candidates:
+                coin, cand_action, level_bo = cand["coin"], cand["action"], cand["level"]
+                is_short_bo = cand_action == "SHORT"
+                conn_bo = get_db()
+                max_pos_bo = config["breakout_max_positions"] or 5
+                current_pos_bo = conn_bo.execute(
+                    "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_breakout=1", (user_id,)
+                ).fetchone()[0]
+                portfolio_row_bo = conn_bo.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                conn_bo.close()
+                if current_pos_bo >= max_pos_bo:
+                    continue
+
+                bo_mode = config["breakout_trading_mode"] if "breakout_trading_mode" in config.keys() and config["breakout_trading_mode"] else "paper"
+                if bo_mode == "live":
+                    conn_bo2 = get_db()
+                    user_row_bo = conn_bo2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                    conn_bo2.close()
+                    hl_wallet_bo = user_row_bo["hl_wallet"] if user_row_bo and "hl_wallet" in user_row_bo.keys() else None
+                    capital_bo, hl_err_bo = get_hl_account_value_verbose(hl_wallet_bo)
+                    if capital_bo <= 0:
+                        raison_bo = hl_err_bo if hl_err_bo else f"solde lu avec succès mais à {capital_bo}$ — compte vide, tout en positions, ou adresse incorrecte"
+                        add_bot_log(user_id, f"⛔ {coin}: Breakout live — solde Hyperliquid réel indisponible ({raison_bo}), achat annulé par sécurité", "error")
+                        continue
+                else:
+                    capital_bo = portfolio_row_bo["balance"] if portfolio_row_bo else 1000.0
+
+                bo_size = round((capital_bo * 0.50) / max_pos_bo, 2)
+                bo_leverage = (config["breakout_short_leverage"] if is_short_bo else config["breakout_long_leverage"]) or 2
+                try:
+                    message, _ = execute_manual_trade(user_id, coin, cand_action, bo_size, bo_leverage, {},
+                                                        is_breakout=True, breakout_level_price=level_bo, is_manual=False)
+                    niveau_label_bo = "résistance" if not is_short_bo else "support"
+                    add_bot_log(user_id, f"🤖🚀 Breakout auto {cand_action}: {message} (cassure {niveau_label_bo} ${level_bo:.4g}, volume {cand['vol_ratio']}x)", "success")
+                except ValueError as e:
+                    add_bot_log(user_id, f"⛔ {coin}: Breakout auto {cand_action} — tentative échouée ({e}) — nouvelle tentative au prochain cycle", "warning")
+
         # === Filtre anti-corrélation entre candidats de CE cycle (avant toute ouverture) ===
         # Ne garde que la meilleure moitié (par confiance) de chaque cluster de coins
         # mutuellement corrélés (≥ CORRELATION_THRESHOLD), séparément par direction.
@@ -3296,7 +3501,7 @@ async def scan_markets(user_id: int):
                 # indépendants entre le bot principal et l'Accumulation, malgré des réglages
                 # de compte séparés (max_open_trades vs accumulation_max_positions), le
                 # comptage réel doit aussi exclure explicitement is_accumulation=1.
-                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
+                open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                 portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
                 max_trades = cfg["max_open_trades"] or 5
                 # Taille = 50% du capital (fixe) ÷ nombre de trades simultanés max — remplace
@@ -3308,9 +3513,9 @@ async def scan_markets(user_id: int):
                 size = round((capital * 0.50) / max_trades, 2)
                 add_bot_log(user_id, f"📐 Taille trade: {size} USDC (50% de {round(capital,2)} USDC ÷ {max_trades} trades simultanés max)", "info")
                 # Verifier si coin deja en position ouverte
-                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
+                coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
                 # Anti-corrélation : plafond de trades ouverts dans la même direction
-                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
+                same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
                 max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                 same_dir_blocked = same_dir_count >= max_same_dir
                 # Anti-corrélation réelle : bloque même sous le plafond si fortement corrélé (≥0.7)
@@ -3363,7 +3568,7 @@ async def scan_markets(user_id: int):
                 elif not HL_AGENT_PRIVATE_KEY:
                     add_bot_log(user_id, "⛔ Mode live: HL_AGENT_PRIVATE_KEY non configurée", "error")
                 else:
-                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
+                    open_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)).fetchone()[0]
                     max_trades = cfg["max_open_trades"] or 5
                     # Taille = 50% du capital réel Hyperliquid (fixe) ÷ nombre de trades simultanés
                     # max — remplace l'ancienne formule basée sur capital_allocation_pct
@@ -3372,8 +3577,8 @@ async def scan_markets(user_id: int):
                     # Hyperliquid de 10$ notionnels au lieu d'une taille reflétant le vrai capital).
                     capital = get_hl_account_value(account_address)
                     size = round((capital * 0.50) / max_trades, 2) if capital > 0 else 0.0
-                    coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
-                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
+                    coin_open = conn.execute("SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, coin)).fetchone()
+                    same_dir_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, ai["action"])).fetchone()[0]
                     max_same_dir = (cfg["max_same_direction_trend"] if "max_same_direction_trend" in cfg.keys() and cfg["max_same_direction_trend"] else 3) if btc_trend in ("bullish", "bearish") else (cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() and cfg["max_same_direction_neutral"] else 2)
                     same_dir_blocked = same_dir_count >= max_same_dir
                     correlated_coin = is_correlated_with_open_position(user_id, coin, ai["action"], conn)
@@ -4544,6 +4749,17 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_rsi_max: Optional[float] = None
     accumulation_trailing_arm_pct: Optional[float] = None
     accumulation_trailing_lock_ratio_pct: Optional[float] = None
+    breakout_enabled: Optional[bool] = None
+    breakout_short_enabled: Optional[bool] = None
+    breakout_max_positions: Optional[int] = None
+    breakout_long_leverage: Optional[int] = None
+    breakout_short_leverage: Optional[int] = None
+    breakout_volume_mult: Optional[float] = None
+    breakout_confirm_buffer_pct: Optional[float] = None
+    breakout_max_loss_pct: Optional[float] = None
+    breakout_trailing_arm_pct: Optional[float] = None
+    breakout_trailing_lock_ratio_pct: Optional[float] = None
+    breakout_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
     accumulation_min_channel_pct: Optional[float] = None
     accumulation_proximity_pct: Optional[float] = None
@@ -4721,6 +4937,17 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
         "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.3,
         "accumulation_trailing_lock_ratio_pct": config["accumulation_trailing_lock_ratio_pct"] if "accumulation_trailing_lock_ratio_pct" in config.keys() and config["accumulation_trailing_lock_ratio_pct"] is not None else 50.0,
+        "breakout_enabled": config["breakout_enabled"] if "breakout_enabled" in config.keys() and config["breakout_enabled"] is not None else 0,
+        "breakout_short_enabled": config["breakout_short_enabled"] if "breakout_short_enabled" in config.keys() and config["breakout_short_enabled"] is not None else 0,
+        "breakout_max_positions": config["breakout_max_positions"] if "breakout_max_positions" in config.keys() and config["breakout_max_positions"] else 5,
+        "breakout_long_leverage": config["breakout_long_leverage"] if "breakout_long_leverage" in config.keys() and config["breakout_long_leverage"] else 2,
+        "breakout_short_leverage": config["breakout_short_leverage"] if "breakout_short_leverage" in config.keys() and config["breakout_short_leverage"] else 2,
+        "breakout_volume_mult": config["breakout_volume_mult"] if "breakout_volume_mult" in config.keys() and config["breakout_volume_mult"] is not None else 1.5,
+        "breakout_confirm_buffer_pct": config["breakout_confirm_buffer_pct"] if "breakout_confirm_buffer_pct" in config.keys() and config["breakout_confirm_buffer_pct"] is not None else 0.3,
+        "breakout_max_loss_pct": config["breakout_max_loss_pct"] if "breakout_max_loss_pct" in config.keys() and config["breakout_max_loss_pct"] is not None else 0.7,
+        "breakout_trailing_arm_pct": config["breakout_trailing_arm_pct"] if "breakout_trailing_arm_pct" in config.keys() and config["breakout_trailing_arm_pct"] is not None else 0.3,
+        "breakout_trailing_lock_ratio_pct": config["breakout_trailing_lock_ratio_pct"] if "breakout_trailing_lock_ratio_pct" in config.keys() and config["breakout_trailing_lock_ratio_pct"] is not None else 50.0,
+        "breakout_trading_mode": config["breakout_trading_mode"] if "breakout_trading_mode" in config.keys() and config["breakout_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
         "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
@@ -4862,6 +5089,28 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
     if req.accumulation_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_lock_ratio_pct=? WHERE user_id=?", (req.accumulation_trailing_lock_ratio_pct, user_id))
+    if req.breakout_enabled is not None:
+        conn.execute("UPDATE bot_config SET breakout_enabled=? WHERE user_id=?", (1 if req.breakout_enabled else 0, user_id))
+    if req.breakout_short_enabled is not None:
+        conn.execute("UPDATE bot_config SET breakout_short_enabled=? WHERE user_id=?", (1 if req.breakout_short_enabled else 0, user_id))
+    if req.breakout_max_positions is not None:
+        conn.execute("UPDATE bot_config SET breakout_max_positions=? WHERE user_id=?", (req.breakout_max_positions, user_id))
+    if req.breakout_long_leverage is not None:
+        conn.execute("UPDATE bot_config SET breakout_long_leverage=? WHERE user_id=?", (req.breakout_long_leverage, user_id))
+    if req.breakout_short_leverage is not None:
+        conn.execute("UPDATE bot_config SET breakout_short_leverage=? WHERE user_id=?", (req.breakout_short_leverage, user_id))
+    if req.breakout_volume_mult is not None:
+        conn.execute("UPDATE bot_config SET breakout_volume_mult=? WHERE user_id=?", (req.breakout_volume_mult, user_id))
+    if req.breakout_confirm_buffer_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_confirm_buffer_pct=? WHERE user_id=?", (req.breakout_confirm_buffer_pct, user_id))
+    if req.breakout_max_loss_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_max_loss_pct=? WHERE user_id=?", (req.breakout_max_loss_pct, user_id))
+    if req.breakout_trailing_arm_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_trailing_arm_pct=? WHERE user_id=?", (req.breakout_trailing_arm_pct, user_id))
+    if req.breakout_trailing_lock_ratio_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_trailing_lock_ratio_pct=? WHERE user_id=?", (req.breakout_trailing_lock_ratio_pct, user_id))
+    if req.breakout_trading_mode is not None:
+        conn.execute("UPDATE bot_config SET breakout_trading_mode=? WHERE user_id=?", (req.breakout_trading_mode, user_id))
     if req.accumulation_exit_tolerance_ratio is not None:
         conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_ratio=? WHERE user_id=?", (req.accumulation_exit_tolerance_ratio, user_id))
     if req.accumulation_min_channel_pct is not None:
@@ -5356,7 +5605,7 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         "closed_trades": closed_trades,
     }
 
-def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None, accumulation_resistance_price: float = None, accumulation_channel_pct: float = None, is_manual: bool = True):
+def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float, leverage: int, custom: dict, override_paper_price: float = None, is_accumulation: bool = False, accumulation_target_pct: float = None, accumulation_support_price: float = None, accumulation_resistance_price: float = None, accumulation_channel_pct: float = None, is_manual: bool = True, is_breakout: bool = False, breakout_level_price: float = None):
     """Logique d'ouverture manuelle réutilisable — appelée directement (Trading Manuel,
     'ouvrir maintenant') ou par le déclenchement d'un ordre programmé une fois sa condition
     remplie. `custom` : dict des surcharges custom_* (valeurs None acceptées = défaut compte).
@@ -5382,6 +5631,9 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     if is_accumulation and action == "SHORT":
         cfg = conn.execute("SELECT accumulation_short_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         trading_mode = cfg["accumulation_short_trading_mode"] if cfg and "accumulation_short_trading_mode" in cfg.keys() and cfg["accumulation_short_trading_mode"] else "paper"
+    elif is_breakout:
+        cfg = conn.execute("SELECT breakout_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        trading_mode = cfg["breakout_trading_mode"] if cfg and "breakout_trading_mode" in cfg.keys() and cfg["breakout_trading_mode"] else "paper"
     else:
         cfg = conn.execute("SELECT manual_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         trading_mode = cfg["manual_accum_trading_mode"] if cfg and "manual_accum_trading_mode" in cfg.keys() and cfg["manual_accum_trading_mode"] else "paper"
@@ -5404,6 +5656,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         "custom_qp_lock_trigger_usd","custom_quick_profit_usd","custom_trailing_gap_usd",
         "custom_trail_trigger_pct","custom_stop_loss_price","take_profit_pct")}
     accum_flag = 1 if is_accumulation else 0
+    breakout_flag = 1 if is_breakout else 0
     accum_target = accumulation_target_pct if is_accumulation else None
     # TP manuel = valeur de RÉFÉRENCE dès l'ouverture (visible immédiatement, pas besoin de
     # cliquer "Définir") : la largeur du canal (%) pour l'Accumulation, sinon le défaut global
@@ -5433,10 +5686,11 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         # logique que le bot principal — un filet plus large (x3) en cas de panne du bot,
         # pas un désengagement total qui laisserait une position live sans aucune protection
         # côté exchange si le serveur devient injoignable.
-        accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct, hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct, hl_safety_sl_multiplier, breakout_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
         accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.5
+        breakout_max_loss_for_sl = accum_max_loss_cfg["breakout_max_loss_pct"] if accum_max_loss_cfg and "breakout_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["breakout_max_loss_pct"] else 0.7
         safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
-        max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31)
+        max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (breakout_max_loss_for_sl if is_breakout else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 0.31))
         try:
             coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
         except Exception as e:
@@ -5453,17 +5707,18 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
             is_accumulation, accumulation_target_pct, accumulation_support_price, accumulation_resistance_price,
             custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
             custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
-            custom_take_profit_pct, accumulation_channel_pct)
-            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            custom_take_profit_pct, accumulation_channel_pct, is_breakout, breakout_level_price)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, coin, action, fill_price, fill_price, size_effective, levier_reel,
              now_iso, today, 1 if is_manual else 0, sl_oid, coin_size, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
              c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
              c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct))
+             c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct,
+             breakout_flag, breakout_level_price))
         conn.commit()
         conn.close()
         prefix = "👤" if is_manual else "🤖"
-        label = f"{prefix}💰 Achat ACCUMULATION LIVE" if is_accumulation else f"{prefix}🔴 Trade {'MANUEL' if is_manual else 'AUTO'} LIVE"
+        label = f"{prefix}💰 Achat ACCUMULATION LIVE" if is_accumulation else (f"{prefix}🚀 Trade BREAKOUT LIVE" if is_breakout else f"{prefix}🔴 Trade {'MANUEL' if is_manual else 'AUTO'} LIVE")
         add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{levier_reel})", "success")
         return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
@@ -5476,13 +5731,14 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         accumulation_support_price, accumulation_resistance_price,
         custom_max_loss_pct, custom_qp_arm_low_usd, custom_qp_floor_low_usd, custom_qp_lock_trigger_usd,
         custom_quick_profit_usd, custom_trailing_gap_usd, custom_trail_trigger_pct, custom_stop_loss_price,
-        custom_take_profit_pct, accumulation_channel_pct)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        custom_take_profit_pct, accumulation_channel_pct, is_breakout, breakout_level_price)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, coin, action, price, price, size_usdc, leverage,
          now_iso, today, 1 if is_manual else 0, accum_flag, accum_target, accumulation_support_price, accumulation_resistance_price,
          c["custom_max_loss_pct"], c["custom_qp_arm_low_usd"], c["custom_qp_floor_low_usd"],
          c["custom_qp_lock_trigger_usd"], c["custom_quick_profit_usd"], c["custom_trailing_gap_usd"],
-         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct))
+         c["custom_trail_trigger_pct"], c["custom_stop_loss_price"], custom_tp_default, accumulation_channel_pct,
+         breakout_flag, breakout_level_price))
     conn.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_usdc, user_id))
     conn.commit()
     conn.close()
@@ -5490,6 +5746,9 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     if is_accumulation:
         add_bot_log(user_id, f"{prefix}💰 Achat ACCUMULATION: {action} {coin} @ ${price} | {size_usdc} USDC — objectif +{accum_target}%, pas de sortie forcée en perte", "success")
         return f"Achat Accumulation {action} {coin} ouvert à ${price} (objectif +{accum_target}%)", price
+    if is_breakout:
+        add_bot_log(user_id, f"{prefix}🚀 Trade BREAKOUT: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage}) — cassure ${breakout_level_price:.4g}" if breakout_level_price else f"{prefix}🚀 Trade BREAKOUT: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
+        return f"Trade Breakout {action} {coin} ouvert à ${price}", price
     add_bot_log(user_id, f"{prefix} Trade {'MANUEL' if is_manual else 'AUTO'}: {action} {coin} @ ${price} | {size_usdc} USDC (x{leverage})", "success")
     return f"Trade manuel {action} {coin} ouvert à ${price}", price
 
