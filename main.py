@@ -2716,6 +2716,30 @@ async def scan_markets(user_id: int):
                 else:
                     biais_direction, biais_confiance, biais_raisons = None, 50, []
 
+                # Vérification de RETOURNEMENT CONFIRMÉ — même logique que l'Accumulation (voir
+                # plus bas dans la boucle) : un biais directionnel basé sur position/RSI/MACD ne
+                # suffit pas seul, il faut aussi qu'un vrai rebond soit EN TRAIN de se produire,
+                # pas juste que le prix soit "dans la bonne zone". Sans ça, la suggestion peut
+                # pointer vers un sens alors que le prix continue de dériver dans l'autre.
+                # Compare au prix RÉEL en continu (pas à la couleur de bougie, figée jusqu'à
+                # 15 min de retard) sur les 3 dernières bougies.
+                if biais_direction is not None:
+                    recent_low_r = min(closes[-3:]) if len(closes) >= 3 else price
+                    recent_high_r = max(closes[-3:]) if len(closes) >= 3 else price
+                    rsi_prev_r = calc_rsi(closes[:-3], int(rsi_period)) if len(closes) > 17 else None
+                    macd_bull_r = bool(macd_bias and macd_bias["macd"] > macd_bias["signal"])
+                    macd_bear_r = bool(macd_bias and macd_bias["macd"] < macd_bias["signal"])
+                    if biais_direction == "LONG":
+                        bouncing = price > recent_low_r * 1.001
+                        rsi_recov = bool(rsi_prev_r is not None and rsi is not None and rsi > rsi_prev_r)
+                        reversal_ok = bouncing and (rsi_recov or macd_bull_r)
+                    else:
+                        bouncing = price < recent_high_r * 0.999
+                        rsi_recov = bool(rsi_prev_r is not None and rsi is not None and rsi < rsi_prev_r)
+                        reversal_ok = bouncing and (rsi_recov or macd_bear_r)
+                    if not reversal_ok:
+                        biais_direction, biais_confiance, biais_raisons = None, 50, []
+
                 qualifies = biais_direction is not None and biais_confiance >= 70
 
             if qualifies:
