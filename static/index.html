@@ -654,6 +654,7 @@ Confirmer ?`
     {id:"stats",label:"📊 Performance"},
     {id:"bilan",label:"💰 Bilan"},
     {id:"sessions",label:"📅 Sessions"},
+    {id:"help",label:"❓ Help"},
   ];
 
   return (
@@ -2622,6 +2623,103 @@ Confirmer ?`
           )}
 
           </>)}
+        </div>
+      )}
+
+      {/* HELP */}
+      {tab==="help" && (
+        <div style={{padding:14}}>
+          <div style={{fontSize:10,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
+            💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#60a5fa"}}>05 août 2026</b>
+          </div>
+
+          {/* BOT PRINCIPAL */}
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:10}}>🤖 Bot principal</div>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Entrée</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
+              <li>RSI &lt; 45 → biais LONG · RSI ≥ 55 → biais SHORT · entre les deux (45-55) → aucun signal (WAIT)</li>
+              <li>Confiance finale (après ajustements MACD/EMA/BTC) doit être ≥ 55%, sinon reconverti en WAIT</li>
+              <li><b style={{color:"#e2e8f0"}}>Filtre de tendance MACD</b> (tous les coins) : LONG uniquement si MACD haussier <i>et</i> déjà au-dessus de zéro · SHORT uniquement si MACD baissier <i>et</i> déjà sous zéro · sinon (ambigu) → bloqué dans les deux sens</li>
+              <li>Seuil de confiance requis, adaptatif : ajusté selon séries de gains/pertes, tendance BTC, et pénalités par actif (voir Bilan)</li>
+              <li>Filtre anti-corrélation : parmi les coins fortement corrélés, seule la meilleure moitié (par confiance) est retenue</li>
+              <li>Signal contradictoire au dernier signal du même sens ignoré</li>
+              <li>Moteur Règles (RSI/MACD/EMA, gratuit) ou Claude IA, au choix (Paramètres)</li>
+              <li>Taille = 50% du capital ÷ nombre de trades simultanés max (fixe, indépendant du levier)</li>
+            </ul>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Sortie</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:0,paddingLeft:18,lineHeight:1.7}}>
+              <li>Toutes les conditions ci-dessous sont évaluées en <b style={{color:"#e2e8f0"}}>PnL% réel (avec levier)</b> — jamais en mouvement de prix brut, le levier n'entre jamais dans la décision de sortie, seulement dans l'amplification du résultat</li>
+              <li>SL manuel (prix), si défini — vérifié en premier</li>
+              <li>TP manuel (%) — s'arme à l'atteinte du seuil, ferme si le PnL retombe sous ce seuil après l'avoir dépassé</li>
+              <li>Max Loss — ferme si PnL% ≤ -0.31% par défaut (réglable, ou surchargeable par trade)</li>
+              <li>Plafond absolu (Hard Cap) — optionnel, ferme dès que le PnL% atteint le seuil fixé (2.5% par défaut), même si le trailing voudrait continuer</li>
+              <li>Plancher QP à deux paliers ($ fixes convertis en % du PnL) + Trailing progressif (l'écart s'élargit avec le pic) — le plus protecteur des deux s'applique</li>
+            </ul>
+          </div>
+
+          {/* ACCUMULATION */}
+          <div style={{background:"#0a1628",border:"1px solid #3d2e0a",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#fbbf24",marginBottom:10}}>💰 Accumulation</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:10}}>Stratégie de retour à la moyenne — achète bas / vend haut dans un range détecté. Toggles LONG/SHORT indépendants, modes paper/live séparés.</div>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Entrée</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
+              <li>LONG : RSI 15-40 (survente) · SHORT : RSI 60-85 (surachat) — fourchettes réglables</li>
+              <li>Support (LONG) ou résistance (SHORT) détecté à proximité du prix (tolérance réglable, 1% par défaut)</li>
+              <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
+              <li><b style={{color:"#e2e8f0"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ou</i> MACD qui bascule dans le bon sens — pas juste "être dans la zone"</li>
+              <li>Levier dédié, séparé LONG/SHORT (x2 par défaut chacun)</li>
+              <li>Taille = 50% du capital ÷ positions Accumulation simultanées max</li>
+              <li>Aucune restriction de corrélation appliquée (indépendant du bot principal)</li>
+            </ul>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Sortie</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:0,paddingLeft:18,lineHeight:1.7}}>
+              <li>Max Loss fixe (0.5% par défaut) — seule sortie forcée en perte</li>
+              <li>TP manuel par défaut = largeur du canal, plafonné à 1.5% — modifiable à tout moment, la dernière valeur définie fait toujours foi</li>
+              <li><b style={{color:"#e2e8f0"}}>Toucher de cible</b> : si le prix atteint le niveau opposé (résistance pour un LONG, support pour un SHORT) avec au moins 0.3% de PnL déjà acquis, un plancher se verrouille à ce PnL — le trade continue de courir au-delà, ne redescend jamais sous ce plancher</li>
+              <li><b style={{color:"#e2e8f0"}}>Trailing</b> : s'arme dès que le pic atteint 0.3%, verrouille alors 50% du pic comme plancher (réglages indépendants)</li>
+              <li>Cassure confirmée du niveau d'entrée (support/résistance) : clôture même à perte, au-delà de la marge de confirmation</li>
+            </ul>
+          </div>
+
+          {/* BREAKOUT */}
+          <div style={{background:"#0a1628",border:"1px solid #3d1f0a",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#fb923c",marginBottom:10}}>🚀 Breakout</div>
+            <div style={{fontSize:10,color:"#334155",marginBottom:10}}>Stratégie de momentum — mise sur la cassure d'un range plutôt que sur le retour à la moyenne. Toggles LONG/SHORT indépendants, un seul sélecteur paper/live partagé.</div>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Entrée</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
+              <li>Range détecté (même détection support/résistance que la suggestion RANGE)</li>
+              <li>LONG : prix dépasse la résistance + marge de confirmation (0.3% par défaut) · SHORT : casse le support, même principe</li>
+              <li><b style={{color:"#e2e8f0"}}>Expansion de volume obligatoire</b> : volume de la bougie ≥ 1.5x la moyenne des 20 dernières (réglable) — sans ça, la cassure est ignorée même si le prix a dépassé le niveau</li>
+              <li>Levier dédié par direction (x2 par défaut)</li>
+              <li>Taille = 50% du capital ÷ positions Breakout simultanées max</li>
+            </ul>
+
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:4}}>Sortie</div>
+            <ul style={{fontSize:10,color:"#94a3b8",margin:0,paddingLeft:18,lineHeight:1.7}}>
+              <li>Max Loss fixe (0.7% par défaut)</li>
+              <li><b style={{color:"#e2e8f0"}}>Trailing</b> : s'arme dès que le pic atteint 0.3%, verrouille alors 50% du pic (mêmes réglages qu'Accumulation, valeurs indépendantes)</li>
+              <li>Pas de TP fixe ni de toucher de cible — un breakout n'a pas de niveau opposé prédéfini comme objectif, c'est une stratégie de tendance qui doit pouvoir courir</li>
+            </ul>
+          </div>
+
+          {/* SUGGESTION RANGE */}
+          <div style={{background:"#0a1628",border:"1px solid #1e2d4a",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#94a3b8",marginBottom:10}}>📊 Suggestion RANGE (informatif uniquement)</div>
+            <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>
+              Détecte un range et calcule un biais directionnel (position dans le canal, RSI, MACD), avec la même exigence de retournement confirmé qu'Accumulation depuis peu. <b style={{color:"#e2e8f0"}}>N'ouvre jamais de trade automatiquement</b> — affiche les niveaux LONG/SHORT et invalidation dans les logs, à vous de décider d'agir manuellement.
+            </div>
+          </div>
+
+          <div style={{fontSize:9,color:"#334155",textAlign:"center",padding:"8px 0"}}>
+            Cette documentation reflète le code réellement déployé au moment de la dernière modification listée ci-dessus. En cas de doute sur un comportement observé, demandez une vérification précise plutôt que de vous fier uniquement à ce résumé.
+          </div>
         </div>
       )}
 
