@@ -2933,8 +2933,10 @@ async def scan_markets(user_id: int):
                 if config["breakout_enabled"]:
                     breakout_up_level = resistance * (1 + buf_bo / 100)
                     if price >= breakout_up_level and vol_expansion:
-                        already_bo_long = conn.execute(
+                        conn_bo_check = get_db()
+                        already_bo_long = conn_bo_check.execute(
                             "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_breakout=1 AND action='LONG'", (user_id, coin)).fetchone()
+                        conn_bo_check.close()
                         if not already_bo_long:
                             breakout_candidates.append({"coin": coin, "action": "LONG", "level": resistance, "vol_ratio": round(vol_cur / max(vol_avg, 0.0001), 2)})
                     elif price >= resistance and not vol_expansion:
@@ -2943,8 +2945,10 @@ async def scan_markets(user_id: int):
                 if config["breakout_short_enabled"]:
                     breakout_down_level = support * (1 - buf_bo / 100)
                     if price <= breakout_down_level and vol_expansion:
-                        already_bo_short = conn.execute(
+                        conn_bo_check2 = get_db()
+                        already_bo_short = conn_bo_check2.execute(
                             "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_breakout=1 AND action='SHORT'", (user_id, coin)).fetchone()
+                        conn_bo_check2.close()
                         if not already_bo_short:
                             breakout_candidates.append({"coin": coin, "action": "SHORT", "level": support, "vol_ratio": round(vol_cur / max(vol_avg, 0.0001), 2)})
                     elif price <= support and not vol_expansion:
