@@ -2241,7 +2241,20 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
 
     max_loss_pct = pick("custom_max_loss_pct", "max_loss_pct", 0.31)
 
-    # Plancher QP à DEUX PALIERS, en $ FIXES convertis dynamiquement en % pour CE trade —
+    # BUG CORRIGÉ (principe général, tous modes) : le levier sert UNIQUEMENT à amplifier le
+    # gain/la perte en dollars — il ne doit JAMAIS intervenir dans la décision de sortie.
+    # Auparavant, Max Loss et le trailing comparaient le MOUVEMENT DE PRIX BRUT (price_move_pct,
+    # sans levier) à des seuils eux-mêmes convertis via le notional (taille × levier) — un
+    # mélange qui rendait le comportement réel dépendant du levier de façon peu lisible, et
+    # source de confusion (ex: pullback de PnL% observé à l'écran qui semblait devoir clôturer
+    # mais ne le faisait pas, car le seuil réel était en mouvement de prix, pas en PnL%).
+    # Désormais TOUT est comparé au PnL% RÉEL (pnl/size_usdc*100, AVEC levier inclus — c'est
+    # le nombre affiché à l'écran) — cohérent avec Accumulation et Breakout, qui fonctionnent
+    # déjà ainsi. Les seuils en $ fixes (QP, trailing) sont convertis en % via size_usdc
+    # SEULEMENT (jamais notional/levier) : le $ visé reste fixe, exprimé en % du PnL réel.
+    pnl_pct_live = pnl / trade["size_usdc"] * 100
+
+    # Plancher QP à DEUX PALIERS, en $ FIXES convertis en % du PnL réel pour CE trade —
     # garantit un minimum fixe peu importe jusqu'où le pic est monté. Surchargeable par
     # trade (prise manuelle) via custom_qp_*, sinon réglage de compte par défaut.
     #  - Palier haut : armé à qp_lock_trigger_usd (1.5$), garantit quick_profit_usd (1.1$)
@@ -2251,32 +2264,34 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     quick_profit_usd = pick("custom_quick_profit_usd", "quick_profit_usd", 1.1)
     qp_arm_low_usd = pick("custom_qp_arm_low_usd", "qp_arm_low_usd", 1.1)
     qp_floor_low_usd = pick("custom_qp_floor_low_usd", "qp_floor_low_usd", 0.6)
-    notional = trade["size_usdc"] * trade["leverage"]
-    qp_arm_pct = (qp_lock_trigger_usd / notional * 100) if notional > 0 else 999
-    qp_floor_pct = (quick_profit_usd / notional * 100) if notional > 0 else 0
-    qp_arm_low_pct = (qp_arm_low_usd / notional * 100) if notional > 0 else 999
-    qp_floor_low_pct = (qp_floor_low_usd / notional * 100) if notional > 0 else 0
+    size_usdc_ref = trade["size_usdc"]
+    qp_arm_pct = (qp_lock_trigger_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else 999
+    qp_floor_pct = (quick_profit_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else 0
+    qp_arm_low_pct = (qp_arm_low_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else 999
+    qp_floor_low_pct = (qp_floor_low_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else 0
 
     # TTP (Trailing Take Profit) — réintégré en PLUS des paliers QP (pas à leur place) :
-    # suit le pic et peut donner un seuil plus protecteur que le plancher QP fixe une fois
-    # le trade allé bien au-delà des paliers (laisse courir les gros gagnants). Écart plafonné
-    # en $ (trailing_gap_usd) converti dynamiquement, comme le plancher QP. Surchargeable
-    # par trade (prise manuelle) via custom_trail_trigger_pct/custom_trailing_gap_usd.
+    # suit le pic de PnL% et peut donner un seuil plus protecteur que le plancher QP fixe une
+    # fois le trade allé bien au-delà des paliers (laisse courir les gros gagnants). Écart
+    # plafonné en $ (trailing_gap_usd) converti en % du PnL réel, comme le plancher QP.
+    # Surchargeable par trade (prise manuelle) via custom_trail_trigger_pct/custom_trailing_gap_usd.
     quick_profit_pct = float(cfg_qp["quick_profit_pct"]) if cfg_qp and "quick_profit_pct" in cfg_qp.keys() and cfg_qp["quick_profit_pct"] else 0.46
     trail_mult = float(cfg_qp["trailing_activation_mult"]) if cfg_qp and "trailing_activation_mult" in cfg_qp.keys() and cfg_qp["trailing_activation_mult"] else 1.0
     trail_trigger_pct = pick("custom_trail_trigger_pct", None, quick_profit_pct * trail_mult)
     trail_gap_pct_fixed = float(cfg_qp["trailing_gap_pct"]) if cfg_qp and "trailing_gap_pct" in cfg_qp.keys() and cfg_qp["trailing_gap_pct"] else 0.42
     trailing_gap_usd = pick("custom_trailing_gap_usd", "trailing_gap_usd", 1.0)
-    trail_gap_pct_dynamic = (trailing_gap_usd / notional * 100) if notional > 0 else trail_gap_pct_fixed
+    trail_gap_pct_dynamic = (trailing_gap_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else trail_gap_pct_fixed
     trail_gap_pct = min(trail_gap_pct_fixed, trail_gap_pct_dynamic)
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
         peak_pnl = pnl
         conn.execute("UPDATE paper_trades SET peak_pnl=? WHERE id=?", (peak_pnl, trade["id"]))
+    # Pic suivi en PnL% (avec levier), pas en mouvement de prix brut — cohérent avec
+    # Accumulation/Breakout, qui utilisent déjà ce même champ dans ce même sens.
     peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
-    if price_move_pct > peak_pct:
-        peak_pct = price_move_pct
+    if pnl_pct_live > peak_pct:
+        peak_pct = pnl_pct_live
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
 
     # Trailing PROGRESSIF : plus le pic dépasse le seuil d'activation, plus la tendance
@@ -2302,25 +2317,26 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             add_bot_log(user_id, f"🛑 {trade['coin']}: Stop Loss manuel touché à ${cur} (seuil: ${custom_sl_price}) — {round(pnl,2)} USDC", "warning")
     # TP manuel (%) — peut être défini/modifié à tout moment EN COURS de trade (pas
     # seulement à l'ouverture), pour n'importe quel mode. Prioritaire, comme le SL manuel.
-    # Comparé au PnL% AVEC effet de levier (pnl/size_usdc), cohérent avec ce qui est affiché
-    # sur la carte du trade (pas le simple mouvement de prix, qui ignore le levier).
+    # Comparé au PnL% AVEC effet de levier (pnl_pct_live), déjà cohérent avec ce qui est
+    # affiché sur la carte du trade.
     custom_tp_pct = trade.get("custom_take_profit_pct")
     if not close_reason and custom_tp_pct is not None:
-        pnl_pct_for_tp = pnl / trade["size_usdc"] * 100
         tp_armed = bool(trade.get("custom_tp_armed"))
-        if not tp_armed and pnl_pct_for_tp >= custom_tp_pct:
+        if not tp_armed and pnl_pct_live >= custom_tp_pct:
             conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
-            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_for_tp,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
-        elif tp_armed and pnl_pct_for_tp < custom_tp_pct:
+            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
+        elif tp_armed and pnl_pct_live < custom_tp_pct:
             close_reason = "TAKE_PROFIT_MANUEL"
-            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_for_tp,2)}% — {round(pnl,2)} USDC", "success")
+            add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {round(pnl,2)} USDC", "success")
     # Max Loss vérifié ensuite : sans ça, une fois le plancher armé, une chute brutale
     # (saut de prix entre deux vérifications) pouvait être mal étiquetée QP_FLOOR au lieu
     # de MAX_LOSS, car "prix <= seuil" est trivialement vrai pour toute valeur très négative.
-    if not close_reason and price_move_pct <= -max_loss_pct:
+    # BUG CORRIGÉ : comparé désormais au PnL% réel (pnl_pct_live), pas au mouvement de prix
+    # brut — le levier amplifie le gain/la perte, il n'entre plus dans le déclenchement.
+    if not close_reason and pnl_pct_live <= -max_loss_pct:
         close_reason = "MAX_LOSS"
         close_stop_level_pct = -max_loss_pct
-        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (mouvement prix: {round(price_move_pct,3)}%) — protection activée", "warning")
+        add_bot_log(user_id, f"🛡️ {trade['coin']}: Max Loss -{round(abs(pnl),2)} USDC (PnL: {round(pnl_pct_live,3)}%) — protection activée", "warning")
     # Plafond ABSOLU de PnL (%), optionnel/désactivable — ferme dès que ce seuil est atteint,
     # même si le trailing progressif ou le plancher QP voudrait continuer à laisser courir.
     # Contrairement au reste (basé sur le mouvement de prix brut), ce seuil se base sur le
@@ -2352,11 +2368,11 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
         if candidate_stops:
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
-            if price_move_pct <= stop_level_pct:
+            if pnl_pct_live <= stop_level_pct:
                 close_reason = reason
                 close_stop_level_pct = stop_level_pct
                 label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
-                add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic prix: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé QP: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
+                add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic PnL: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé QP: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
 
     if not close_reason:
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
