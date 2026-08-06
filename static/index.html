@@ -2631,7 +2631,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>05 août 2026</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>06 août 2026</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2680,9 +2680,9 @@ Confirmer ?`
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
               <li>Max Loss fixe (0.5% par défaut) — seule sortie forcée en perte</li>
-              <li>TP manuel par défaut = largeur du canal, plafonné à 1.5% — modifiable à tout moment, la dernière valeur définie fait toujours foi</li>
-              <li><b style={{color:"#f8fafc"}}>Toucher de cible</b> : si le prix atteint le niveau opposé (résistance pour un LONG, support pour un SHORT) avec au moins 0.3% de PnL déjà acquis, un plancher se verrouille à ce PnL — le trade continue de courir au-delà, ne redescend jamais sous ce plancher</li>
-              <li><b style={{color:"#f8fafc"}}>Trailing</b> : s'arme dès que le pic atteint 0.3%, verrouille alors 50% du pic comme plancher (réglages indépendants)</li>
+              <li><b style={{color:"#f8fafc"}}>Suivi dynamique du canal</b> : le support/résistance est recalculé pendant le trade (~toutes les 3 min) et le TP manuel suit l'amplitude du canal ACTUELLE, favorable ou non — ce n'est plus figé à l'ouverture</li>
+              <li><b style={{color:"#f8fafc"}}>TP manuel</b> : par défaut = largeur du canal (plafonné à 1.5%), modifiable à tout moment — la dernière valeur définie fait foi. S'arme au premier atteint</li>
+              <li><b style={{color:"#f8fafc"}}>Trailing post-armement</b> : une fois le TP armé, le plancher n'est plus figé au TP — il verrouille 50% du pic atteint (jamais sous le TP) pour laisser courir une progression au-delà, jusqu'à un vrai retournement</li>
               <li>Cassure confirmée du niveau d'entrée (support/résistance) : clôture même à perte, au-delà de la marge de confirmation</li>
             </ul>
           </div>
