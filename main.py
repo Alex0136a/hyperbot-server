@@ -1992,7 +1992,49 @@ def select_best_half_by_correlation(candidates: list, user_id: int, threshold: f
             add_bot_log(user_id, f"🔗 {c['coin']}: {c['action']} écarté — cluster corrélé [{coin_names}], gardé la meilleure moitié par confiance", "warning")
     return selected
 
-def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
+accumulation_dynamic_tp_cache = {}  # trade_id -> datetime du dernier recalcul (throttle les appels candles)
+ACCUMULATION_DYNAMIC_TP_COOLDOWN_MINUTES = 3  # même fréquence que le cycle de scan normal
+
+async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
+    """Recalcule le support/résistance ACTUEL pour le coin du trade et réajuste le TP manuel
+    (custom_take_profit_pct) sur l'amplitude du canal correspondante (plafonnée à 1.5%) — SUIT
+    le canal quelle que soit l'évolution (favorable ou défavorable), à la demande explicite de
+    l'utilisateur : plutôt qu'un trailing/toucher-de-cible séparés, le TP manuel lui-même (qui
+    s'arme en montée et clôture sur régression, logique déjà partagée) devient l'unique
+    protection de gain, combiné au Max Loss. Throttlé (toutes les ~3 min par trade) pour éviter
+    de spammer l'endpoint candles à chaque vérification de prix."""
+    last = accumulation_dynamic_tp_cache.get(trade["id"])
+    if last and (datetime.utcnow() - last).total_seconds() < ACCUMULATION_DYNAMIC_TP_COOLDOWN_MINUTES * 60:
+        return
+    accumulation_dynamic_tp_cache[trade["id"]] = datetime.utcnow()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            candles_raw = await fetch_candles(client, trade["coin"])
+        if not candles_raw or len(candles_raw) < 50:
+            return
+        candles = [{"h": float(c["h"]), "l": float(c["l"]), "c": float(c["c"]), "v": float(c["v"])} for c in candles_raw]
+        support, resistance = detect_support_resistance(candles)
+        if not support or not resistance or support <= 0:
+            return
+        new_channel_pct = (resistance - support) / support * 100
+        new_tp = min(round(new_channel_pct, 2), 1.5)
+        old_tp = trade.get("custom_take_profit_pct")
+        conn.execute("""UPDATE paper_trades SET custom_take_profit_pct=?, accumulation_channel_pct=?,
+            accumulation_support_price=?, accumulation_resistance_price=? WHERE id=?""",
+            (new_tp, round(new_channel_pct, 2), support, resistance, trade["id"]))
+        conn.commit()
+        # Répercuté sur le dict en mémoire pour que le reste de CETTE vérification (même cycle)
+        # utilise déjà la valeur fraîche, sans attendre un rechargement depuis la base.
+        trade["custom_take_profit_pct"] = new_tp
+        trade["accumulation_channel_pct"] = round(new_channel_pct, 2)
+        trade["accumulation_support_price"] = support
+        trade["accumulation_resistance_price"] = resistance
+        if old_tp is None or abs(new_tp - old_tp) >= 0.05:
+            add_bot_log(user_id, f"📐 {trade['coin']}: canal recalculé ({round(new_channel_pct,2)}%) — TP manuel ajusté à {new_tp}% (suit le canal, favorable ou non)", "info")
+    except Exception as e:
+        print(f"⚠️ refresh_accumulation_dynamic_tp error pour {trade.get('coin')}: {e}")
+
+async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
     C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement.
@@ -2017,18 +2059,43 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         accum_close_reason = None
         accum_log_msg = None
 
+        # Suivi dynamique du canal : recalcule support/résistance et réajuste le TP manuel en
+        # conséquence (voir refresh_accumulation_dynamic_tp). Le TP manuel, combiné au Max Loss
+        # et au trailing post-armement ci-dessous, forme désormais toute la protection de gain.
+        await refresh_accumulation_dynamic_tp(user_id, trade, conn)
+
+        # Suivi du pic de PnL% — nécessaire AVANT le TP manuel pour que le trailing
+        # post-armement (voir ci-dessous) dispose déjà du pic à jour ce cycle-ci.
+        accum_peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
+        if pnl_pct_live > accum_peak_pct:
+            accum_peak_pct = pnl_pct_live
+            conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
+
         # TP manuel (%) — peut être défini/modifié à tout moment en cours de trade,
         # prioritaire sur tout le reste (même le plafond de perte, puisque c'est un choix
         # explicite de l'utilisateur qui prime). Comparé au PnL% déjà signé (pnl_pct_live).
+        # Une fois ARMÉ (TP atteint pour la première fois), le plancher n'est plus figé au TP :
+        # il devient un TRAILING qui verrouille accumulation_trailing_lock_ratio_pct (50% par
+        # défaut) du pic atteint, JAMAIS sous le TP lui-même — pour laisser courir une
+        # progression au-delà du TP (ou une poursuite favorable du mouvement) jusqu'à un vrai
+        # retournement, plutôt que de couper pile au premier retour sous le seuil du TP.
         custom_tp_pct = trade.get("custom_take_profit_pct")
         if custom_tp_pct is not None:
             tp_armed = bool(trade.get("custom_tp_armed"))
             if not tp_armed and pnl_pct_live >= custom_tp_pct:
                 conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
-                add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
-            elif tp_armed and pnl_pct_live < custom_tp_pct:
-                accum_close_reason = "TAKE_PROFIT_MANUEL"
-                accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+                add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — plancher trailing armé, le trade continue de courir au-delà", "info")
+            elif tp_armed:
+                cfg_tp_trail = conn.execute("SELECT accumulation_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                tp_trail_lock_ratio = cfg_tp_trail["accumulation_trailing_lock_ratio_pct"] if cfg_tp_trail and "accumulation_trailing_lock_ratio_pct" in cfg_tp_trail.keys() and cfg_tp_trail["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
+                tp_trail_floor = max(custom_tp_pct, round(accum_peak_pct * (tp_trail_lock_ratio / 100), 4))
+                if pnl_pct_live < tp_trail_floor:
+                    if accum_peak_pct > custom_tp_pct * 1.05:  # progression notable au-delà du TP -> trailing, sinon simple retour au TP
+                        accum_close_reason = "ACCUMULATION_TRAILING_TP"
+                        accum_log_msg = f"🔒 {trade['coin']}: Trailing post-TP touché (pic {round(accum_peak_pct,2)}%, plancher {tp_trail_lock_ratio:.0f}% du pic = {round(tp_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+                    else:
+                        accum_close_reason = "TAKE_PROFIT_MANUEL"
+                        accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
         # Plafond de perte ABSOLU depuis le prix d'achat/vente — vérifié en priorité, avant
         # tout le reste. Protège même si la rupture de niveau (mesurée depuis le support/la
@@ -2040,105 +2107,31 @@ def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             accum_close_reason = "ACCUMULATION_MAX_LOSS"
             accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
 
-        # Suivi du pic de gain (même principe que le trailing du bot principal, mais sur le
-        # PnL réel — pnl_pct_live est déjà signé correctement selon la direction).
-        accum_peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
-        if pnl_pct_live > accum_peak_pct:
-            accum_peak_pct = pnl_pct_live
-            conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
-
-        # Toucher du niveau CIBLE (opposé au niveau d'entrée) — résistance pour un LONG, support
-        # pour un SHORT : l'objectif naturel de la stratégie de range. Dès le premier toucher
-        # (même marge de confirmation que la rupture, accumulation_breakdown_buffer_pct), un
-        # plancher de PnL% est armé et MÉMORISÉ À VIE sur le trade (colonne dédiée, jamais
-        # redescendu) — mais ce n'est PAS une clôture forcée : le trade continue de courir
-        # au-delà si le mouvement se poursuit, avec le trailing progressif habituel par-dessus.
-        target_touched_floor = float(trade["accumulation_target_touched_pct"]) if trade.get("accumulation_target_touched_pct") is not None else None
-        if target_touched_floor is None and not accum_close_reason:
-            target_level_raw = trade.get("accumulation_support_price") if is_short_accum else trade.get("accumulation_resistance_price")
-            if target_level_raw:
-                cfg_buf_target = conn.execute("SELECT accumulation_breakdown_buffer_pct, accumulation_trailing_arm_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                buf_pct_target = cfg_buf_target["accumulation_breakdown_buffer_pct"] if cfg_buf_target and "accumulation_breakdown_buffer_pct" in cfg_buf_target.keys() and cfg_buf_target["accumulation_breakdown_buffer_pct"] else 1.0
-                target_arm_min_pct = cfg_buf_target["accumulation_trailing_arm_pct"] if cfg_buf_target and "accumulation_trailing_arm_pct" in cfg_buf_target.keys() and cfg_buf_target["accumulation_trailing_arm_pct"] is not None else 0.3
-                target_level = float(target_level_raw)
-                # Marge appliquée VERS l'intérieur (contrairement à la rupture, qui exige un
-                # dépassement) : on considère le niveau "touché" un peu avant l'atteinte exacte,
-                # pour ne pas rater le toucher entre deux cycles de vérification.
-                target_touched_now = (
-                    (not is_short_accum and cur >= target_level * (1 - buf_pct_target / 100)) or
-                    (is_short_accum and cur <= target_level * (1 + buf_pct_target / 100))
-                )
-                # BUG CORRIGÉ : sur un canal très étroit (plus de largeur minimale imposée), la
-                # cible pouvait être "touchée" quasi immédiatement à ~0% de PnL, verrouillant un
-                # plancher proche de zéro — d'où des sorties à 0.00$ malgré le label TARGET_TOUCH.
-                # Même garde-fou que le trailing : n'arme QUE si le toucher représente déjà au
-                # moins accumulation_trailing_arm_pct de profit réel (0.3% par défaut). En dessous,
-                # on ne verrouille rien — le trade retente au cycle suivant si le prix reste proche.
-                if target_touched_now and pnl_pct_live >= target_arm_min_pct:
-                    target_touched_floor = pnl_pct_live
-                    conn.execute("UPDATE paper_trades SET accumulation_target_touched_pct=? WHERE id=?",
-                                 (target_touched_floor, trade["id"]))
-                    niveau_label = "support" if is_short_accum else "résistance"
-                    add_bot_log(user_id, f"🎯 {trade['coin']}: niveau cible ({niveau_label} ${target_level:.4g}) touché — plancher de gain verrouillé à {round(target_touched_floor,2)}% (+{round(pnl,2)} USDC), le trade continue de courir au-delà", "success")
+        if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
+            # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
+            # avec une marge de confirmation) -> on rachète même à perte plutôt que
+            # d'attendre indéfiniment une résistance qui a cédé
+            cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+            resistance_ref = float(trade["accumulation_resistance_price"])
+            breakout_level = resistance_ref * (1 + buffer_pct / 100)
+            if cur > breakout_level:
+                accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
+        elif not accum_close_reason and not is_short_accum and trade.get("accumulation_support_price"):
+            # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
+            # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
+            # support qui a cédé
+            cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
+            support_ref = float(trade["accumulation_support_price"])
+            breakdown_level = support_ref * (1 - buffer_pct / 100)
+            if cur < breakdown_level:
+                accum_close_reason = "ACCUMULATION_BREAKDOWN"
+                accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            pass  # plafond de perte déjà déclenché ci-dessus, priorité sur tout le reste
-        else:
-            cfg_trail = conn.execute("SELECT accumulation_trailing_arm_pct, accumulation_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            trail_arm_pct = cfg_trail["accumulation_trailing_arm_pct"] if cfg_trail and "accumulation_trailing_arm_pct" in cfg_trail.keys() and cfg_trail["accumulation_trailing_arm_pct"] is not None else 0.3
-            trail_lock_ratio = cfg_trail["accumulation_trailing_lock_ratio_pct"] if cfg_trail and "accumulation_trailing_lock_ratio_pct" in cfg_trail.keys() and cfg_trail["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
-
-            # Trailing simplifié — REMPLACE l'ancien système (déclencheur 0.15% + écart qui
-            # s'élargit progressivement), qui produisait des sorties quasi à 0.0$ : le plancher
-            # s'armait dès un pic minuscule (parfois 0.02-0.05%) et se faisait retoucher aussitôt.
-            # Nouveau principe : le plancher reste INACTIF tant que le pic n'a pas atteint
-            # trail_arm_pct (0.3% par défaut) — en dessous, seul le Max Loss protège, aucune
-            # clôture sur du bruit. Une fois armé, le plancher verrouille trail_lock_ratio (50%
-            # par défaut) du pic atteint — donc toujours une VRAIE sortie profitable (jamais
-            # proche de zéro), et non plus un écart fixe déconnecté du pic.
-            trailing_floor = None
-            if accum_peak_pct >= trail_arm_pct:
-                trailing_floor = round(accum_peak_pct * (trail_lock_ratio / 100), 4)
-
-            # Plancher effectif = le plus protecteur des deux : le trailing simplifié ci-dessus,
-            # ET le plancher armé au toucher du niveau cible (qui, lui, ne redescend jamais).
-            effective_floor = trailing_floor
-            if target_touched_floor is not None:
-                effective_floor = target_touched_floor if effective_floor is None else max(effective_floor, target_touched_floor)
-
-            if effective_floor is not None and pnl_pct_live <= effective_floor:
-                if target_touched_floor is not None and target_touched_floor >= (trailing_floor if trailing_floor is not None else float("-inf")):
-                    accum_close_reason = "ACCUMULATION_TARGET_TOUCH_TP"
-                    accum_log_msg = f"🎯🔒 {trade['coin']}: retour sous le plancher verrouillé au toucher de la cible ({round(target_touched_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
-                else:
-                    accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Trailing touché (pic {round(accum_peak_pct,2)}%, plancher {trail_lock_ratio:.0f}% du pic = {round(trailing_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
-
-            if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
-                # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
-                # avec une marge de confirmation) -> on rachète même à perte plutôt que
-                # d'attendre indéfiniment une résistance qui a cédé
-                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                resistance_ref = float(trade["accumulation_resistance_price"])
-                breakout_level = resistance_ref * (1 + buffer_pct / 100)
-                if cur > breakout_level:
-                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                    accum_log_msg = f"📈 {trade['coin']}: Résistance cassée confirmée (${cur:.4g} > ${breakout_level:.4g}, marge {buffer_pct}%) — rachat {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
-            elif not accum_close_reason and not is_short_accum and trade.get("accumulation_support_price"):
-                # Rupture de support CONFIRMÉE (marge au-delà du niveau, pas juste un bruit
-                # passager) -> on revend même à perte plutôt que d'attendre indéfiniment un
-                # support qui a cédé
-                cfg_accum = conn.execute("SELECT accumulation_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                buffer_pct = cfg_accum["accumulation_breakdown_buffer_pct"] if cfg_accum and "accumulation_breakdown_buffer_pct" in cfg_accum.keys() and cfg_accum["accumulation_breakdown_buffer_pct"] else 1.0
-                support_ref = float(trade["accumulation_support_price"])
-                breakdown_level = support_ref * (1 - buffer_pct / 100)
-                if cur < breakdown_level:
-                    accum_close_reason = "ACCUMULATION_BREAKDOWN"
-                    accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
-
-        if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason == "ACCUMULATION_TRAILING_TP" else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
@@ -3661,7 +3654,7 @@ async def scan_markets(user_id: int):
                 cur = price_row["price"]
                 trade_dict = dict(trade)
                 # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
-                result = manage_open_trade(user_id, trade_dict, cur, conn)
+                result = await manage_open_trade(user_id, trade_dict, cur, conn)
                 if result:
                     await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn, result.get("close_reason"))
             conn.commit()
@@ -4040,7 +4033,7 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     Simple relais vers manage_open_trade : AUCUNE logique de fermeture ici,
     pour éviter toute divergence avec la boucle de polling."""
     try:
-        result = manage_open_trade(user_id, trade, cur, conn)
+        result = await manage_open_trade(user_id, trade, cur, conn)
         if result:
             await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
             return True
@@ -4545,7 +4538,7 @@ async def update_open_positions(user_id: int):
         cur = prices.get(trade["coin"])
         if not cur:
             continue
-        result = manage_open_trade(user_id, trade, cur, conn)
+        result = await manage_open_trade(user_id, trade, cur, conn)
         if result:
             await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
     conn.commit()
