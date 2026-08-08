@@ -188,13 +188,6 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        # Taille par achat AUTOMATIQUE en % du capital disponible (compound) — remplace le
-        # montant fixe accumulation_size_usdc pour la détection auto uniquement. L'achat
-        # manuel dans Trading Manuel continue d'utiliser le montant $ tapé librement.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_size_pct REAL DEFAULT 2.0")
-        conn.commit()
-    except: pass
-    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_positions INTEGER DEFAULT 5")
         conn.commit()
     except: pass
@@ -3328,10 +3321,12 @@ async def scan_markets(user_id: int):
                 continue
 
             # Confirmation de mouvement UNIVERSELLE : pour toutes les entrées, pas seulement
-            # après une perte récente. Même logique que l'Accumulation : bougie dans le bon
-            # sens ET (RSI qui confirme la direction OU MACD qui confirme) — évite d'ouvrir
-            # sur un signal fort mais un marché qui n'a pas encore vraiment amorcé le
-            # mouvement (le "pic quasi nul avant Max Loss" observé sur TAO/INJ, puis GMX/ETH).
+            # après une perte récente. ASSOUPLI — la dernière bougie n'est plus obligatoire
+            # (une simple mèche à contre-sens sur une bougie ne devrait pas à elle seule
+            # invalider un momentum RSI/MACD par ailleurs clair) : RSI qui confirme la
+            # direction OU MACD qui confirme suffit désormais. Évite d'ouvrir sur un signal
+            # fort mais un marché qui n'a pas encore vraiment amorcé le mouvement (le "pic
+            # quasi nul avant Max Loss" observé sur TAO/INJ, puis GMX/ETH).
             last_candle_confirms = "o" in candles_raw[-1] and (
                 (action_ia == "LONG" and float(candles_raw[-1]["c"]) > float(candles_raw[-1]["o"])) or
                 (action_ia == "SHORT" and float(candles_raw[-1]["c"]) < float(candles_raw[-1]["o"]))
@@ -3347,10 +3342,14 @@ async def scan_markets(user_id: int):
                         rsi_confirms_direction = True
             macd_confirms_direction = (action_ia == "LONG" and macd and macd["macd"] > macd["signal"]) or \
                                        (action_ia == "SHORT" and macd and macd["macd"] < macd["signal"])
-            movement_confirmed = last_candle_confirms and (rsi_confirms_direction or macd_confirms_direction)
+            movement_confirmed = rsi_confirms_direction or macd_confirms_direction
 
             if not movement_confirmed:
-                add_bot_log(user_id, f"⏳ {coin}: signal {action_ia} ({confidence_ia}%) mais mouvement pas encore confirmé (bougie/RSI/MACD) — ignoré", "info")
+                manquants = []
+                if not last_candle_confirms: manquants.append("bougie à contre-sens")
+                if not rsi_confirms_direction: manquants.append("RSI ne progresse pas dans le sens")
+                if not macd_confirms_direction: manquants.append("MACD pas croisé dans le sens")
+                add_bot_log(user_id, f"⏳ {coin}: signal {action_ia} ({confidence_ia}%) mais mouvement pas encore confirmé ({', '.join(manquants)}) — ignoré", "info")
                 continue
 
             cooldown_min = config["coin_loss_cooldown_minutes"] if config and "coin_loss_cooldown_minutes" in config.keys() and config["coin_loss_cooldown_minutes"] else 15
@@ -3458,7 +3457,9 @@ async def scan_markets(user_id: int):
             last_summary = accumulation_summary_log_cache.get(user_id)
             if not last_summary or (datetime.utcnow() - last_summary).total_seconds() >= ACCUMULATION_SUMMARY_COOLDOWN_MINUTES * 60:
                 accumulation_summary_log_cache[user_id] = datetime.utcnow()
-                open_accum_count = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)).fetchone()[0]
+                conn_summary_check = get_db()
+                open_accum_count = conn_summary_check.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_accumulation=1", (user_id,)).fetchone()[0]
+                conn_summary_check.close()
                 add_bot_log(user_id,
                     f"💰 Accumulation — LONG {'ON' if config['accumulation_enabled'] else 'OFF'} "
                     f"({accum_long_in_range_count} coin(s) en zone RSI survente) · "
@@ -4854,7 +4855,6 @@ class UpdateConfigRequest(BaseModel):
     hard_cap_pct: Optional[float] = None
     accumulation_target_pct: Optional[float] = None
     accumulation_size_usdc: Optional[float] = None
-    accumulation_size_pct: Optional[float] = None
     accumulation_max_positions: Optional[int] = None
     accumulation_short_enabled: Optional[bool] = None
     accumulation_short_max_positions: Optional[int] = None
@@ -5042,7 +5042,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_enabled": config["accumulation_enabled"] if "accumulation_enabled" in config.keys() and config["accumulation_enabled"] is not None else 0,
         "accumulation_target_pct": config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0,
         "accumulation_size_usdc": config["accumulation_size_usdc"] if "accumulation_size_usdc" in config.keys() and config["accumulation_size_usdc"] else 20.0,
-        "accumulation_size_pct": config["accumulation_size_pct"] if "accumulation_size_pct" in config.keys() and config["accumulation_size_pct"] else 2.0,
         "accumulation_max_positions": config["accumulation_max_positions"] if "accumulation_max_positions" in config.keys() and config["accumulation_max_positions"] else 5,
         "accumulation_short_enabled": bool(config["accumulation_short_enabled"]) if "accumulation_short_enabled" in config.keys() else False,
         "accumulation_short_max_positions": config["accumulation_short_max_positions"] if "accumulation_short_max_positions" in config.keys() and config["accumulation_short_max_positions"] else 8,
@@ -5184,8 +5183,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_target_pct=? WHERE user_id=?", (req.accumulation_target_pct, user_id))
     if req.accumulation_size_usdc is not None:
         conn.execute("UPDATE bot_config SET accumulation_size_usdc=? WHERE user_id=?", (req.accumulation_size_usdc, user_id))
-    if req.accumulation_size_pct is not None:
-        conn.execute("UPDATE bot_config SET accumulation_size_pct=? WHERE user_id=?", (req.accumulation_size_pct, user_id))
     if req.accumulation_max_positions is not None:
         conn.execute("UPDATE bot_config SET accumulation_max_positions=? WHERE user_id=?", (req.accumulation_max_positions, user_id))
     if req.accumulation_short_enabled is not None:
