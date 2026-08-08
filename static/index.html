@@ -325,6 +325,11 @@ function LoginPage({ onLogin }) {
 }
 
 // ── MAIN APP ─────────────────────────────────────────────────
+// Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
+// d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
+// comparer manuellement le code ou deviner à partir du comportement observé.
+const APP_BUILD_VERSION = "2026-08-08.1";
+
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
   const [email, setEmail] = useState(()=>localStorage.getItem("hb_email")||"");
@@ -666,6 +671,7 @@ Confirmer ?`
           <div>
             <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>HyperBot AI</div>
             <div style={{fontSize:10,color:"#64748b"}}>{email}</div>
+            <div style={{fontSize:9,color:"#334155"}}>build {APP_BUILD_VERSION}</div>
           </div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
