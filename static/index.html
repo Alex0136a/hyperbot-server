@@ -2644,7 +2644,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>08 août 2026 (soir)</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>08 août 2026 (nuit)</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2656,6 +2656,7 @@ Confirmer ?`
               <li>RSI &lt; 45 → biais LONG · RSI ≥ 55 → biais SHORT · entre les deux (45-55) → aucun signal (WAIT)</li>
               <li>Confiance finale (après ajustements MACD/EMA/BTC) doit être ≥ 55%, sinon reconverti en WAIT</li>
               <li><b style={{color:"#f8fafc"}}>Filtre de tendance MACD</b> (tous les coins) : LONG uniquement si MACD haussier <i>et</i> déjà au-dessus de zéro · SHORT uniquement si MACD baissier <i>et</i> déjà sous zéro · sinon (ambigu) → bloqué dans les deux sens</li>
+              <li><b style={{color:"#f8fafc"}}>Confirmation de mouvement</b> : en plus du filtre de tendance, il faut que le RSI progresse dans le sens du signal <i>ou</i> que le MACD soit croisé dans le bon sens (la dernière bougie n'est plus une condition stricte) — évite d'ouvrir sur un signal fort mais un marché qui n'a pas encore vraiment amorcé le mouvement</li>
               <li>Seuil de confiance requis, adaptatif : ajusté selon séries de gains/pertes, tendance BTC, et pénalités par actif (voir Bilan)</li>
               <li>Filtre anti-corrélation : parmi les coins fortement corrélés, seule la meilleure moitié (par confiance) est retenue</li>
               <li>Signal contradictoire au dernier signal du même sens ignoré</li>
