@@ -915,6 +915,25 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Agrégats PAR TRANCHE DE CONFIANCE du signal d'origine, LIVE UNIQUEMENT, jamais purgés
+        # — répond à la question récurrente "un signal à 61-65% de confiance performe-t-il aussi
+        # bien qu'un signal à 80%+ ?". Bucket = plage de confiance (ex: "60-65%"). Uniquement
+        # pour les trades issus d'un signal du bot principal (Accumulation/Breakout n'ont pas de
+        # score de confiance comparable — non inclus ici).
+        conn.execute("""CREATE TABLE IF NOT EXISTS live_confidence_stats (
+            user_id INTEGER,
+            bucket TEXT,
+            total INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            gains REAL DEFAULT 0,
+            pertes REAL DEFAULT 0,
+            net REAL DEFAULT 0,
+            PRIMARY KEY (user_id, bucket)
+        )""")
+        conn.commit()
+    except: pass
+    try:
         # Ordres programmés (Trading Manuel) : surveillent un actif et ouvrent automatiquement
         # dès qu'une condition (prix ou indicateur) est remplie. Pas d'expiration — restent
         # actifs jusqu'à déclenchement ou annulation manuelle.
@@ -2581,6 +2600,26 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
                     gains=gains+excluded.gains, pertes=pertes+excluded.pertes, net=net+excluded.net,
                     total_minutes=total_minutes+excluded.total_minutes, updated_at=excluded.updated_at""",
                 (user_id, trade["coin"], won_n, lost_n, gain_amt, loss_amt, round(pnl, 2), minutes, datetime.utcnow().isoformat()))
+            # Tranche de confiance du signal d'origine — uniquement pour les trades du bot
+            # principal (is_manual=0, is_accumulation=0, is_breakout=0), qui seuls ont un
+            # signal_id avec une confiance comparable d'un trade à l'autre.
+            if not trade.get("is_manual") and not trade.get("is_accumulation") and not trade.get("is_breakout") and trade.get("signal_id"):
+                sig_row = conn.execute("SELECT confidence FROM signals WHERE id=?", (trade["signal_id"],)).fetchone()
+                if sig_row and sig_row["confidence"] is not None:
+                    conf = int(sig_row["confidence"])
+                    if conf < 60: bucket = "< 60%"
+                    elif conf < 65: bucket = "60-65%"
+                    elif conf < 70: bucket = "65-70%"
+                    elif conf < 75: bucket = "70-75%"
+                    elif conf < 80: bucket = "75-80%"
+                    elif conf < 85: bucket = "80-85%"
+                    else: bucket = "85%+"
+                    conn.execute("""INSERT INTO live_confidence_stats (user_id, bucket, total, wins, losses, gains, pertes, net)
+                        VALUES (?,?,1,?,?,?,?,?)
+                        ON CONFLICT(user_id, bucket) DO UPDATE SET
+                            total=total+1, wins=wins+excluded.wins, losses=losses+excluded.losses,
+                            gains=gains+excluded.gains, pertes=pertes+excluded.pertes, net=net+excluded.net""",
+                        (user_id, bucket, won_n, lost_n, gain_amt, loss_amt, round(pnl, 2)))
             conn.commit()
             apply_live_confidence_penalty(conn, user_id, trade["coin"])
         except Exception as e:
@@ -6821,6 +6860,19 @@ def get_bilan(user_id: int = Depends(get_current_user)):
                     "total": total, "win_rate": win_rate, "net": net
                 })
 
+    # Performance par tranche de confiance du signal d'origine (bot principal uniquement) —
+    # répond à "un signal à 61-65% performe-t-il aussi bien qu'un signal à 80%+ ?"
+    conf_rows = conn.execute("SELECT * FROM live_confidence_stats WHERE user_id=?", (user_id,)).fetchall()
+    bucket_order = ["< 60%", "60-65%", "65-70%", "70-75%", "75-80%", "80-85%", "85%+"]
+    by_confidence = sorted([{
+        "bucket": r["bucket"],
+        "total": r["total"] or 0,
+        "wins": r["wins"] or 0,
+        "losses": r["losses"] or 0,
+        "net": round(r["net"] or 0, 2),
+        "win_rate": round((r["wins"] or 0) / max(r["total"] or 1, 1) * 100, 1)
+    } for r in conf_rows], key=lambda x: bucket_order.index(x["bucket"]) if x["bucket"] in bucket_order else 99)
+
     conn.close()
 
     open_pnl_val = open_pnl["open_pnl"] or 0
@@ -6859,7 +6911,8 @@ def get_bilan(user_id: int = Depends(get_current_user)):
             "winrate_threshold": LIVE_PENALTY_WINRATE_THRESHOLD,
             "min_confidence_imposed": LIVE_PENALTY_MIN_CONFIDENCE
         },
-        "recovering_sanctioned_coins": recovering_sanctioned_coins
+        "recovering_sanctioned_coins": recovering_sanctioned_coins,
+        "by_confidence": by_confidence
     }
 
 @app.get("/api/stats/daily")
