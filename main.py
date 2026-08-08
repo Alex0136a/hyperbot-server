@@ -7087,6 +7087,16 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
     conn.close()
     return {"message": f"{deleted + deleted2} signaux supprimés · {remaining} restants"}
 
+# ── VERSION ──────────────────────────────────────────────────
+# Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
+# simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
+# sans avoir à deviner à partir du comportement observé du bot.
+BACKEND_BUILD_VERSION = "2026-08-08.1"
+
+@app.get("/api/version")
+def get_version():
+    return {"backend_build": BACKEND_BUILD_VERSION}
+
 # ── SERVIR L'INTERFACE ───────────────────────────────────────
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
