@@ -1800,59 +1800,71 @@ Respond ONLY JSON: {{"action":"LONG"|"SHORT"|"WAIT","confidence":0-100,"entry":n
 def analyze_with_rules(coin: str, tech: dict, price: float, max_loss_usd: float = 0.75, size_usdc: float = 50.0) -> dict:
     """Décision 100% gratuite basée sur des règles techniques fixes (RSI/MACD/EMA/Volume) —
     utilisée en mode Paper quand l'utilisateur ne veut pas payer d'appels IA sur des trades simulés.
-    Reproduit la même heuristique que celle suggérée à l'IA (RSI<25=LONG, RSI>75=SHORT, etc.)
-    mais de façon 100% mécanique et gratuite. SL calculé pour correspondre à 1.5× Max Loss
-    (cohérent avec la protection $ réelle, pas de conflit) ; TP1/TP2 restent basés sur l'ATR."""
+    SL calculé pour correspondre à 1.5× Max Loss (cohérent avec la protection $ réelle, pas de
+    conflit) ; TP1/TP2 restent basés sur l'ATR.
+
+    RECONSTRUIT : la TENDANCE (MACD) conditionne la décision DÈS LE DÉPART, plutôt que de
+    générer un signal purement sur le niveau de RSI puis le bloquer après coup si la tendance
+    contredit. Avant ce changement, un RSI élevé proposait systématiquement un SHORT même en
+    pleine tendance haussière soutenue — un signal illogique dès sa génération, qu'un filtre
+    séparé devait ensuite rattraper. Désormais : en tendance haussière, seul un LONG peut être
+    proposé (le RSI sert à trouver le bon point d'entrée — un creux temporaire dans la hausse —
+    pas à parier contre elle) ; en tendance baissière, symétriquement, seul un SHORT. Sans
+    tendance nette (MACD ambigu), aucun signal — les marchés sans tendance claire sont le
+    terrain d'Accumulation (retour à la moyenne), pas du bot principal (suivi de tendance)."""
     rsi = tech.get("rsi") or 50
     atr = tech.get("atr") or price * 0.01
     ema20, ema50, ema200 = tech.get("ema20"), tech.get("ema50"), tech.get("ema200")
     macd_bull, macd_bear = tech.get("macd_bull"), tech.get("macd_bear")
+    macd_val = tech.get("macd_value")
     vol_trend = tech.get("volume_trend")
 
     ema_bull = bool(ema20 and ema50 and ema200 and ema20 > ema50 > ema200)
     ema_bear = bool(ema20 and ema50 and ema200 and ema20 < ema50 < ema200)
 
+    # Tendance déterminée EN PREMIER — même critère que l'ancien filtre séparé (MACD croisé ET
+    # déjà du bon côté de zéro), mais appliqué ICI, à la source de la décision.
+    trend = "NEUTRAL"
+    if macd_val is not None and macd_bull is not None:
+        if macd_bull and macd_val > 0:
+            trend = "BULL"
+        elif macd_bear and macd_val < 0:
+            trend = "BEAR"
+
     action, confidence, signals = "WAIT", 50, []
     rsi_extreme = rsi < 25 or rsi > 75
     is_recent_spike = tech.get("is_recent_spike", False)
-    # Lors d'un RSI extrême causé par un PIC RAPIDE (pas une tendance soutenue sur plusieurs
-    # jours), MACD/EMA ne font que refléter le même mouvement récent de façon quasi
-    # tautologique — les traiter comme une vraie "contradiction indépendante" pénaliserait à
-    # tort un RSI extrême qui a statistiquement de bonnes chances de retour à la moyenne
-    # (fade). On neutralise donc leur pénalité (pas leur bonus) dans ce cas précis uniquement.
     skip_contradiction_penalty = rsi_extreme and is_recent_spike
 
-    if rsi < 25:
-        action, confidence = "LONG", 78
-        signals.append(f"RSI {rsi} survente forte")
-    elif rsi > 75:
-        action, confidence = "SHORT", 78
-        signals.append(f"RSI {rsi} surachat fort")
-    elif rsi <= 45:
-        action, confidence = "LONG", 64
-        signals.append(f"RSI {rsi} zone de rebond")
-    elif rsi >= 55:
-        action, confidence = "SHORT", 64
-        signals.append(f"RSI {rsi} zone de repli")
+    if trend == "BULL":
+        if rsi < 25:
+            action, confidence = "LONG", 78
+            signals.append(f"RSI {rsi} survente forte + tendance haussière confirmée")
+        elif rsi <= 45:
+            action, confidence = "LONG", 64
+            signals.append(f"RSI {rsi} creux dans la tendance haussière")
+        # RSI > 45 en tendance haussière : pas de creux net, pas d'entrée fraîche -> WAIT
+    elif trend == "BEAR":
+        if rsi > 75:
+            action, confidence = "SHORT", 78
+            signals.append(f"RSI {rsi} surachat fort + tendance baissière confirmée")
+        elif rsi >= 55:
+            action, confidence = "SHORT", 64
+            signals.append(f"RSI {rsi} repli dans la tendance baissière")
+        # RSI < 55 en tendance baissière : pas de repli net, pas d'entrée fraîche -> WAIT
+    # trend == "NEUTRAL" : aucun signal, terrain d'Accumulation plutôt que du bot principal
 
+    # MACD déjà garanti cohérent par construction (c'est lui qui a défini la tendance) — reste
+    # l'EMA (indicateur plus lent, peut encore contredire ponctuellement) comme confluence
+    # additionnelle, bonus ou malus de confiance.
     if action == "LONG":
-        if macd_bull:
-            confidence += 8; signals.append("MACD haussier confirmé")
-        elif macd_bear and not skip_contradiction_penalty:
-            confidence -= 12; signals.append("MACD contredit (baissier)")
-        elif macd_bear:
-            signals.append("MACD baissier mais pic rapide en cours — pas retenu contre le signal")
+        signals.append("MACD haussier confirmé (tendance)")
         if ema_bull:
             confidence += 6; signals.append("Structure EMA haussière")
         elif ema_bear and not skip_contradiction_penalty:
             confidence -= 10
     elif action == "SHORT":
-        if macd_bear:
-            confidence += 8; signals.append("MACD baissier confirmé")
-        elif macd_bull and not skip_contradiction_penalty:
-            confidence -= 12; signals.append("MACD contredit (haussier)")
-        elif macd_bull:
-            signals.append("MACD haussier mais pic rapide en cours — pas retenu contre le signal")
+        signals.append("MACD baissier confirmé (tendance)")
         if ema_bear:
             confidence += 6; signals.append("Structure EMA baissière")
         elif ema_bull and not skip_contradiction_penalty:
@@ -7122,7 +7134,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-09.2"
+BACKEND_BUILD_VERSION = "2026-08-09.3"
 
 @app.get("/api/version")
 def get_version():
