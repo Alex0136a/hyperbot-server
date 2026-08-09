@@ -540,6 +540,15 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plancher PRÉCOCE (trailing) — comble le trou entre Max Loss et l'armement du trailing
+        # principal (1% par défaut) : sans ça, un trade qui culmine entre les deux niveaux (ex:
+        # pic à 0.79%, observé concrètement sur APT) n'a aucune protection et peut retomber
+        # jusqu'au Max Loss. Dès ce seuil de pic atteint, un trailing (écart -0.42%) prend le
+        # relais jusqu'à ce que le trailing principal (1%) prenne la main à son tour.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN early_floor_arm_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN trailing_gap_pct REAL DEFAULT 0.42")
         conn.commit()
     except: pass
@@ -2434,12 +2443,30 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             candidate_stops.append(("QP_FLOOR", active_floor_pct))
         if peak_pct >= trail_trigger_pct:
             candidate_stops.append(("TRAILING_PROFIT", peak_pct - trail_gap_pct))
+        # Plancher PRÉCOCE devenu TRAILING (pas fixe) — comble le trou entre Max Loss et
+        # l'armement du trailing principal (1% par défaut), mais laisse courir une partie du
+        # gain proportionnellement au pic, comme le trailing principal, plutôt qu'un montant
+        # minuscule figé. Formule : pic - même écart que le trailing principal (0.42% par
+        # défaut, non élargi ici — l'élargissement progressif est réservé au trailing principal
+        # une fois armé, voir trail_gap_pct plus haut). Ex: pic à 0.99% -> plancher à 0.57%,
+        # garde plus de la moitié du gain (au lieu de couper à 0.08% fixe comme avant).
+        # BASCULE NETTE (pas de max() entre les deux) : dès que le pic atteint le seuil
+        # d'armement du trailing principal (1%), ce plancher précoce se désactive et laisse
+        # entièrement la main au trailing principal (avec son propre élargissement progressif)
+        # — sans cette bascule explicite, le plancher précoce (écart fixe non élargi) resterait
+        # systématiquement plus serré que le trailing principal élargi, et l'empêcherait de
+        # jamais laisser courir les gros mouvements comme il est censé le faire.
+        cfg_early = conn.execute("SELECT early_floor_arm_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        early_floor_arm_pct = cfg_early["early_floor_arm_pct"] if cfg_early and "early_floor_arm_pct" in cfg_early.keys() and cfg_early["early_floor_arm_pct"] is not None else 0.5
+        if early_floor_arm_pct <= peak_pct < trail_trigger_pct:
+            candidate_stops.append(("EARLY_FLOOR", peak_pct - trail_gap_pct))
+
         if candidate_stops:
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
             if pnl_pct_live <= stop_level_pct:
                 close_reason = reason
                 close_stop_level_pct = stop_level_pct
-                label = "Plancher QP" if reason == "QP_FLOOR" else "Trailing Profit"
+                label = "Plancher QP" if reason == "QP_FLOOR" else ("Trailing Profit" if reason == "TRAILING_PROFIT" else "Plancher précoce")
                 add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic PnL: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé QP: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
 
     if not close_reason:
@@ -2682,7 +2709,7 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
             print(f"⚠️ live_daily_stats/live_coin_stats update error: {e}")
     # Ré-entrée rapide : uniquement après une sortie PROFITABLE du bot (pas manuelle,
     # pas après un Max Loss/SL — on ne "poursuit" pas une position qui vient de perdre)
-    if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR"):
+    if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR", "EARLY_FLOOR"):
         await try_rapid_reentry(user_id, trade, conn)
 
 async def scan_markets(user_id: int):
@@ -4893,6 +4920,7 @@ class UpdateConfigRequest(BaseModel):
     qp_floor_low_usd: Optional[float] = None
     quick_profit_pct: Optional[float] = None
     max_loss_pct: Optional[float] = None
+    early_floor_arm_pct: Optional[float] = None
     trailing_gap_pct: Optional[float] = None
     qp_lock_trigger_pct: Optional[float] = None
     rsi_period: Optional[int] = None
@@ -5080,6 +5108,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
         "quick_profit_pct": config["quick_profit_pct"] if "quick_profit_pct" in config.keys() and config["quick_profit_pct"] else 0.46,
         "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 1.0,
+        "early_floor_arm_pct": config["early_floor_arm_pct"] if "early_floor_arm_pct" in config.keys() and config["early_floor_arm_pct"] is not None else 0.5,
         "trailing_gap_pct": config["trailing_gap_pct"] if "trailing_gap_pct" in config.keys() and config["trailing_gap_pct"] else 0.42,
         "qp_lock_trigger_pct": config["qp_lock_trigger_pct"] if "qp_lock_trigger_pct" in config.keys() and config["qp_lock_trigger_pct"] else 0.63,
         "rsi_period": config["rsi_period"] if "rsi_period" in config.keys() and config["rsi_period"] else 14,
@@ -5259,6 +5288,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET quick_profit_pct=? WHERE user_id=?", (req.quick_profit_pct, user_id))
     if req.max_loss_pct is not None:
         conn.execute("UPDATE bot_config SET max_loss_pct=? WHERE user_id=?", (req.max_loss_pct, user_id))
+    if req.early_floor_arm_pct is not None:
+        conn.execute("UPDATE bot_config SET early_floor_arm_pct=? WHERE user_id=?", (req.early_floor_arm_pct, user_id))
     if req.trailing_gap_pct is not None:
         conn.execute("UPDATE bot_config SET trailing_gap_pct=? WHERE user_id=?", (req.trailing_gap_pct, user_id))
     if req.qp_lock_trigger_pct is not None:
@@ -7091,7 +7122,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-08.1"
+BACKEND_BUILD_VERSION = "2026-08-09.2"
 
 @app.get("/api/version")
 def get_version():
