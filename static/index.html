@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-08.1";
+const APP_BUILD_VERSION = "2026-08-09.2";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1761,6 +1761,7 @@ Confirmer ?`
                     {key:"max_same_direction_trend",label:"Max même direction (tendance confirmée)",def:3,step:1,min:1,max:10},
                     {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.0,step:0.1,min:1,max:5},
                     {key:"trailing_gap_pct",label:"Écart trailing (% prix)",def:0.42,step:0.01,min:0.02,max:5},
+                    {key:"early_floor_arm_pct",label:"Plancher précoce - pic minimum pour armer (% PnL)",def:0.5,step:0.05,min:0.1,max:2},
                     {key:"trailing_gap_usd",label:"Plafond écart trailing ($)",def:1.0,step:0.1,min:0.1,max:20},
                     {key:"trailing_widen_max_mult",label:"Trailing progressif - plafond (×)",def:3.0,step:0.5,min:1,max:10},
                     {key:"hard_cap_pct",label:"Plafond absolu de PnL (%)",def:2.5,step:0.1,min:0.1,max:50},
@@ -2651,7 +2652,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>08 août 2026 (nuit)</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>09 août 2026</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2679,6 +2680,7 @@ Confirmer ?`
               <li>Max Loss — ferme si PnL% ≤ -1% par défaut (réglable, ou surchargeable par trade)</li>
               <li>Plafond absolu (Hard Cap) — optionnel, ferme dès que le PnL% atteint le seuil fixé (2.5% par défaut), même si le trailing voudrait continuer</li>
               <li>Plancher QP à deux paliers ($ fixes convertis en % du PnL)</li>
+              <li><b style={{color:"#f8fafc"}}>Plancher précoce (trailing)</b> : dès que le pic atteint 0.5% de PnL, un trailing prend le relais — plancher = pic - 0.42% (même écart que le trailing principal, non élargi) — jusqu'à ce que le pic atteigne 1%, où le trailing principal prend la main avec son propre élargissement progressif. Comble le trou entre Max Loss et l'armement du trailing principal</li>
               <li><b style={{color:"#f8fafc"}}>Trailing</b> : s'ARME dès que le PnL% (avec levier) atteint 1% par défaut — capte volontairement les petits mouvements de prix, d'autant plus vite que le levier est élevé (à x5, 0.2% de mouvement réel suffit) ; le plancher protégé grandit d'autant à levier élevé</li>
               <li>Le plus protecteur entre le plancher QP et le plancher du Trailing s'applique</li>
             </ul>
