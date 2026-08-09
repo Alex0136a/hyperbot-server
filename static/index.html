@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-09.4";
+const APP_BUILD_VERSION = "2026-08-09.5";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1318,7 +1318,7 @@ Confirmer ?`
             </div>
             {accumulationEnabled && (
               <div style={{padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
-                <div style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginBottom:6}}>🏆 Détection auto restreinte aux actifs réellement rentables (max 10, net positif uniquement)</div>
+                <div style={{fontSize:10,color:"#fbbf24",fontWeight:700,marginBottom:6}}>🏆 Priorité de détection sur les actifs réellement rentables (max 10, net positif) — les autres restent éligibles, juste traités après</div>
                 {topPerformingCoins.length === 0 ? (
                   <div style={{fontSize:9,color:"#475569"}}>Aucun coin ne remplit encore les critères (min. 3 trades fermés ET net positif) — aucune restriction appliquée pour l'instant, tous les coins sont éligibles.</div>
                 ) : (
