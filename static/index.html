@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-09.5";
+const APP_BUILD_VERSION = "2026-08-10.1";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -442,7 +442,7 @@ function App() {
         apiCall("/api/prices","GET",null,token),
         apiCall("/api/stats","GET",null,token),
         apiCall("/api/positions","GET",null,token),
-        apiCall("/api/bot/logs","GET",null,token),
+        apiCall(persistentLogs?"/api/bot/logs?persistent=true&limit=5000":"/api/bot/logs","GET",null,token),
         apiCall("/api/stats/ai-usage","GET",null,token),
         apiCall("/api/signals/history?limit=50","GET",null,token),
         apiCall("/api/coins/paused","GET",null,token),
