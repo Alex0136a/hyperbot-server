@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-10.1";
+const APP_BUILD_VERSION = "2026-08-10.2";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2648,7 +2648,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>09 août 2026 (nuit)</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>10 août 2026</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2692,6 +2692,7 @@ Confirmer ?`
               <li>Support (LONG) ou résistance (SHORT) détecté à proximité du prix (tolérance réglable, 1% par défaut)</li>
               <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
               <li><b style={{color:"#f8fafc"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ou</i> MACD qui bascule dans le bon sens — pas juste "être dans la zone"</li>
+              <li><b style={{color:"#f8fafc"}}>Filtre de tendance de fond</b> : LONG bloqué si la tendance (MACD) est clairement baissière, SHORT bloqué si clairement haussière — pas besoin d'être favorable (Accumulation vise les marchés sans tendance nette), juste pas franchement contre. Évite les "supports"/"résistances" qui cèdent dans une tendance soutenue</li>
               <li>Levier dédié, séparé LONG/SHORT (x2 par défaut chacun)</li>
               <li>Taille = 50% du capital ÷ positions Accumulation simultanées max</li>
               <li>Aucune restriction de corrélation appliquée (indépendant du bot principal)</li>
