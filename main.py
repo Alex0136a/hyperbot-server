@@ -3155,7 +3155,28 @@ async def scan_markets(user_id: int):
                                     rsi_recovering = True
                             macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
                             reversal_confirmed = price_bouncing_up and (rsi_recovering or macd_bull_confirm)
-                            if reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
+                            # Filtre de tendance de fond — même calcul que le bot principal (MACD
+                            # croisé ET du bon côté de zéro). N'exige PAS que la tendance soit
+                            # haussière (Accumulation existe justement pour les marchés SANS
+                            # tendance nette) mais bloque si elle est clairement BAISSIÈRE : un
+                            # "support" dans une tendance baissière soutenue n'en est souvent pas
+                            # un, le rebond de 3 bougies n'étant que du bruit avant la prochaine
+                            # jambe de baisse — observé concrètement sur plusieurs Max Loss à pic
+                            # quasi nul (entrée invalidée quasi immédiatement).
+                            macd_val_bg = tech.get("macd_value")
+                            macd_bull_bg = tech.get("macd_bull")
+                            macd_bear_bg = tech.get("macd_bear")
+                            trend_bg = "NEUTRAL"
+                            if macd_val_bg is not None and macd_bull_bg is not None:
+                                if macd_bull_bg and macd_val_bg > 0:
+                                    trend_bg = "BULL"
+                                elif macd_bear_bg and macd_val_bg < 0:
+                                    trend_bg = "BEAR"
+                            if reversal_confirmed and trend_bg == "BEAR":
+                                if should_log_diag:
+                                    accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} + retournement confirmé, mais tendance de fond clairement baissière — pas d'achat (support jugé peu fiable)", "info")
+                            elif reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed:
                                 accumulation_candidates.append({"coin": coin, "support": support, "resistance": resistance, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
@@ -3208,7 +3229,24 @@ async def scan_markets(user_id: int):
                                     rsi_falling = True
                             macd_bear_confirm = bool(macd and macd["macd"] < macd["signal"])
                             reversal_confirmed_short = price_bouncing_down and (rsi_falling or macd_bear_confirm)
-                            if reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
+                            # Filtre de tendance de fond — miroir du LONG. Bloque si la tendance
+                            # est clairement HAUSSIÈRE (une "résistance" dans une tendance
+                            # haussière soutenue cède souvent, le repli de 3 bougies n'étant que
+                            # du bruit avant la prochaine jambe de hausse).
+                            macd_val_bg_s = tech.get("macd_value")
+                            macd_bull_bg_s = tech.get("macd_bull")
+                            macd_bear_bg_s = tech.get("macd_bear")
+                            trend_bg_s = "NEUTRAL"
+                            if macd_val_bg_s is not None and macd_bull_bg_s is not None:
+                                if macd_bull_bg_s and macd_val_bg_s > 0:
+                                    trend_bg_s = "BULL"
+                                elif macd_bear_bg_s and macd_val_bg_s < 0:
+                                    trend_bg_s = "BEAR"
+                            if reversal_confirmed_short and trend_bg_s == "BULL":
+                                if should_log_diag_short:
+                                    accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} + retournement confirmé, mais tendance de fond clairement haussière — pas de vente (résistance jugée peu fiable)", "info")
+                            elif reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
                                 add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             elif reversal_confirmed_short:
                                 accumulation_candidates.append({"coin": coin, "resistance": resistance, "support": support, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
@@ -6911,7 +6949,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-09.4"
+BACKEND_BUILD_VERSION = "2026-08-10.2"
 
 @app.get("/api/version")
 def get_version():
