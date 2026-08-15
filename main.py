@@ -2507,7 +2507,13 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
         atr = calc_atr(candles,14)
         vwap = calc_vwap(candles)
         rsi = calc_rsi(closes,14)
-        vol_avg = sum(vols[-20:])/20
+        # BUG CORRIGÉ : vols[-1] est la bougie EN COURS de formation (pas encore clôturée), son
+        # volume ne reflète que le temps déjà écoulé dans cette bougie — comparé à une moyenne
+        # de bougies complètes, le ratio est systématiquement sous-estimé (ex: 0.03x observé
+        # alors que le volume réel n'était pas anormalement bas). Utilise la dernière bougie
+        # CLÔTURÉE (vols[-2]) partout, et l'exclut aussi de la moyenne des 20.
+        vol_avg = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else sum(vols[-20:]) / 20
+        vol_cur_closed = vols[-2] if len(vols) >= 2 else vols[-1]
         tech = {
             "rsi": round(rsi,2) if rsi else None,
             "macd_bull": (macd["macd"] > macd["signal"]) if macd else False,
@@ -2519,7 +2525,7 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
             "bb_lower": round(bb["lower"],4) if bb else None,
             "atr": round(atr,4) if atr else None,
             "vwap": round(vwap,4) if vwap else None,
-            "volume_trend": "SPIKE" if vols[-1]>vol_avg*1.5 else "ABOVE_AVG" if vols[-1]>vol_avg else "BELOW_AVG",
+            "volume_trend": "SPIKE" if vol_cur_closed>vol_avg*1.5 else "ABOVE_AVG" if vol_cur_closed>vol_avg else "BELOW_AVG",
         }
         # Signal frais basé sur les règles (rapide, pas d'appel IA payant pour une ré-entrée)
         sig = analyze_with_rules(coin, tech, price)
@@ -2906,8 +2912,12 @@ async def scan_markets(user_id: int):
             atr = calc_atr(candles, int(atr_period))
             vwap = calc_vwap(candles)
             rsi = calc_rsi(closes, int(rsi_period))
-            vol_avg = sum(vols[-20:]) / 20
-            vol_cur = vols[-1]
+            # BUG CORRIGÉ : vols[-1] est la bougie EN COURS (pas clôturée), sous-estime
+            # systématiquement le volume réel comparé à une moyenne de bougies complètes —
+            # observé concrètement (ratio 0.03x sur CRV, alors que le volume n'était pas
+            # anormalement bas). Utilise la dernière bougie CLÔTURÉE partout.
+            vol_avg = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else sum(vols[-20:]) / 20
+            vol_cur = vols[-2] if len(vols) >= 2 else vols[-1]
 
             # Détection support/résistance + marché en range — SIGNALEMENT UNIQUEMENT, le bot
             # ne programme jamais l'ordre lui-même (décision volontaire, voir discussion).
@@ -6538,8 +6548,8 @@ async def refresh_market_data_for_coin(coin: str, user_id: int = Depends(get_cur
     atr = calc_atr(candles, 14)
     vwap = calc_vwap(candles)
     rsi = calc_rsi(closes, 14)
-    vol_avg = sum(vols[-20:]) / 20
-    vol_cur = vols[-1]
+    vol_avg = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else sum(vols[-20:]) / 20
+    vol_cur = vols[-2] if len(vols) >= 2 else vols[-1]
     tech = {
         "rsi": round(rsi, 2) if rsi else None,
         "macd_bull": (macd["macd"] > macd["signal"]) if macd else False,
@@ -6949,7 +6959,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-10.2"
+BACKEND_BUILD_VERSION = "2026-08-10.3"
 
 @app.get("/api/version")
 def get_version():
