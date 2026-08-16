@@ -2325,6 +2325,8 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     trailing_gap_usd = pick("custom_trailing_gap_usd", "trailing_gap_usd", 1.0)
     trail_gap_pct_dynamic = (trailing_gap_usd / size_usdc_ref * 100) if size_usdc_ref > 0 else trail_gap_pct_fixed
     trail_gap_pct = min(trail_gap_pct_fixed, trail_gap_pct_dynamic)
+    cfg_early = conn.execute("SELECT early_floor_arm_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    early_floor_arm_pct = cfg_early["early_floor_arm_pct"] if cfg_early and "early_floor_arm_pct" in cfg_early.keys() and cfg_early["early_floor_arm_pct"] is not None else 0.5
 
     peak_pnl = float(trade["peak_pnl"]) if trade["peak_pnl"] is not None else 0.0
     if pnl > peak_pnl:
@@ -2334,8 +2336,17 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
     # et à Max Loss.
     peak_pct = float(trade["peak_price_pct"]) if trade.get("peak_price_pct") is not None else 0.0
     if pnl_pct_live > peak_pct:
+        peak_before_update = peak_pct
         peak_pct = pnl_pct_live
         conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (peak_pct, trade["id"]))
+        # Log de confirmation au PREMIER franchissement du seuil d'armement — jusque-là le
+        # trailing s'armait silencieusement (rien loggé avant la clôture éventuelle), rendant
+        # impossible de savoir s'il était actif ou non sans deviner. Même principe que le
+        # message d'armement déjà présent sur Accumulation/Breakout.
+        if peak_before_update < trail_trigger_pct <= peak_pct:
+            add_bot_log(user_id, f"🔒 {trade['coin']}: Trailing armé — pic {round(peak_pct,2)}% ≥ seuil {round(trail_trigger_pct,2)}%, plancher initial ≈{round(peak_pct - trail_gap_pct,2)}% (évolue avec le pic)", "info")
+        elif peak_before_update < early_floor_arm_pct <= peak_pct:
+            add_bot_log(user_id, f"🔒 {trade['coin']}: Plancher précoce armé — pic {round(peak_pct,2)}% ≥ seuil {round(early_floor_arm_pct,2)}%, sortie garantie ≈{round(peak_pct - trail_gap_pct,2)}% (se désactive au profit du trailing principal dès {round(trail_trigger_pct,2)}%)", "info")
 
     # Trailing PROGRESSIF : plus le pic de PnL% dépasse le seuil d'activation, plus la tendance
     # semble soutenue — l'écart s'élargit proportionnellement (plafonné) pour laisser courir les
@@ -2422,8 +2433,6 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         # — sans cette bascule explicite, le plancher précoce (écart fixe non élargi) resterait
         # systématiquement plus serré que le trailing principal élargi, et l'empêcherait de
         # jamais laisser courir les gros mouvements comme il est censé le faire.
-        cfg_early = conn.execute("SELECT early_floor_arm_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        early_floor_arm_pct = cfg_early["early_floor_arm_pct"] if cfg_early and "early_floor_arm_pct" in cfg_early.keys() and cfg_early["early_floor_arm_pct"] is not None else 0.5
         if early_floor_arm_pct <= peak_pct < trail_trigger_pct:
             candidate_stops.append(("EARLY_FLOOR", peak_pct - trail_gap_pct))
 
@@ -6959,7 +6968,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-10.3"
+BACKEND_BUILD_VERSION = "2026-08-10.5"
 
 @app.get("/api/version")
 def get_version():
