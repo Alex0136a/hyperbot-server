@@ -2544,15 +2544,17 @@ async def try_rapid_reentry(user_id: int, closed_trade: dict, conn):
         if sig["confidence"] < required_conf:
             return
 
-        max_same_dir = cfg["max_same_direction_neutral"] if "max_same_direction_neutral" in cfg.keys() else 2
-        same_dir_count = conn.execute(
-            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND action=? AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id, action)
+        # Seule limite : le nombre de trades simultanés max du bot (5 par défaut) — pas de
+        # plafond par direction ni de corrélation entre actifs, chaque coin est évalué
+        # indépendamment, comme partout ailleurs dans le bot.
+        max_trades = cfg["max_open_trades"] if "max_open_trades" in cfg.keys() and cfg["max_open_trades"] else 5
+        open_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND (is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_manual IS NULL OR is_manual=0)", (user_id,)
         ).fetchone()[0]
-        if max_same_dir and same_dir_count >= max_same_dir:
-            add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond direction atteint ({same_dir_count}/{max_same_dir})", "info")
+        if open_count >= max_trades:
+            add_bot_log(user_id, f"🔁 {coin}: ré-entrée rapide bloquée — plafond de trades simultanés atteint ({open_count}/{max_trades})", "info")
             return
 
-        max_trades = cfg["max_open_trades"] if "max_open_trades" in cfg.keys() and cfg["max_open_trades"] else 5
         portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
         capital = portfolio["balance"] if portfolio else 1000.0
         # Taille = 50% du capital (fixe) ÷ nombre de trades simultanés max du bot principal —
@@ -3587,7 +3589,7 @@ async def scan_markets(user_id: int):
             conn = get_db()
 
             # Auto-execute en mode paper
-            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct, max_same_direction_neutral, max_same_direction_trend FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            cfg = conn.execute("SELECT trading_mode, max_position_usdc, max_open_trades, position_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             if cfg and cfg["trading_mode"] == "paper" and not auto_trading_paused:
                 # Exclut les positions Accumulation du comptage — plafonds totalement
                 # indépendants entre le bot principal et l'Accumulation, malgré des réglages
@@ -4733,7 +4735,6 @@ class UpdateConfigRequest(BaseModel):
     rsi_overbought: Optional[float] = None
     volume_spike_mult: Optional[float] = None
     btc_trend_threshold: Optional[float] = None
-    max_same_direction_neutral: Optional[int] = None
     trailing_activation_mult: Optional[float] = None
     trailing_gap_usd: Optional[float] = None
     trailing_widen_max_mult: Optional[float] = None
@@ -4915,7 +4916,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "rsi_overbought": config["rsi_overbought"] if "rsi_overbought" in config.keys() and config["rsi_overbought"] else 65,
         "volume_spike_mult": config["volume_spike_mult"] if "volume_spike_mult" in config.keys() and config["volume_spike_mult"] else 1.5,
         "btc_trend_threshold": config["btc_trend_threshold"] if "btc_trend_threshold" in config.keys() and config["btc_trend_threshold"] else 2.0,
-        "max_same_direction_neutral": config["max_same_direction_neutral"] if "max_same_direction_neutral" in config.keys() and config["max_same_direction_neutral"] else 2,
         "trailing_activation_mult": config["trailing_activation_mult"] if "trailing_activation_mult" in config.keys() and config["trailing_activation_mult"] else 1.0,
         "trailing_gap_usd": config["trailing_gap_usd"] if "trailing_gap_usd" in config.keys() and config["trailing_gap_usd"] else 1.0,
         "trailing_widen_max_mult": config["trailing_widen_max_mult"] if "trailing_widen_max_mult" in config.keys() and config["trailing_widen_max_mult"] else 3.0,
@@ -5044,8 +5044,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET volume_spike_mult=? WHERE user_id=?", (req.volume_spike_mult, user_id))
     if req.btc_trend_threshold is not None:
         conn.execute("UPDATE bot_config SET btc_trend_threshold=? WHERE user_id=?", (req.btc_trend_threshold, user_id))
-    if req.max_same_direction_neutral is not None:
-        conn.execute("UPDATE bot_config SET max_same_direction_neutral=? WHERE user_id=?", (req.max_same_direction_neutral, user_id))
     if req.trailing_activation_mult is not None:
         conn.execute("UPDATE bot_config SET trailing_activation_mult=? WHERE user_id=?", (req.trailing_activation_mult, user_id))
     if req.trailing_gap_usd is not None:
@@ -6968,7 +6966,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-10.5"
+BACKEND_BUILD_VERSION = "2026-08-16.1"
 
 @app.get("/api/version")
 def get_version():
