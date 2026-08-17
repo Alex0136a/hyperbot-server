@@ -2993,6 +2993,7 @@ async def scan_markets(user_id: int):
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
         accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
         accum_short_in_range_count = 0  # idem SHORT
+        breakout_scanned_count = 0  # nb de coins avec un range détecté (support+résistance) examinés pour Breakout ce cycle
 
         for coin in coins_to_scan:
             is_opportunist = coin not in active_coins
@@ -3148,6 +3149,7 @@ async def scan_markets(user_id: int):
             # confirmé par un dépassement du niveau (marge de confirmation) ET une expansion de
             # volume sur la bougie de cassure. Système de momentum, pas de retour à la moyenne.
             if config and (config["breakout_enabled"] or config["breakout_short_enabled"]) and resistance and support:
+                breakout_scanned_count += 1
                 buf_bo = config["breakout_confirm_buffer_pct"] if "breakout_confirm_buffer_pct" in config.keys() and config["breakout_confirm_buffer_pct"] is not None else 0.3
                 vol_mult_bo = config["breakout_volume_mult"] if "breakout_volume_mult" in config.keys() and config["breakout_volume_mult"] is not None else 1.5
                 vol_expansion = vol_cur >= vol_avg * vol_mult_bo
@@ -3558,6 +3560,26 @@ async def scan_markets(user_id: int):
                     f"SHORT {'ON' if config['accumulation_short_enabled'] else 'OFF'} "
                     f"({accum_short_in_range_count} coin(s) en zone RSI surachat) · "
                     f"{open_accum_count} position(s) ouverte(s) — scan actif, en attente d'un support/résistance proche + retournement confirmé",
+                    "info")
+
+        # Résumé périodique Breakout — même principe qu'Accumulation ci-dessus : confirme que
+        # le scan tourne bel et bien, même quand aucune cassure n'est en cours (jusqu'ici,
+        # silence total dans ce cas, impossible de distinguer "ça tourne mais rien à signaler"
+        # de "c'est cassé").
+        if config and (config["breakout_enabled"] or config["breakout_short_enabled"]):
+            last_summary_bo = breakout_summary_log_cache.get(user_id)
+            if not last_summary_bo or (datetime.utcnow() - last_summary_bo).total_seconds() >= BREAKOUT_SUMMARY_COOLDOWN_MINUTES * 60:
+                breakout_summary_log_cache[user_id] = datetime.utcnow()
+                conn_bo_summary = get_db()
+                open_bo_count = conn_bo_summary.execute("SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND status='OPEN' AND is_breakout=1", (user_id,)).fetchone()[0]
+                bo_mode_summary = config["breakout_trading_mode"] if "breakout_trading_mode" in config.keys() and config["breakout_trading_mode"] else "paper"
+                conn_bo_summary.close()
+                add_bot_log(user_id,
+                    f"🚀 Breakout — LONG {'ON' if config['breakout_enabled'] else 'OFF'} · "
+                    f"SHORT {'ON' if config['breakout_short_enabled'] else 'OFF'} · "
+                    f"mode {'LIVE' if bo_mode_summary == 'live' else 'Paper'} · "
+                    f"{breakout_scanned_count} coin(s) avec un range détecté ce cycle · "
+                    f"{open_bo_count} position(s) ouverte(s) — scan actif, en attente d'une cassure confirmée par le volume",
                     "info")
 
         if accumulation_candidates and config and (config["accumulation_enabled"] or config["accumulation_short_enabled"]):
@@ -4167,6 +4189,8 @@ def round_hl_price(price: float, coin: str) -> float:
 accumulation_diagnostic_cache = {}  # (user_id, coin) -> datetime du dernier diagnostic journalisé (limite le bruit)
 accumulation_summary_log_cache = {}  # user_id -> datetime du dernier résumé de cycle journalisé
 ACCUMULATION_SUMMARY_COOLDOWN_MINUTES = 20  # fréquence du résumé "état Accumulation" (voir fin de boucle de scan)
+breakout_summary_log_cache = {}  # user_id -> datetime du dernier résumé de cycle journalisé (Breakout)
+BREAKOUT_SUMMARY_COOLDOWN_MINUTES = 20
 ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
 
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
@@ -7149,7 +7173,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-17.1"
+BACKEND_BUILD_VERSION = "2026-08-17.2"
 
 @app.get("/api/version")
 def get_version():
