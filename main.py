@@ -4204,7 +4204,15 @@ async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
             return True
         return False
     except Exception as e:
+        # BUG CORRIGÉ : cette erreur n'était visible qu'en console serveur, jamais dans les
+        # logs applicatifs — un tick manqué en temps réel (ex: pendant un mouvement rapide)
+        # passait totalement inaperçu, sans aucune trace pour diagnostiquer après coup un
+        # Max Loss/trailing qui semblait avoir "sauté" par-dessus son seuil.
         print(f"WS trade error {trade.get('coin','?')}: {e}")
+        try:
+            add_bot_log(user_id, f"⚠️ {trade.get('coin','?')}: erreur de vérification temps réel (tick WebSocket manqué) — {e}", "error")
+        except Exception:
+            pass
         return False
 
 async def startup_cleanup(user_id: int):
@@ -4648,7 +4656,17 @@ async def check_positions_loop(user_id: int):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                pass  # Silencieux en mode backup
+                # BUG CORRIGÉ (potentiellement sérieux) : ce filet de secours (actif UNIQUEMENT
+                # quand le WebSocket est déconnecté — donc déjà le seul rempart temps réel à ce
+                # moment-là) avalait silencieusement toute erreur, sans aucune trace. Une erreur
+                # répétée pendant une coupure WS pouvait laisser une position totalement sans
+                # surveillance pendant toute la durée de la coupure, sans que rien ne le signale
+                # après coup — observé concrètement : un Max Loss configuré à 0.5% laissant
+                # filer une perte jusqu'à -3.24% sans qu'aucun log n'explique l'écart.
+                try:
+                    add_bot_log(user_id, f"⚠️ Filet de secours (WebSocket déconnecté) — erreur pendant la vérification des positions : {e}", "error")
+                except Exception:
+                    pass
             await asyncio.sleep(5)
     except asyncio.CancelledError:
         raise
@@ -4703,9 +4721,16 @@ async def update_open_positions(user_id: int):
         cur = prices.get(trade["coin"])
         if not cur:
             continue
-        result = await manage_open_trade(user_id, trade, cur, conn)
-        if result:
-            await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
+        # BUG CORRIGÉ : sans isolation par trade, une exception sur UN trade (ex: INJ) aurait pu
+        # interrompre la vérification de TOUS les autres trades du même lot — dans le pire cas,
+        # une position dangereusement exposée pendant que d'autres, saines, restaient bloquées
+        # derrière elle dans la boucle.
+        try:
+            result = await manage_open_trade(user_id, trade, cur, conn)
+            if result:
+                await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
+        except Exception as e:
+            add_bot_log(user_id, f"⚠️ {trade.get('coin','?')}: erreur de vérification (filet de secours) — {e}", "error")
     conn.commit()
     conn.close()
 
@@ -4955,7 +4980,6 @@ class UpdateConfigRequest(BaseModel):
     qp_lock_trigger_usd: Optional[float] = None
     qp_arm_low_usd: Optional[float] = None
     qp_floor_low_usd: Optional[float] = None
-    quick_profit_pct: Optional[float] = None
     max_loss_pct: Optional[float] = None
     early_floor_arm_pct: Optional[float] = None
     trailing_gap_pct: Optional[float] = None
@@ -5145,7 +5169,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
-        "quick_profit_pct": config["quick_profit_pct"] if "quick_profit_pct" in config.keys() and config["quick_profit_pct"] else 0.46,
         "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 1.0,
         "early_floor_arm_pct": config["early_floor_arm_pct"] if "early_floor_arm_pct" in config.keys() and config["early_floor_arm_pct"] is not None else 0.5,
         "trailing_gap_pct": config["trailing_gap_pct"] if "trailing_gap_pct" in config.keys() and config["trailing_gap_pct"] else 0.42,
@@ -5327,8 +5350,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET qp_arm_low_usd=? WHERE user_id=?", (req.qp_arm_low_usd, user_id))
     if req.qp_floor_low_usd is not None:
         conn.execute("UPDATE bot_config SET qp_floor_low_usd=? WHERE user_id=?", (req.qp_floor_low_usd, user_id))
-    if req.quick_profit_pct is not None:
-        conn.execute("UPDATE bot_config SET quick_profit_pct=? WHERE user_id=?", (req.quick_profit_pct, user_id))
     if req.max_loss_pct is not None:
         conn.execute("UPDATE bot_config SET max_loss_pct=? WHERE user_id=?", (req.max_loss_pct, user_id))
     if req.early_floor_arm_pct is not None:
@@ -7173,7 +7194,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-17.2"
+BACKEND_BUILD_VERSION = "2026-08-17.3"
 
 @app.get("/api/version")
 def get_version():
