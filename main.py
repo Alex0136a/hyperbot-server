@@ -61,8 +61,31 @@ def add_bot_log(user_id: int, message: str, level: str = "info"):
             )
         conn.commit()
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        # BUG CORRIGÉ : échec totalement silencieux jusqu'ici — si la table bot_activity_log
+        # n'existe pas (ex: une instruction plus tôt dans le gros executescript de création des
+        # tables a échoué sur ce déploiement précis, interrompant tout le reste du script avant
+        # d'atteindre cette table), CHAQUE appel échouait sans aucune trace : le mode "Session"
+        # (en mémoire, sans dépendance DB) continuait à fonctionner normalement, donnant
+        # l'illusion que tout va bien, alors que "Persistant" restait vide indéfiniment.
+        print(f"⚠️ add_bot_log: échec écriture persistante — {e}")
+        try:
+            # Filet de rattrapage : (re)crée la table isolément si elle n'existe vraiment pas,
+            # pour que les PROCHAINS logs soient enfin persistés même si ce déploiement a raté
+            # sa création initiale.
+            conn2 = get_db()
+            conn2.execute("""CREATE TABLE IF NOT EXISTS bot_activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                level TEXT DEFAULT 'info',
+                message TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )""")
+            conn2.commit()
+            conn2.close()
+        except Exception:
+            pass
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -1276,6 +1299,24 @@ def init_db():
         );
     """)
     conn.commit()
+    # Filet de sécurité INDÉPENDANT du gros script ci-dessus : si une instruction plus tôt dans
+    # ce script a échoué sur un déploiement donné (interrompant tout le reste, y compris la
+    # création de bot_activity_log plus haut dans le script), cette table n'existerait jamais,
+    # et TOUS les logs persistants échoueraient silencieusement depuis le début — observé
+    # concrètement (mode "Persistant" toujours vide). Recréée ici de façon isolée, sans
+    # dépendre du succès du reste du script.
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS bot_activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            level TEXT DEFAULT 'info',
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )""")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ Échec création défensive bot_activity_log: {e}")
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -7194,7 +7235,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-17.3"
+BACKEND_BUILD_VERSION = "2026-08-17.4"
 
 @app.get("/api/version")
 def get_version():
