@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-16.1";
+const APP_BUILD_VERSION = "2026-08-17.1";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -352,6 +352,7 @@ function App() {
   const [accumulationShortEnabled, setAccumulationShortEnabled] = useState(false);
   const [breakoutEnabled, setBreakoutEnabled] = useState(false);
   const [breakoutShortEnabled, setBreakoutShortEnabled] = useState(false);
+  const [rangeTradingEnabled, setRangeTradingEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -466,6 +467,7 @@ function App() {
       setAccumulationShortEnabled(!!cfg?.accumulation_short_enabled);
       setBreakoutEnabled(!!cfg?.breakout_enabled);
       setBreakoutShortEnabled(!!cfg?.breakout_short_enabled);
+      setRangeTradingEnabled(!!cfg?.range_trading_enabled);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -607,6 +609,20 @@ function App() {
       await apiCall("/api/config","PUT",{breakout_trading_mode:mode},token);
       loadData();
       addLog(`Mode Breakout: ${modeLabel}`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
+  const updateRangeTradingMode = async (mode) => {
+    if (mode === config?.range_trading_trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
+    const confirmMsg = mode === "live"
+      ? `Basculer Range Trading en LIVE (argent réel) ?\n\nMode expérimental — indépendant des autres modes, vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      : `Repasser Range Trading en Paper (simulation) ?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiCall("/api/config","PUT",{range_trading_trading_mode:mode},token);
+      loadData();
+      addLog(`Mode Range Trading: ${modeLabel}`, "system");
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
   };
 
@@ -1055,6 +1071,9 @@ Confirmer ?`
                     {!!matchedTrade?.is_breakout && (
                       <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
                     )}
+                    {!!matchedTrade?.is_range_trade && (
+                      <span style={{background:"#2e1a3d",color:"#a78bfa",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Range Trading (expérimental) — issu de la suggestion RANGE, sortie par Max Loss + trailing">📊 RANGE</span>
+                    )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
                 </div>
@@ -1396,6 +1415,30 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#a78bfa",fontWeight:700}}>📊 Mode Range Trading (expérimental)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Câble la suggestion RANGE (jusqu'ici informative) pour ouvrir réellement des trades — critères plus permissifs qu'Accumulation (proximité jusqu'à 35% du canal). Sortie par Max Loss + trailing. Un seul toggle (LONG+SHORT combinés, le biais RANGE est déjà à sens unique par coin). Désactivé par défaut, "pour voir".</div>
+              </div>
+              <button onClick={()=>{
+                const v=!rangeTradingEnabled; setRangeTradingEnabled(v);
+                apiCall("/api/config","PUT",{"range_trading_enabled":v},token);
+              }} style={{background:rangeTradingEnabled?"#2e1a3d":"#0f1629",border:rangeTradingEnabled?"1px solid #a78bfa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:rangeTradingEnabled?"#a78bfa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {rangeTradingEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+            {rangeTradingEnabled && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                <div style={{fontSize:10,color:"#475569"}}>
+                  Mode Range Trading — sélecteur indépendant des autres modes
+                </div>
+                <div style={{display:"flex",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,overflow:"hidden"}}>
+                  <button onClick={()=>updateRangeTradingMode("paper")} style={{padding:"4px 10px",border:"none",background:config?.range_trading_trading_mode!=="live"?"#1e2d4a":"transparent",color:config?.range_trading_trading_mode!=="live"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🎮 PAPER</button>
+                  <button onClick={()=>updateRangeTradingMode("live")} style={{padding:"4px 10px",border:"none",background:config?.range_trading_trading_mode==="live"?"#052e16":"transparent",color:config?.range_trading_trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔴 LIVE</button>
+                </div>
+              </div>
+            )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
               </div>
@@ -1590,6 +1633,9 @@ Confirmer ?`
                         {!!trade.is_breakout && (
                           <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
                         )}
+                        {!!trade.is_range_trade && (
+                          <span style={{background:"#2e1a3d",color:"#a78bfa",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Range Trading (expérimental) — issu de la suggestion RANGE, sortie par Max Loss + trailing">📊 RANGE</span>
+                        )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
                         <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:14}}>
@@ -1672,6 +1718,9 @@ Confirmer ?`
                       )}
                       {!!trade.is_breakout && (
                         <span style={{background:"#3d1f0a",color:"#fb923c",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Breakout — momentum sur cassure de range confirmée par volume, sortie par Max Loss + trailing">🚀 BREAKOUT</span>
+                      )}
+                      {!!trade.is_range_trade && (
+                        <span style={{background:"#2e1a3d",color:"#a78bfa",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Range Trading (expérimental) — issu de la suggestion RANGE, sortie par Max Loss + trailing">📊 RANGE</span>
                       )}
                       {trade.peak_price_pct != null && (
                         <span style={{color:"#64748b",fontSize:9}} title="Valeurs figées au moment exact de la fermeture — fiables même si les réglages ont changé depuis">
@@ -1780,6 +1829,11 @@ Confirmer ?`
                     {key:"breakout_confirm_buffer_pct",label:"Breakout - marge de confirmation de cassure (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"breakout_max_loss_pct",label:"Breakout - plafond de perte max (%)",def:0.7,step:0.05,min:0.1,max:5},
                     {key:"breakout_trailing_arm_pct",label:"Breakout - armement du trailing (% PnL avec levier)",def:1.0,step:0.05,min:0.05,max:3},
+                    {key:"range_trading_max_positions",label:"Range Trading - positions simultanées max",def:5,step:1,min:1,max:20},
+                    {key:"range_trading_leverage",label:"Range Trading - levier",def:2,step:1,min:1,max:10},
+                    {key:"range_trading_max_loss_pct",label:"Range Trading - plafond de perte max (%)",def:1.0,step:0.05,min:0.1,max:5},
+                    {key:"range_trading_trailing_arm_pct",label:"Range Trading - armement du trailing (% PnL avec levier)",def:1.0,step:0.05,min:0.05,max:3},
+                    {key:"range_trading_trailing_lock_ratio_pct",label:"Range Trading - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
                     {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
                     {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
@@ -2647,7 +2701,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>10 août 2026</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>17 août 2026</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2731,10 +2785,31 @@ Confirmer ?`
 
           {/* SUGGESTION RANGE */}
           <div style={{background:"#0a1628",border:"1px solid #1e2d4a",borderRadius:12,padding:16,marginBottom:12}}>
-            <div style={{fontSize:26,fontWeight:700,color:"#cbd5e1",marginBottom:10}}>📊 Suggestion RANGE (informatif uniquement)</div>
+            <div style={{fontSize:26,fontWeight:700,color:"#cbd5e1",marginBottom:10}}>📊 Suggestion RANGE (informatif par défaut)</div>
             <div style={{fontSize:20,color:"#cbd5e1",lineHeight:1.7}}>
-              Détecte un range et calcule un biais directionnel (position dans le canal, RSI, MACD), avec la même exigence de retournement confirmé qu'Accumulation depuis peu. <b style={{color:"#f8fafc"}}>N'ouvre jamais de trade automatiquement</b> — affiche les niveaux LONG/SHORT et invalidation dans les logs, à vous de décider d'agir manuellement.
+              Détecte un range et calcule un biais directionnel (position dans le canal, RSI, MACD), avec la même exigence de retournement confirmé qu'Accumulation. Par défaut, <b style={{color:"#f8fafc"}}>n'ouvre jamais de trade automatiquement</b> — affiche les niveaux LONG/SHORT et invalidation dans les logs, à vous de décider d'agir manuellement. Peut être câblé pour trader réellement, voir "Range Trading" ci-dessous.
             </div>
+          </div>
+
+          {/* RANGE TRADING */}
+          <div style={{background:"#0a1628",border:"1px solid #2e1a3d",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:26,fontWeight:700,color:"#a78bfa",marginBottom:10}}>📊 Range Trading (expérimental)</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Câble la suggestion RANGE pour qu'elle ouvre réellement des trades — désactivé par défaut, "pour voir". Toggle unique (pas de split LONG/SHORT, le biais RANGE est déjà à sens unique par coin), un seul sélecteur paper/live, indépendant de tous les autres modes.</div>
+
+            <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
+            <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
+              <li>Reprend directement la détection RANGE : range détecté, biais LONG/SHORT par score (position dans le canal ≤35%, RSI &lt;40/&gt;60 en bonus, MACD), confiance de biais ≥70%</li>
+              <li><b style={{color:"#f8fafc"}}>Critères plus permissifs qu'Accumulation</b> : tolérance de proximité au niveau bien plus large (jusqu'à 35% du canal contre ~1% pour Accumulation), pas de fourchette RSI stricte</li>
+              <li>Retournement confirmé obligatoire (même exigence qu'Accumulation)</li>
+              <li>Taille = 50% du capital ÷ positions Range Trading simultanées max, levier dédié</li>
+            </ul>
+
+            <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
+            <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
+              <li>Max Loss fixe (1% par défaut)</li>
+              <li>Trailing : s'arme dès que le PnL% (avec levier) atteint 1% par défaut, verrouille alors 50% du pic (mêmes réglages qu'Accumulation/Breakout, valeurs indépendantes)</li>
+              <li>Pas de TP fixe ni de toucher de cible — même logique que Breakout</li>
+            </ul>
           </div>
 
           <div style={{fontSize:18,color:"#64748b",textAlign:"center",padding:"8px 0"}}>
