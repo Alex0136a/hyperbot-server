@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-17.2";
+const APP_BUILD_VERSION = "2026-08-17.3";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -487,7 +487,7 @@ function App() {
       setActiveCoins(cfg?.active_coins||ALL_COINS);
       setIsRunning(!!cfg?.is_running); // sync avec config
     } catch(e) { console.error(e); }
-  }, [token, confThreshold]);
+  }, [token, confThreshold, persistentLogs]);
 
   useEffect(() => {
     if(token) {
