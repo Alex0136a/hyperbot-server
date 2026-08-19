@@ -3906,7 +3906,7 @@ async def scan_markets(user_id: int):
                                    ai.get("takeProfit1"), ai.get("takeProfit2"), sig_id,
                                    datetime.utcnow().isoformat(),
                                    datetime.utcnow().strftime("%Y-%m-%d"), sl_oid, coin_size))
-                            add_bot_log(user_id, f"🔴 LIVE TRADE ({net_env}): {ai['action']} {coin} @ ${entry_price} | {size} USDC (x{levier_reel}) | SL sécurité posé: {'oui' if sl_oid else 'NON — vérifier manuellement'}", "success")
+                            add_bot_log(user_id, f"🔴 LIVE TRADE ({net_env}): {ai['action']} {coin} @ ${entry_price} | {size_effective} USDC (x{levier_reel}) | SL sécurité posé: {'oui' if sl_oid else 'NON — vérifier manuellement'}", "success")
                         except Exception as e:
                             add_bot_log(user_id, f"⛔ {coin}: Échec ouverture live Hyperliquid — {e}", "error")
 
@@ -5972,7 +5972,12 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         conn.close()
         prefix = "👤" if is_manual else "🤖"
         label = f"{prefix}💰 Achat ACCUMULATION LIVE" if is_accumulation else (f"{prefix}🚀 Trade BREAKOUT LIVE" if is_breakout else (f"{prefix}📊 Trade RANGE TRADING LIVE" if is_range_trade else f"{prefix}🔴 Trade {'MANUEL' if is_manual else 'AUTO'} LIVE"))
-        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_usdc} USDC (x{levier_reel})", "success")
+        # BUG CORRIGÉ : ce log affichait size_usdc (la taille AVANT le plancher de sécurité
+        # $10), alors que la base de données stocke déjà size_effective (la taille RÉELLEMENT
+        # engagée, après ajustement) — le trade réel était correct, seul le log induisait en
+        # erreur sur la taille observée (source probable de confusion sur plusieurs
+        # investigations de taille passées).
+        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_effective} USDC (x{levier_reel})", "success")
         return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
     portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
@@ -7235,7 +7240,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-17.4"
+BACKEND_BUILD_VERSION = "2026-08-19.1"
 
 @app.get("/api/version")
 def get_version():
