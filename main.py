@@ -7398,6 +7398,37 @@ async def reconnect_websocket(user_id: int = Depends(get_current_user)):
     add_bot_log(user_id, "🔌 Reconnexion WebSocket forcée manuellement", "info")
     return {"message": "Reconnexion WebSocket lancée"}
 
+@app.get("/api/channel-diagnostic")
+async def get_channel_diagnostic(user_id: int = Depends(get_current_user)):
+    """Calcule le canal (support-résistance) RÉEL actuel de chaque actif actif — sans filtre de
+    confiance ni de biais, contrairement aux suggestions RANGE. Sert à calibrer un seuil comme
+    spot_accum_min_channel_pct avec des chiffres réels plutôt qu'à l'aveugle."""
+    conn = get_db()
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
+
+    results = []
+    async with httpx.AsyncClient(timeout=15) as client:
+        for coin in active_coins:
+            try:
+                candles_raw = await fetch_candles(client, coin)
+                if not candles_raw or len(candles_raw) < 50:
+                    continue
+                candles = [{"h": float(c["h"]), "l": float(c["l"]), "c": float(c["c"]), "v": float(c["v"])} for c in candles_raw]
+                support, resistance = detect_support_resistance(candles)
+                price = candles[-1]["c"]
+                if support and resistance and support > 0:
+                    channel_pct = round((resistance - support) / support * 100, 2)
+                    results.append({"coin": coin, "support": support, "resistance": resistance, "price": price, "channel_pct": channel_pct})
+            except Exception:
+                continue
+
+    results.sort(key=lambda r: r["channel_pct"], reverse=True)
+    avg_channel = round(sum(r["channel_pct"] for r in results) / len(results), 2) if results else 0
+    median_channel = round(sorted(r["channel_pct"] for r in results)[len(results)//2], 2) if results else 0
+    return {"coins": results, "count": len(results), "avg_channel_pct": avg_channel, "median_channel_pct": median_channel}
+
 @app.get("/api/range-opportunities")
 def get_range_opportunities(user_id: int = Depends(get_current_user)):
     """Liste les opportunités de range actuellement détectées pour cet utilisateur — le cache
@@ -7852,7 +7883,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.4"
+BACKEND_BUILD_VERSION = "2026-08-20.5"
 
 @app.get("/api/version")
 def get_version():
