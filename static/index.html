@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-19.2";
+const APP_BUILD_VERSION = "2026-08-19.3";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1703,13 +1703,18 @@ Confirmer ?`
             {/* HISTORIQUE */}
             {paper?.closed_trades?.length > 0 && (
               <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
-                <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (20 derniers)</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (50 derniers)</div>
                 {paper.closed_trades.map(trade=>(
                   <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
                     <div style={{display:"flex",gap:8,alignItems:"center"}}>
                       <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{trade.coin}</span>
                       <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{trade.close_reason}</span>
+                      {trade.size_usdc != null && (
+                        <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Taille de marge engagée sur ce trade (avant application du levier)">
+                          {trade.size_usdc}$ x{trade.leverage||1}
+                        </span>
+                      )}
                       {!!trade.is_manual && (
                         <span style={{background:"#2a1a3e",color:"#c084fc",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Trade ouvert manuellement, pas par le bot">👤 MANUEL</span>
                       )}
