@@ -539,8 +539,14 @@ def init_db():
     try:
         # Objectif de vente = ce % de l'amplitude du canal (résistance-support), pas un chiffre
         # fixe — un canal plus large vise un objectif plus large, cohérent avec l'échelle du
-        # mouvement observé sur ce coin précis. 100% = l'amplitude complète du canal.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_target_ratio_pct REAL DEFAULT 100.0")
+        # mouvement observé sur ce coin précis. 85% par défaut (pas 100%) — viser l'amplitude
+        # complète attend souvent un peu trop, 85% se déclenche plus facilement tout en restant
+        # ambitieux. Modifiable par holding individuel (voir /api/spot-holdings/target).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_target_ratio_pct REAL DEFAULT 85.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET spot_accum_target_ratio_pct=85.0 WHERE spot_accum_target_ratio_pct=100.0")
         conn.commit()
     except: pass
     try:
@@ -5730,7 +5736,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_max_positions": config["spot_accum_max_positions"] if "spot_accum_max_positions" in config.keys() and config["spot_accum_max_positions"] else 5,
         "spot_accum_min_channel_pct": config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5,
         "spot_accum_proximity_pct": config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0,
-        "spot_accum_target_ratio_pct": config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 100.0,
+        "spot_accum_target_ratio_pct": config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 85.0,
         "spot_accum_trailing_lock_ratio_pct": config["spot_accum_trailing_lock_ratio_pct"] if "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0,
         "spot_accum_momentum_margin_pct": config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3,
         "spot_accum_candle_atr_mult": config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0,
@@ -6409,6 +6415,25 @@ def get_spot_holdings(user_id: int = Depends(get_current_user)):
     ).fetchall()
     conn.close()
     return {"open": [dict(h) for h in open_h], "closed": [dict(h) for h in closed_h]}
+
+class UpdateSpotTargetRequest(BaseModel):
+    holding_id: int
+    target_pct: float
+
+@app.put("/api/spot-holdings/target")
+def update_spot_holding_target(req: UpdateSpotTargetRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    holding = conn.execute("SELECT id FROM spot_holdings WHERE id=? AND user_id=? AND status='OPEN'", (req.holding_id, user_id)).fetchone()
+    if not holding:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Holding introuvable ou déjà clôturé")
+    # Réinitialise l'armement du trailing — un nouvel objectif doit être réévalué proprement,
+    # même principe que le TP manuel des autres modes (évite un plancher figé sur l'ancien seuil).
+    conn.execute("UPDATE spot_holdings SET target_pct=?, trailing_armed=0 WHERE id=?", (req.target_pct, req.holding_id))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🎯 Spot Accumulation: objectif modifié manuellement à +{req.target_pct}% (holding #{req.holding_id})", "info")
+    return {"success": True}
 
 @app.get("/api/paper/portfolio")
 def get_paper_portfolio(user_id: int = Depends(get_current_user)):
@@ -7827,7 +7852,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.3"
+BACKEND_BUILD_VERSION = "2026-08-20.4"
 
 @app.get("/api/version")
 def get_version():
