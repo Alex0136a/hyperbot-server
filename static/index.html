@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.2";
+const APP_BUILD_VERSION = "2026-08-20.3";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -400,6 +400,7 @@ function App() {
   const [accumulationTargetPct, setAccumulationTargetPct] = useState("");
   const [conditionsList, setConditionsList] = useState([]);
   const [tpInputs, setTpInputs] = useState({});
+  const [spotTargetInputs, setSpotTargetInputs] = useState({});
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -1748,14 +1749,28 @@ Confirmer ?`
               <div style={{background:"#0f1629",border:"1px solid #3d3a0a",borderRadius:10,padding:16,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — achat réel, aucun Max Loss</div>
                 {spotHoldings.open.length > 0 && spotHoldings.open.map(h=>(
-                  <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
+                  <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a",flexWrap:"wrap",gap:6}}>
                     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                       <span style={{color:"#34d399",fontSize:10,fontWeight:700}}>HOLD</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{h.coin}</span>
                       <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.qty} {h.coin}</span>
                       {!!h.is_live && <span style={{background:"#3d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔴 LIVE</span>}
                       {!!h.trailing_armed && <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔒 armé</span>}
-                      <span style={{fontSize:9,color:"#334155"}}>objectif +{h.target_pct}% · pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
+                      <span style={{fontSize:9,color:"#334155"}}>pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
+                      <span style={{fontSize:9,color:"#475569"}}>🎯 objectif:</span>
+                      <input type="number" step="1" min="1" value={spotTargetInputs[h.id] !== undefined ? spotTargetInputs[h.id] : h.target_pct}
+                        onChange={e=>setSpotTargetInputs(p=>({...p,[h.id]:e.target.value}))}
+                        style={{width:50,background:"#0a0e1a",border:"1px solid #3d3a0a",borderRadius:4,padding:"2px 4px",color:"#facc15",fontSize:10}}/>
+                      <span style={{fontSize:9,color:"#475569"}}>%</span>
+                      <button onClick={async()=>{
+                        const v = spotTargetInputs[h.id] !== undefined ? Number(spotTargetInputs[h.id]) : h.target_pct;
+                        try{
+                          await apiCall("/api/spot-holdings/target","PUT",{holding_id:h.id,target_pct:v},token);
+                          setSpotTargetInputs(p=>{const n={...p};delete n[h.id];return n;});
+                          loadData();
+                          addLog(`Spot ${h.coin}: objectif modifié à +${v}%`,"system");
+                        }catch(e){addLog("Erreur: "+e.message,"error");}
+                      }} style={{background:"#3d3a0a",border:"1px solid #facc15",borderRadius:4,padding:"2px 8px",color:"#facc15",fontSize:9,cursor:"pointer",fontWeight:700}}>Modifier</button>
                     </div>
                     <span style={{color:h.pnl_pct>=0?"#34d399":"#f87171",fontSize:12,fontWeight:700}}>
                       {h.pnl_pct>=0?"+":""}{Number(h.pnl_pct||0).toFixed(2)}% ({h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$)
@@ -1924,7 +1939,7 @@ Confirmer ?`
                     {key:"spot_accum_max_positions",label:"Spot Accumulation - positions simultanées max",def:5,step:1,min:1,max:20},
                     {key:"spot_accum_min_channel_pct",label:"Spot Accumulation - largeur minimale du canal (%)",def:2.5,step:0.1,min:0.5,max:10},
                     {key:"spot_accum_proximity_pct",label:"Spot Accumulation - tolérance de proximité au support (%)",def:1.0,step:0.1,min:0.1,max:5},
-                    {key:"spot_accum_target_ratio_pct",label:"Spot Accumulation - objectif (% de l'amplitude du canal)",def:100,step:5,min:20,max:200},
+                    {key:"spot_accum_target_ratio_pct",label:"Spot Accumulation - objectif par défaut (% de l'amplitude du canal)",def:85,step:5,min:20,max:200},
                     {key:"spot_accum_trailing_lock_ratio_pct",label:"Spot Accumulation - % du pic verrouillé une fois l'objectif atteint",def:50,step:5,min:10,max:90},
                     {key:"spot_accum_momentum_margin_pct",label:"Spot Accumulation - marge momentum avant de bloquer (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"spot_accum_candle_atr_mult",label:"Spot Accumulation - bougie max autorisée (× ATR)",def:2.0,step:0.1,min:1,max:5},
