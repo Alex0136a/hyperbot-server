@@ -5941,7 +5941,7 @@ def get_paper_portfolio(user_id: int = Depends(get_current_user)):
         (user_id,)
     ).fetchall()
     closed = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT 20",
+        "SELECT * FROM paper_trades WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT 50",
         (user_id,)
     ).fetchall()
     conn.close()
@@ -7348,7 +7348,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-19.3"
+BACKEND_BUILD_VERSION = "2026-08-19.4"
 
 @app.get("/api/version")
 def get_version():
