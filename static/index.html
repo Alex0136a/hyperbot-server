@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-19.3";
+const APP_BUILD_VERSION = "2026-08-20.1";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1325,8 +1325,8 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation LONG (achat auto sur RSI {config?.accumulation_rsi_min||15}-{config?.accumulation_rsi_max||40})</div>
-                <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (RSI survente + retournement), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation LONG (achat auto sur support + retournement confirmé)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (momentum cohérent + MACD + ATR cohérent avec le SL), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
               </div>
               <button onClick={()=>{
                 const v=!accumulationEnabled; setAccumulationEnabled(v);
@@ -1354,8 +1354,8 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
-                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation SHORT (vente auto sur RSI {config?.accumulation_short_rsi_min||60}-{config?.accumulation_short_rsi_max||85})</div>
-                <div style={{fontSize:10,color:"#334155"}}>Miroir du LONG : vend à découvert sur résistance confirmée (RSI surachat + retournement baissier), levier x{config?.accumulation_short_leverage||2} dédié, plafond de positions séparé du LONG. Rachète au % de gain visé, ou si la résistance casse pour de bon. Désactivé par défaut.</div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation SHORT (vente auto sur résistance + retournement confirmé)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Miroir du LONG : vend à découvert sur résistance confirmée (momentum cohérent + MACD + ATR cohérent avec le SL), levier x{config?.accumulation_short_leverage||2} dédié, plafond de positions séparé du LONG. Rachète au % de gain visé, ou si la résistance casse pour de bon. Désactivé par défaut.</div>
               </div>
               <button onClick={()=>{
                 const v=!accumulationShortEnabled; setAccumulationShortEnabled(v);
@@ -1820,8 +1820,6 @@ Confirmer ?`
                     {key:"accumulation_short_max_positions",label:"Accumulation SHORT - positions max simultanées",def:8,step:1,min:1,max:50},
                     {key:"accumulation_short_leverage",label:"Accumulation SHORT - levier",def:2,step:1,min:1,max:10},
                     {key:"accumulation_long_leverage",label:"Accumulation LONG - levier",def:2,step:1,min:1,max:10},
-                    {key:"accumulation_short_rsi_min",label:"Accumulation SHORT - RSI borne basse (surachat)",def:60,step:1,min:50,max:80},
-                    {key:"accumulation_short_rsi_max",label:"Accumulation SHORT - RSI borne haute (évite l'euphorie extrême)",def:85,step:1,min:60,max:95},
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
                     {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
@@ -1846,8 +1844,10 @@ Confirmer ?`
                     {key:"range_trading_trailing_gap_pct",label:"Range Trading - écart du palier précoce (% PnL)",def:0.42,step:0.01,min:0.05,max:3},
                     {key:"range_trading_trailing_lock_ratio_pct",label:"Range Trading - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
-                    {key:"accumulation_rsi_min",label:"Accumulation - RSI borne basse (évite la panique/effondrement)",def:15,step:1,min:1,max:40},
-                    {key:"accumulation_rsi_max",label:"Accumulation - RSI borne haute (survente)",def:40,step:1,min:15,max:50},
+                    {key:"accumulation_momentum_margin_pct",label:"Accumulation - marge momentum avant de bloquer (%, 'couteau qui tombe')",def:0.3,step:0.05,min:0.05,max:2},
+                    {key:"accumulation_candle_atr_mult",label:"Accumulation - bougie max autorisée (× ATR)",def:2.0,step:0.1,min:1,max:5},
+                    {key:"accumulation_atr_sl_min_mult",label:"Accumulation - ATR min cohérent avec le SL (× Max Loss)",def:0.5,step:0.05,min:0.1,max:2},
+                    {key:"accumulation_atr_sl_max_mult",label:"Accumulation - ATR max cohérent avec le SL (× Max Loss)",def:2.5,step:0.1,min:1,max:10},
                     {key:"accumulation_qp_arm_pct",label:"Accumulation - armement du garde-fou RSI/MACD (%)",def:3.0,step:0.1,min:0.5,max:20},
                     {key:"coin_loss_cooldown_minutes",label:"Cooldown après perte — confirmation requise (min, ≈1 bougie, 0=désactivé)",def:15,step:5,min:0,max:360},
                     {key:"accumulation_max_loss_pct",label:"Accumulation - plafond de perte absolu depuis l'achat (%)",def:0.3,step:0.05,min:0.05,max:10},
@@ -2702,7 +2702,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>19 août 2026</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>20 août 2026</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2742,10 +2742,12 @@ Confirmer ?`
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
-              <li>LONG : RSI 15-40 (survente) · SHORT : RSI 60-85 (surachat) — fourchettes réglables</li>
+              <li><b style={{color:"#f8fafc"}}>Zone RSI retirée</b> — plus une fourchette obligatoire, désormais utilisé uniquement comme composante du retournement (pente, pas niveau)</li>
               <li>Support (LONG) ou résistance (SHORT) détecté à proximité du prix (tolérance réglable, 1% par défaut)</li>
               <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
-              <li><b style={{color:"#f8fafc"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ou</i> MACD qui bascule dans le bon sens — pas juste "être dans la zone"</li>
+              <li><b style={{color:"#f8fafc"}}>Momentum cohérent</b> : le prix ne doit pas être déjà passé franchement au-delà du niveau (évite de "rattraper un couteau qui tombe"), et la dernière bougie ne doit pas être anormalement large vs l'ATR (mouvement violent/instable)</li>
+              <li><b style={{color:"#f8fafc"}}>Cohérence ATR/SL</b> : l'ATR (en % du prix) doit se situer entre 50% et 250% du Max Loss configuré — ni marché trop calme (bruit pur avant que le SL coupe), ni trop agité (le SL coupe sur une bougie normale)</li>
+              <li><b style={{color:"#f8fafc"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ET</i> MACD qui bascule dans le bon sens (les deux désormais obligatoires, plus une alternative)</li>
               <li><b style={{color:"#f8fafc"}}>Filtre de tendance de fond</b> : LONG bloqué si la tendance (MACD) est clairement baissière, SHORT bloqué si clairement haussière — pas besoin d'être favorable (Accumulation vise les marchés sans tendance nette), juste pas franchement contre. Évite les "supports"/"résistances" qui cèdent dans une tendance soutenue</li>
               <li>Levier dédié, séparé LONG/SHORT (x2 par défaut chacun)</li>
               <li>Taille = 50% du capital ÷ positions Accumulation simultanées max</li>
