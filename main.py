@@ -514,6 +514,54 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # ==================== MODE SPOT ACCUMULATION — achat/hold/vente réel, PAS de levier,
+        # PAS de Max Loss ==================== Achète l'actif réel (spot, stocké sur le wallet
+        # Hyperliquid), le conserve jusqu'à ce que le prix redevienne favorable — aucune sortie
+        # forcée en perte, contrairement à tous les autres modes. LONG uniquement (pas de short
+        # en spot sans emprunt). Exige un canal large (2-3% par défaut, contre 0.5% pour
+        # l'Accumulation à levier) — l'idée n'est pas de gratter un micro-mouvement mais de
+        # capter un vrai va-et-vient avant de revendre.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_enabled INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_max_positions INTEGER DEFAULT 5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_min_channel_pct REAL DEFAULT 2.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_proximity_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        # Objectif de vente = ce % de l'amplitude du canal (résistance-support), pas un chiffre
+        # fixe — un canal plus large vise un objectif plus large, cohérent avec l'échelle du
+        # mouvement observé sur ce coin précis. 100% = l'amplitude complète du canal.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_target_ratio_pct REAL DEFAULT 100.0")
+        conn.commit()
+    except: pass
+    try:
+        # Une fois l'objectif atteint, un trailing s'arme et verrouille ce % du pic — laisse
+        # courir une progression au-delà de l'objectif plutôt que de vendre pile dessus.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_trailing_lock_ratio_pct REAL DEFAULT 50.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_momentum_margin_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_candle_atr_mult REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_trading_mode TEXT DEFAULT 'paper'")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_lock_ratio_pct REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -1407,6 +1455,39 @@ def init_db():
         conn.commit()
     except Exception as e:
         print(f"⚠️ Échec création défensive bot_activity_log: {e}")
+    try:
+        # Table DÉDIÉE au mode Spot Accumulation — délibérément SÉPARÉE de paper_trades, car
+        # un holding spot n'a ni levier ni Stop Loss ni notion de "position" à liquider : c'est
+        # un token réellement détenu sur le wallet, tenu jusqu'à ce que le prix redevienne
+        # favorable, sans jamais de sortie forcée en perte.
+        conn.execute("""CREATE TABLE IF NOT EXISTS spot_holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            coin TEXT NOT NULL,
+            status TEXT DEFAULT 'OPEN',
+            entry_price REAL,
+            current_price REAL,
+            qty REAL,
+            size_usdc REAL,
+            support_price REAL,
+            resistance_price REAL,
+            channel_pct REAL,
+            target_pct REAL,
+            peak_pct REAL DEFAULT 0,
+            trailing_armed INTEGER DEFAULT 0,
+            is_live INTEGER DEFAULT 0,
+            is_manual INTEGER DEFAULT 0,
+            opened_at TEXT,
+            closed_at TEXT,
+            pnl REAL,
+            pnl_pct REAL,
+            close_reason TEXT,
+            session_date TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )""")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ Échec création spot_holdings: {e}")
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -1899,7 +1980,77 @@ def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = N
         raise RuntimeError(f"Statut de fermeture inattendu/non confirmé par Hyperliquid: {result}")
     return result
 
-# ── ANALYSE IA ───────────────────────────────────────────────
+def hl_spot_coin_name(coin: str) -> str:
+    """Convertit un symbole de coin (ex: 'PURR') au format attendu par l'endpoint spot
+    Hyperliquid pour les info/exchange endpoints — 'TOKEN/USDC'. Le SDK Python résout ce nom
+    vers l'asset ID interne (10000 + index dans spotMeta.universe) via son propre cache de
+    métadonnées, chargé automatiquement à l'initialisation de l'objet Exchange/Info."""
+    return f"{coin}/USDC"
+
+def hl_spot_buy(account_address: str, coin: str, size_usdc: float, cur_price: float):
+    """Achète l'actif RÉEL au comptant (spot) sur Hyperliquid — PAS de levier, PAS de SL posé
+    sur l'exchange (le mode Spot Accumulation ne vend jamais à perte par conception, un SL de
+    sécurité exchange n'aurait donc pas de sens ici). Retourne (qty, fill_price) ou lève une
+    exception. AVERTISSEMENT : ce code suit la documentation officielle Hyperliquid mais n'a
+    pas pu être testé contre l'API réelle depuis cet environnement — tester en Paper puis avec
+    un tout petit montant en Live avant d'y engager un capital significatif."""
+    exchange = get_hl_exchange(account_address)
+    spot_coin = hl_spot_coin_name(coin)
+    size_decimals = get_hl_size_decimals(coin)
+    qty = round(size_usdc / cur_price, size_decimals)
+    if qty <= 0:
+        raise ValueError("Quantité spot calculée nulle ou négative")
+
+    result = _hl_call_with_retry(exchange.market_open, spot_coin, True, qty, slippage=0.01)
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Échec achat spot Hyperliquid: {result}")
+    try:
+        inner_statuses = result["response"]["data"]["statuses"]
+    except Exception:
+        inner_statuses = []
+    if inner_statuses and "error" in inner_statuses[0]:
+        raise RuntimeError(f"Achat spot rejeté par Hyperliquid: {inner_statuses[0]['error']}")
+    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+        raise RuntimeError(f"Statut d'achat spot inattendu/non confirmé: {result}")
+
+    fill_price = cur_price
+    filled_qty = qty
+    try:
+        statuses = result["response"]["data"]["statuses"]
+        if statuses and "filled" in statuses[0]:
+            fill_price = float(statuses[0]["filled"]["avgPx"])
+            filled_qty = float(statuses[0]["filled"]["totalSz"])
+    except Exception:
+        pass
+    return filled_qty, fill_price
+
+def hl_spot_sell(account_address: str, coin: str, qty: float):
+    """Vend l'actif RÉEL détenu au comptant (spot) sur Hyperliquid. Retourne fill_price ou
+    lève une exception. Même avertissement que hl_spot_buy sur l'absence de test réel."""
+    exchange = get_hl_exchange(account_address)
+    spot_coin = hl_spot_coin_name(coin)
+    result = _hl_call_with_retry(exchange.market_open, spot_coin, False, qty, slippage=0.01)
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Échec vente spot Hyperliquid: {result}")
+    try:
+        inner_statuses = result["response"]["data"]["statuses"]
+    except Exception:
+        inner_statuses = []
+    if inner_statuses and "error" in inner_statuses[0]:
+        raise RuntimeError(f"Vente spot rejetée par Hyperliquid: {inner_statuses[0]['error']}")
+    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+        raise RuntimeError(f"Statut de vente spot inattendu/non confirmé: {result}")
+
+    fill_price = None
+    try:
+        statuses = result["response"]["data"]["statuses"]
+        if statuses and "filled" in statuses[0]:
+            fill_price = float(statuses[0]["filled"]["avgPx"])
+    except Exception:
+        pass
+    return fill_price
+
+
 def cache_market_data(coin: str, tech: dict, price: float):
     """Sauvegarde les indicateurs calculés dans le cache mémoire"""
     from datetime import datetime as dt
@@ -2943,6 +3094,72 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
     if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR", "EARLY_FLOOR"):
         await try_rapid_reentry(user_id, trade, conn)
 
+async def manage_spot_holdings(user_id: int, prices: dict):
+    """Gère les holdings Spot Accumulation ouverts — AUCUN Max Loss, par conception : un holding
+    perdant reste tenu indéfiniment, jamais vendu à perte. Sortie uniquement sur objectif (%
+    de l'amplitude du canal à l'achat) puis trailing une fois l'objectif atteint (verrouille
+    un % du pic, laisse courir au-delà)."""
+    conn = get_db()
+    holdings = conn.execute("SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)).fetchall()
+    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    lock_ratio = config["spot_accum_trailing_lock_ratio_pct"] if config and "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0
+    conn.close()
+
+    for h in holdings:
+        h = dict(h)
+        cur = prices.get(h["coin"])
+        if not cur:
+            continue
+        pnl_pct = (cur - h["entry_price"]) / h["entry_price"] * 100
+        pnl = h["size_usdc"] * (pnl_pct / 100)
+        peak_pct = max(h["peak_pct"] or 0, pnl_pct)
+
+        conn = get_db()
+        conn.execute("UPDATE spot_holdings SET current_price=?, peak_pct=?, pnl=?, pnl_pct=? WHERE id=?",
+                     (cur, peak_pct, round(pnl, 4), round(pnl_pct, 4), h["id"]))
+
+        close_reason = None
+        target_pct = h["target_pct"] or 100.0
+        trailing_armed = bool(h["trailing_armed"])
+        if not trailing_armed and pnl_pct >= target_pct:
+            conn.execute("UPDATE spot_holdings SET trailing_armed=1 WHERE id=?", (h["id"],))
+            trailing_armed = True
+            add_bot_log(user_id, f"🎯 {h['coin']}: objectif Spot Accumulation atteint (+{round(pnl_pct,2)}% ≥ +{target_pct}%) — trailing armé, la position continue de courir au-delà", "info")
+        elif trailing_armed:
+            floor_pct = round(peak_pct * (lock_ratio / 100), 4)
+            if pnl_pct <= floor_pct:
+                close_reason = "SPOT_ACCUM_TARGET_TRAILING"
+
+        conn.commit()
+
+        if close_reason:
+            is_live_h = bool(h["is_live"])
+            close_confirmed = True
+            fill_price_sell = cur
+            if is_live_h:
+                user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+                try:
+                    sold_price = hl_spot_sell(hl_wallet, h["coin"], h["qty"])
+                    if sold_price:
+                        fill_price_sell = sold_price
+                    add_bot_log(user_id, f"🔴 {h['coin']}: vente spot réelle confirmée sur Hyperliquid ({close_reason})", "success")
+                except Exception as e:
+                    add_bot_log(user_id, f"⛔ {h['coin']}: ÉCHEC de vente spot réelle — {e} — holding gardé OUVERT, nouvelle tentative au prochain cycle", "error")
+                    close_confirmed = False
+            if close_confirmed:
+                final_pnl_pct = (fill_price_sell - h["entry_price"]) / h["entry_price"] * 100
+                final_pnl = h["size_usdc"] * (final_pnl_pct / 100)
+                conn.execute("""UPDATE spot_holdings SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
+                    closed_at=?, close_reason=? WHERE id=?""",
+                    (fill_price_sell, round(final_pnl, 4), round(final_pnl_pct, 4), datetime.utcnow().isoformat(), close_reason, h["id"]))
+                if not is_live_h:
+                    conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
+                                 (h["size_usdc"], round(final_pnl, 4), user_id))
+                conn.commit()
+                add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher {lock_ratio:.0f}% du pic = +{round(peak_pct*(lock_ratio/100),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
+        conn.close()
+
 async def scan_markets(user_id: int):
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -3142,6 +3359,7 @@ async def scan_markets(user_id: int):
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
         breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
+        spot_accum_candidates = []  # rempli pendant la boucle si spot_accum_enabled, traité après
         accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
         accum_short_in_range_count = 0  # idem SHORT
         breakout_scanned_count = 0  # nb de coins avec un range détecté (support+résistance) examinés pour Breakout ce cycle
@@ -3593,6 +3811,48 @@ async def scan_markets(user_id: int):
                                 raison_short = "pas encore de rebond baissier confirmé depuis le plus haut récent" if not price_bouncing_down else "RSI ne redescend pas encore et MACD pas baissier"
                                 add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais retournement pas confirmé ({raison_short}) — pas de vente", "info")
 
+            # ==================== MODE SPOT ACCUMULATION — détection (LONG uniquement) ====================
+            # Réutilise le même support/résistance déjà calculé ci-dessus, mais avec un canal
+            # minimum bien plus large (2.5% par défaut, contre 0.5% pour l'Accumulation à
+            # levier) — pas de Max Loss ici, donc pas question d'entrer sur un mouvement de
+            # bruit : il faut un vrai va-et-vient qui vaut la peine d'être tenu jusqu'au bout.
+            if config and config.get("spot_accum_enabled") and support and resistance:
+                spot_channel_pct = (resistance - support) / support * 100
+                spot_min_channel = config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5
+                if spot_channel_pct >= spot_min_channel:
+                    spot_proximity = config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0
+                    near_support_spot = abs(price - support) / support * 100 <= spot_proximity
+                    if near_support_spot:
+                        # Momentum cohérent — même logique que l'Accumulation à levier.
+                        spot_momentum_margin = config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3
+                        spot_price_not_breached = price >= support * (1 - spot_momentum_margin / 100)
+                        spot_atr_val = tech.get("atr")
+                        spot_candle_atr_mult = config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0
+                        spot_candle_ok = True
+                        if spot_atr_val and candles:
+                            spot_last_range = candles[-1]["h"] - candles[-1]["l"]
+                            spot_candle_ok = spot_last_range <= spot_atr_val * spot_candle_atr_mult
+                        if spot_price_not_breached and spot_candle_ok:
+                            spot_recent_low = min(closes[-3:]) if len(closes) >= 3 else price
+                            spot_bouncing_up = price > spot_recent_low * 1.001
+                            spot_rsi_recovering = False
+                            if len(closes) > 17:
+                                spot_rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
+                                if spot_rsi_prev is not None and rsi is not None and rsi > spot_rsi_prev:
+                                    spot_rsi_recovering = True
+                            spot_macd_bull = bool(macd and macd["macd"] > macd["signal"])
+                            spot_reversal_confirmed = spot_bouncing_up and spot_rsi_recovering and spot_macd_bull
+                            spot_trend = "NEUTRAL"
+                            macd_val_spot = tech.get("macd_value")
+                            if macd_val_spot is not None and tech.get("macd_bull") is not None:
+                                if tech.get("macd_bull") and macd_val_spot > 0:
+                                    spot_trend = "BULL"
+                                elif tech.get("macd_bear") and macd_val_spot < 0:
+                                    spot_trend = "BEAR"
+                            if spot_reversal_confirmed and spot_trend != "BEAR":
+                                spot_accum_candidates.append({"coin": coin, "support": support, "resistance": resistance, "channel_pct": spot_channel_pct})
+
+
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
             # est requis pour justifier l'appel IA, pour TOUS les actifs (actifs ou non)
             has_signal = (rsi and (rsi < rsi_os or rsi > rsi_ob)) or (macd and (macd["crossBull"] or macd["crossBear"])) or vol_cur > vol_avg*vol_mult
@@ -3960,6 +4220,83 @@ async def scan_markets(user_id: int):
                 except ValueError as e:
                     add_bot_log(user_id, f"⛔ {coin}: Range Trading auto {cand_action} — tentative échouée ({e}) — nouvelle tentative au prochain cycle", "warning")
 
+        # ==================== MODE SPOT ACCUMULATION — ouverture (achat réel/paper) ====================
+        if spot_accum_candidates and config and config.get("spot_accum_enabled"):
+            for cand in spot_accum_candidates:
+                coin = cand["coin"]
+                conn_sp = get_db()
+                max_pos_sp = config["spot_accum_max_positions"] or 5
+                current_pos_sp = conn_sp.execute(
+                    "SELECT COUNT(*) FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)
+                ).fetchone()[0]
+                already_open_sp = conn_sp.execute(
+                    "SELECT id FROM spot_holdings WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, coin)
+                ).fetchone()
+                portfolio_row_sp = conn_sp.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+                conn_sp.close()
+                if current_pos_sp >= max_pos_sp or already_open_sp:
+                    continue
+
+                sp_mode = config["spot_accum_trading_mode"] if "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper"
+                cur_price_sp = prices.get(coin)
+                if not cur_price_sp:
+                    continue
+                target_ratio_sp = config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 100.0
+                target_pct_sp = round(cand["channel_pct"] * (target_ratio_sp / 100), 2)
+
+                if sp_mode == "live":
+                    conn_sp2 = get_db()
+                    user_row_sp = conn_sp2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+                    conn_sp2.close()
+                    hl_wallet_sp = user_row_sp["hl_wallet"] if user_row_sp and "hl_wallet" in user_row_sp.keys() else None
+                    capital_sp, hl_err_sp = get_hl_account_value_verbose(hl_wallet_sp)
+                    if capital_sp <= 0:
+                        raison_sp = hl_err_sp if hl_err_sp else f"solde lu avec succès mais à {capital_sp}$ — compte vide ou adresse incorrecte"
+                        add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — solde Hyperliquid réel indisponible ({raison_sp}), achat annulé par sécurité", "error")
+                        continue
+                    size_sp = round((capital_sp * 0.50) / max_pos_sp, 2)
+                    try:
+                        # AVERTISSEMENT : nécessite un solde USDC dans le compte SPOT Hyperliquid
+                        # spécifiquement (distinct de la marge des perpétuels) — le capital
+                        # utilisé pour le calcul de taille ci-dessus est l'équité globale du
+                        # compte, pas le solde spot disponible précisément. Si l'ordre échoue
+                        # pour solde spot insuffisant, un transfert perp→spot est nécessaire
+                        # côté utilisateur (l'app ne le fait pas automatiquement).
+                        qty_sp, fill_price_sp = hl_spot_buy(hl_wallet_sp, coin, size_sp, cur_price_sp)
+                        conn_ins = get_db()
+                        conn_ins.execute("""INSERT INTO spot_holdings
+                            (user_id, coin, status, entry_price, current_price, qty, size_usdc,
+                             support_price, resistance_price, channel_pct, target_pct, is_live,
+                             opened_at, session_date)
+                            VALUES (?,?,'OPEN',?,?,?,?,?,?,?,?,1,?,?)""",
+                            (user_id, coin, fill_price_sp, fill_price_sp, qty_sp, size_sp,
+                             cand["support"], cand["resistance"], cand["channel_pct"], target_pct_sp,
+                             datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
+                        conn_ins.commit()
+                        conn_ins.close()
+                        add_bot_log(user_id, f"🤖🪙 Spot Accumulation LIVE: achat {qty_sp} {coin} @ ${fill_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
+                    except Exception as e:
+                        add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — achat échoué ({e}) — nouvelle tentative au prochain cycle", "warning")
+                else:
+                    capital_sp = portfolio_row_sp["balance"] if portfolio_row_sp else 1000.0
+                    size_sp = round((capital_sp * 0.50) / max_pos_sp, 2)
+                    if capital_sp < size_sp:
+                        continue
+                    qty_sp = round(size_sp / cur_price_sp, 6)
+                    conn_ins = get_db()
+                    conn_ins.execute("""INSERT INTO spot_holdings
+                        (user_id, coin, status, entry_price, current_price, qty, size_usdc,
+                         support_price, resistance_price, channel_pct, target_pct, is_live,
+                         opened_at, session_date)
+                        VALUES (?,?,'OPEN',?,?,?,?,?,?,?,?,0,?,?)""",
+                        (user_id, coin, cur_price_sp, cur_price_sp, qty_sp, size_sp,
+                         cand["support"], cand["resistance"], cand["channel_pct"], target_pct_sp,
+                         datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
+                    conn_ins.execute("UPDATE paper_portfolio SET balance=balance-? WHERE user_id=?", (size_sp, user_id))
+                    conn_ins.commit()
+                    conn_ins.close()
+                    add_bot_log(user_id, f"🤖🪙 Spot Accumulation (paper): achat {qty_sp} {coin} @ ${cur_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
+
         # Anti-corrélation retirée (simplification aux 4 conditions essentielles) — tous les
         # candidats du cycle sont conservés, triés par confiance décroissante.
         selected_opens = sorted(pending_opens, key=lambda c: c["confidence"], reverse=True)
@@ -4101,6 +4438,9 @@ async def scan_markets(user_id: int):
                     await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn, result.get("close_reason"))
             conn.commit()
             conn.close()
+
+        # Gestion des holdings Spot Accumulation — AUCUN Max Loss, tient jusqu'à l'objectif/trailing
+        await manage_spot_holdings(user_id, prices)
 
         # Update last scan
         conn = get_db()
@@ -5182,6 +5522,15 @@ class UpdateConfigRequest(BaseModel):
     range_trading_trailing_arm_pct: Optional[float] = None
     range_trading_trailing_main_pct: Optional[float] = None
     range_trading_trailing_gap_pct: Optional[float] = None
+    spot_accum_enabled: Optional[bool] = None
+    spot_accum_max_positions: Optional[int] = None
+    spot_accum_min_channel_pct: Optional[float] = None
+    spot_accum_proximity_pct: Optional[float] = None
+    spot_accum_target_ratio_pct: Optional[float] = None
+    spot_accum_trailing_lock_ratio_pct: Optional[float] = None
+    spot_accum_momentum_margin_pct: Optional[float] = None
+    spot_accum_candle_atr_mult: Optional[float] = None
+    spot_accum_trading_mode: Optional[str] = None
     range_trading_trailing_lock_ratio_pct: Optional[float] = None
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
@@ -5377,6 +5726,15 @@ def get_config(user_id: int = Depends(get_current_user)):
         "range_trading_trailing_arm_pct": config["range_trading_trailing_arm_pct"] if "range_trading_trailing_arm_pct" in config.keys() and config["range_trading_trailing_arm_pct"] is not None else 0.5,
         "range_trading_trailing_main_pct": config["range_trading_trailing_main_pct"] if "range_trading_trailing_main_pct" in config.keys() and config["range_trading_trailing_main_pct"] is not None else 1.0,
         "range_trading_trailing_gap_pct": config["range_trading_trailing_gap_pct"] if "range_trading_trailing_gap_pct" in config.keys() and config["range_trading_trailing_gap_pct"] is not None else 0.42,
+        "spot_accum_enabled": config["spot_accum_enabled"] if "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] is not None else 0,
+        "spot_accum_max_positions": config["spot_accum_max_positions"] if "spot_accum_max_positions" in config.keys() and config["spot_accum_max_positions"] else 5,
+        "spot_accum_min_channel_pct": config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5,
+        "spot_accum_proximity_pct": config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0,
+        "spot_accum_target_ratio_pct": config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 100.0,
+        "spot_accum_trailing_lock_ratio_pct": config["spot_accum_trailing_lock_ratio_pct"] if "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0,
+        "spot_accum_momentum_margin_pct": config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3,
+        "spot_accum_candle_atr_mult": config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0,
+        "spot_accum_trading_mode": config["spot_accum_trading_mode"] if "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper",
         "range_trading_trailing_lock_ratio_pct": config["range_trading_trailing_lock_ratio_pct"] if "range_trading_trailing_lock_ratio_pct" in config.keys() and config["range_trading_trailing_lock_ratio_pct"] is not None else 50.0,
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
@@ -5550,6 +5908,24 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET range_trading_trailing_main_pct=? WHERE user_id=?", (req.range_trading_trailing_main_pct, user_id))
     if req.range_trading_trailing_gap_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_gap_pct=? WHERE user_id=?", (req.range_trading_trailing_gap_pct, user_id))
+    if req.spot_accum_enabled is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_enabled=? WHERE user_id=?", (1 if req.spot_accum_enabled else 0, user_id))
+    if req.spot_accum_max_positions is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_max_positions=? WHERE user_id=?", (req.spot_accum_max_positions, user_id))
+    if req.spot_accum_min_channel_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_min_channel_pct=? WHERE user_id=?", (req.spot_accum_min_channel_pct, user_id))
+    if req.spot_accum_proximity_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_proximity_pct=? WHERE user_id=?", (req.spot_accum_proximity_pct, user_id))
+    if req.spot_accum_target_ratio_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_target_ratio_pct=? WHERE user_id=?", (req.spot_accum_target_ratio_pct, user_id))
+    if req.spot_accum_trailing_lock_ratio_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_trailing_lock_ratio_pct=? WHERE user_id=?", (req.spot_accum_trailing_lock_ratio_pct, user_id))
+    if req.spot_accum_momentum_margin_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_momentum_margin_pct=? WHERE user_id=?", (req.spot_accum_momentum_margin_pct, user_id))
+    if req.spot_accum_candle_atr_mult is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_candle_atr_mult=? WHERE user_id=?", (req.spot_accum_candle_atr_mult, user_id))
+    if req.spot_accum_trading_mode is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_trading_mode=? WHERE user_id=?", (req.spot_accum_trading_mode, user_id))
     if req.range_trading_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_lock_ratio_pct=? WHERE user_id=?", (req.range_trading_trailing_lock_ratio_pct, user_id))
     if req.range_trading_trading_mode is not None:
@@ -6021,6 +6397,18 @@ def ensure_portfolio(user_id: int, conn):
     if not existing:
         conn.execute("INSERT INTO paper_portfolio (user_id) VALUES (?)", (user_id,))
         conn.commit()
+
+@app.get("/api/spot-holdings")
+def get_spot_holdings(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    open_h = conn.execute(
+        "SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN' ORDER BY opened_at DESC", (user_id,)
+    ).fetchall()
+    closed_h = conn.execute(
+        "SELECT * FROM spot_holdings WHERE user_id=? AND status='CLOSED' ORDER BY closed_at DESC LIMIT 50", (user_id,)
+    ).fetchall()
+    conn.close()
+    return {"open": [dict(h) for h in open_h], "closed": [dict(h) for h in closed_h]}
 
 @app.get("/api/paper/portfolio")
 def get_paper_portfolio(user_id: int = Depends(get_current_user)):
@@ -7439,7 +7827,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.2"
+BACKEND_BUILD_VERSION = "2026-08-20.3"
 
 @app.get("/api/version")
 def get_version():
