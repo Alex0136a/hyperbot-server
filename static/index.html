@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.3";
+const APP_BUILD_VERSION = "2026-08-20.4";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -401,6 +401,8 @@ function App() {
   const [conditionsList, setConditionsList] = useState([]);
   const [tpInputs, setTpInputs] = useState({});
   const [spotTargetInputs, setSpotTargetInputs] = useState({});
+  const [channelDiag, setChannelDiag] = useState(null);
+  const [channelDiagLoading, setChannelDiagLoading] = useState(false);
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -1480,6 +1482,32 @@ Confirmer ?`
                 </div>
               </div>
             )}
+
+            <div style={{padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <button onClick={async()=>{
+                setChannelDiagLoading(true);
+                try{
+                  const r = await apiCall("/api/channel-diagnostic","GET",null,token);
+                  setChannelDiag(r);
+                }catch(e){addLog("Erreur diagnostic canaux: "+e.message,"error");}
+                setChannelDiagLoading(false);
+              }} style={{background:"#0f1629",border:"1px solid #facc15",borderRadius:6,padding:"6px 14px",color:"#facc15",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {channelDiagLoading?"⏳ Calcul en cours...":"📏 Vérifier les canaux actuels (calibrer spot_accum_min_channel_pct)"}
+              </button>
+              {channelDiag && (
+                <div style={{marginTop:10,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:8,padding:10}}>
+                  <div style={{fontSize:11,color:"#e2e8f0",marginBottom:8}}>
+                    Moyenne : <b style={{color:"#facc15"}}>{channelDiag.avg_channel_pct}%</b> · Médiane : <b style={{color:"#facc15"}}>{channelDiag.median_channel_pct}%</b> · {channelDiag.count} actif(s) analysé(s)
+                  </div>
+                  {channelDiag.coins.map(c=>(
+                    <div key={c.coin} style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#94a3b8",padding:"3px 0"}}>
+                      <span>{c.coin}</span>
+                      <span style={{color:c.channel_pct>=2.5?"#34d399":"#f87171",fontWeight:700}}>{c.channel_pct}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
