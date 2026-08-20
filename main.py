@@ -4498,7 +4498,11 @@ async def startup_cleanup(user_id: int):
         AND consecutive_losses = 0""", (user_id,))
 
     conn.commit()
-    conn.close()
+    # BUG CORRIGÉ : conn.close() était appelée ICI, mais tout le bloc "recalcul des stats de la
+    # session du jour" juste en dessous réutilisait encore conn.execute(...) — provoquant un
+    # crash systématique à chaque démarrage (sqlite3.ProgrammingError: Cannot operate on a
+    # closed database), visible dans les logs de déploiement comme une exception "jamais
+    # récupérée" sur la tâche startup_cleanup. Fermeture déplacée à la toute fin de la fonction.
 
     # Toujours recalculer les stats de la session du jour
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
@@ -4516,6 +4520,7 @@ async def startup_cleanup(user_id: int):
              today_stats["losses"] or 0, today_stats["net"] or 0,
              user_id, today_str))
         conn.commit()
+    conn.close()
 
     if cleaned:
         add_bot_log(user_id, f"🧹 Nettoyage démarrage: {len(cleaned)} actions", "info")
@@ -7348,7 +7353,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-19.4"
+BACKEND_BUILD_VERSION = "2026-08-20.1"
 
 @app.get("/api/version")
 def get_version():
