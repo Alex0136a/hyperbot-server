@@ -270,13 +270,21 @@ def init_db():
         # Plafond de perte absolu depuis le prix d'achat — vérifié en priorité, avant toute
         # autre logique (armement, support, cible). Protège même si la rupture de support (qui
         # se mesure depuis le support, pas l'entrée) n'a pas encore techniquement déclenché.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_loss_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_max_loss_pct REAL DEFAULT 0.3")
         conn.commit()
     except: pass
     try:
         # Harmonisé à 1% comme le bot principal et Breakout — corrige au passage une incohérence
         # entre le défaut de colonne (0.7%) et le défaut réellement utilisé dans le code (0.5%).
         conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=1.0 WHERE accumulation_max_loss_pct IN (0.5, 0.7)")
+        conn.commit()
+    except: pass
+    try:
+        # Resserré de 1% à 0.3% à la demande explicite de l'utilisateur, suite à l'examen d'un
+        # lot de clôtures Accumulation jugées trop tolérantes. Migre aussi les comptes encore
+        # sur d'anciens défauts (0.5%, 0.7%) au cas où la migration précédente ne les aurait
+        # pas atteints.
+        conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=0.3 WHERE accumulation_max_loss_pct IN (0.5, 0.7, 1.0)")
         conn.commit()
     except: pass
     try:
@@ -343,11 +351,31 @@ def init_db():
         # petits mouvements, d'autant plus vite que le levier est élevé. Combiné au TP manuel
         # via min(les deux) pour éviter tout conflit entre deux mécanismes d'armement séparés —
         # voir manage_open_trade, branche is_accumulation.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_arm_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_arm_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=0.5 WHERE accumulation_trailing_arm_pct=1.0")
         conn.commit()
     except: pass
     try:
         conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=1.0 WHERE accumulation_trailing_arm_pct=0.3")
+        conn.commit()
+    except: pass
+    try:
+        # Palier PRINCIPAL du trailing Accumulation (distinct du palier précoce ci-dessus) —
+        # architecture à deux paliers désormais IDENTIQUE au bot principal : le palier précoce
+        # (accumulation_trailing_arm_pct, 0.5%) protège tôt mais se désactive dès que le pic
+        # atteint ce palier principal (1%), qui prend seul la main avec son propre verrouillage
+        # proportionnel au pic (accumulation_trailing_lock_ratio_pct).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_main_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        # Écart (en %) utilisé UNIQUEMENT par le palier précoce (entre le seuil d'armement et le
+        # palier principal) — même valeur par défaut que le bot principal (0.42%), non élargi
+        # (l'élargissement progressif reste réservé au palier principal une fois actif).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_trailing_gap_pct REAL DEFAULT 0.42")
         conn.commit()
     except: pass
     try:
@@ -397,7 +425,11 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_max_loss_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_max_loss_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET breakout_max_loss_pct=0.3 WHERE breakout_max_loss_pct IN (0.7, 1.0)")
         conn.commit()
     except: pass
     try:
@@ -409,7 +441,19 @@ def init_db():
         # pas atteint ce seuil, puis verrouille un % du pic (réglages dédiés, indépendants).
         # 1% de PnL% AVEC levier par défaut — capte les petits mouvements, d'autant plus vite
         # que le levier est élevé (même principe que le bot principal et Accumulation).
-        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_arm_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_arm_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET breakout_trailing_arm_pct=0.5 WHERE breakout_trailing_arm_pct=1.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_main_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN breakout_trailing_gap_pct REAL DEFAULT 0.42")
         conn.commit()
     except: pass
     try:
@@ -446,11 +490,27 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_max_loss_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_max_loss_pct REAL DEFAULT 0.3")
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_arm_pct REAL DEFAULT 1.0")
+        conn.execute("UPDATE bot_config SET range_trading_max_loss_pct=0.3 WHERE range_trading_max_loss_pct=1.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_arm_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET range_trading_trailing_arm_pct=0.5 WHERE range_trading_trailing_arm_pct=1.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_main_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_gap_pct REAL DEFAULT 0.42")
         conn.commit()
     except: pass
     try:
@@ -586,7 +646,11 @@ def init_db():
         conn.commit()
     except: pass
     try:
-        conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN max_loss_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("UPDATE bot_config SET max_loss_pct=0.3 WHERE max_loss_pct=1.0")
         conn.commit()
     except: pass
     try:
@@ -2194,45 +2258,48 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             accum_peak_pct = pnl_pct_live
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (accum_peak_pct, trade["id"]))
 
-        # TP manuel (%) + Trailing précoce — UN SEUL mécanisme d'armement unifié, pour éviter
-        # tout conflit entre deux seuils séparés : on arme dès que le PnL% atteint le PREMIER
-        # des deux seuils suivants (celui qui est le plus bas) :
-        #  - accumulation_trailing_arm_pct (1% de PnL avec levier par défaut) — armement précoce
-        #    indépendant, capte les petits mouvements (d'autant plus vite que le levier est fort)
-        #  - custom_take_profit_pct (TP manuel, suit le canal dynamiquement, plafonné à 1.5%)
-        # Une fois armé, le plancher ne redescend JAMAIS sous le seuil qui a servi à armer, et
-        # grandit avec le pic (verrouille accumulation_trailing_lock_ratio_pct % du pic, 50% par
-        # défaut) — pour laisser courir une progression au-delà, jusqu'à un vrai retournement.
+        # TP manuel (%) — INDÉPENDANT du trailing ci-dessous, son propre armement/régression lié
+        # au canal dynamique (custom_take_profit_pct, suit support/résistance en continu).
         custom_tp_pct = trade.get("custom_take_profit_pct")
-        cfg_tp_trail = conn.execute("SELECT accumulation_trailing_arm_pct, accumulation_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        early_arm_pct = cfg_tp_trail["accumulation_trailing_arm_pct"] if cfg_tp_trail and "accumulation_trailing_arm_pct" in cfg_tp_trail.keys() and cfg_tp_trail["accumulation_trailing_arm_pct"] is not None else 1.0
-        tp_trail_lock_ratio = cfg_tp_trail["accumulation_trailing_lock_ratio_pct"] if cfg_tp_trail and "accumulation_trailing_lock_ratio_pct" in cfg_tp_trail.keys() and cfg_tp_trail["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
-        arm_threshold = min(early_arm_pct, custom_tp_pct) if custom_tp_pct is not None else early_arm_pct
-
         tp_armed = bool(trade.get("custom_tp_armed"))
-        armed_base_pct = float(trade["custom_tp_armed_base_pct"]) if trade.get("custom_tp_armed_base_pct") is not None else None
-        if not tp_armed and pnl_pct_live >= arm_threshold:
-            conn.execute("UPDATE paper_trades SET custom_tp_armed=1, custom_tp_armed_base_pct=? WHERE id=?", (arm_threshold, trade["id"]))
-            armed_base_pct = arm_threshold
-            origine = "TP manuel/canal" if arm_threshold == custom_tp_pct else "armement précoce"
-            add_bot_log(user_id, f"🎯 {trade['coin']}: seuil atteint ({origine}, {round(arm_threshold,2)}%) à {round(pnl_pct_live,2)}% — plancher trailing armé, le trade continue de courir au-delà", "info")
-        elif tp_armed:
-            floor_base = armed_base_pct if armed_base_pct is not None else arm_threshold
-            tp_trail_floor = max(floor_base, round(accum_peak_pct * (tp_trail_lock_ratio / 100), 4))
-            if pnl_pct_live < tp_trail_floor:
-                if accum_peak_pct > floor_base * 1.05:  # progression notable au-delà du seuil d'armement -> trailing, sinon simple retour au seuil
+        if custom_tp_pct is not None:
+            if not tp_armed and pnl_pct_live >= custom_tp_pct:
+                conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
+                add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — plancher armé, le trade continue de courir au-delà", "info")
+            elif tp_armed and pnl_pct_live < custom_tp_pct:
+                accum_close_reason = "TAKE_PROFIT_MANUEL"
+                accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+
+        # Trailing à DEUX PALIERS — INDÉPENDANT du TP manuel ci-dessus, exactement la même
+        # architecture que le bot principal : un premier palier précoce (0.5% par défaut)
+        # protège tôt, mais se DÉSACTIVE dès que le pic atteint le palier principal (1% par
+        # défaut), qui prend alors seul la main. Pas de max() entre les deux (bascule nette),
+        # pour la même raison que sur le bot principal : un palier précoce à écart fixe resterait
+        # sinon systématiquement plus serré que le principal une fois celui-ci élargi.
+        if not accum_close_reason:
+            cfg_trail2 = conn.execute("SELECT accumulation_trailing_arm_pct, accumulation_trailing_main_pct, accumulation_trailing_lock_ratio_pct, accumulation_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+            accum_early_arm = cfg_trail2["accumulation_trailing_arm_pct"] if cfg_trail2 and "accumulation_trailing_arm_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_arm_pct"] is not None else 0.5
+            accum_main_arm = cfg_trail2["accumulation_trailing_main_pct"] if cfg_trail2 and "accumulation_trailing_main_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_main_pct"] is not None else 1.0
+            accum_lock_ratio = cfg_trail2["accumulation_trailing_lock_ratio_pct"] if cfg_trail2 and "accumulation_trailing_lock_ratio_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
+            accum_trail_gap = cfg_trail2["accumulation_trailing_gap_pct"] if cfg_trail2 and "accumulation_trailing_gap_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_gap_pct"] is not None else 0.42
+
+            if accum_peak_pct >= accum_main_arm:
+                accum_trail_floor = round(accum_peak_pct * (accum_lock_ratio / 100), 4)
+                if pnl_pct_live <= accum_trail_floor:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Trailing touché (pic {round(accum_peak_pct,2)}%, plancher {tp_trail_lock_ratio:.0f}% du pic = {round(tp_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
-                else:
-                    accum_close_reason = "TAKE_PROFIT_MANUEL"
-                    accum_log_msg = f"🎯 {trade['coin']}: retour sous le plancher armé ({round(floor_base,2)}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+                    accum_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(accum_peak_pct,2)}%, plancher {accum_lock_ratio:.0f}% du pic = {round(accum_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+            elif accum_peak_pct >= accum_early_arm:
+                accum_early_floor = round(accum_peak_pct - accum_trail_gap, 4)
+                if pnl_pct_live <= accum_early_floor:
+                    accum_close_reason = "ACCUMULATION_EARLY_FLOOR"
+                    accum_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(accum_peak_pct,2)}%, plancher = {round(accum_early_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
         # Plafond de perte ABSOLU depuis le prix d'achat/vente — vérifié en priorité, avant
         # tout le reste. Protège même si la rupture de niveau (mesurée depuis le support/la
         # résistance, pas l'entrée) n'a pas encore techniquement déclenché.
         cfg_accum_maxloss = conn.execute(
             "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 1.0
+        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.3
         if not accum_close_reason and pnl_pct_live <= -accum_max_loss_pct:
             accum_close_reason = "ACCUMULATION_MAX_LOSS"
             accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
@@ -2261,7 +2328,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP") else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP", "ACCUMULATION_EARLY_FLOOR") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
@@ -2299,10 +2366,12 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         bo_close_reason = None
         bo_log_msg = None
 
-        cfg_bo = conn.execute("SELECT breakout_max_loss_pct, breakout_trailing_arm_pct, breakout_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        bo_max_loss_pct = cfg_bo["breakout_max_loss_pct"] if cfg_bo and "breakout_max_loss_pct" in cfg_bo.keys() and cfg_bo["breakout_max_loss_pct"] is not None else 1.0
-        bo_arm_pct = cfg_bo["breakout_trailing_arm_pct"] if cfg_bo and "breakout_trailing_arm_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_arm_pct"] is not None else 0.3
+        cfg_bo = conn.execute("SELECT breakout_max_loss_pct, breakout_trailing_arm_pct, breakout_trailing_main_pct, breakout_trailing_lock_ratio_pct, breakout_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        bo_max_loss_pct = cfg_bo["breakout_max_loss_pct"] if cfg_bo and "breakout_max_loss_pct" in cfg_bo.keys() and cfg_bo["breakout_max_loss_pct"] is not None else 0.3
+        bo_early_arm = cfg_bo["breakout_trailing_arm_pct"] if cfg_bo and "breakout_trailing_arm_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_arm_pct"] is not None else 0.5
+        bo_main_arm = cfg_bo["breakout_trailing_main_pct"] if cfg_bo and "breakout_trailing_main_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_main_pct"] is not None else 1.0
         bo_lock_ratio = cfg_bo["breakout_trailing_lock_ratio_pct"] if cfg_bo and "breakout_trailing_lock_ratio_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_lock_ratio_pct"] is not None else 50.0
+        bo_trail_gap = cfg_bo["breakout_trailing_gap_pct"] if cfg_bo and "breakout_trailing_gap_pct" in cfg_bo.keys() and cfg_bo["breakout_trailing_gap_pct"] is not None else 0.42
 
         if pnl_pct_live <= -bo_max_loss_pct:
             bo_close_reason = "BREAKOUT_MAX_LOSS"
@@ -2313,14 +2382,21 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             bo_peak_pct = pnl_pct_live
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (bo_peak_pct, trade["id"]))
 
-        if not bo_close_reason and bo_peak_pct >= bo_arm_pct:
+        # Trailing à DEUX PALIERS — bascule nette (pas de max()) entre le palier précoce (0.5%
+        # par défaut) et le palier principal (1%), exactement comme le bot principal/Accumulation.
+        if not bo_close_reason and bo_peak_pct >= bo_main_arm:
             bo_floor = round(bo_peak_pct * (bo_lock_ratio / 100), 4)
             if pnl_pct_live <= bo_floor:
                 bo_close_reason = "BREAKOUT_TRAILING_TP"
-                bo_log_msg = f"🔒 {trade['coin']}: Breakout trailing touché (pic {round(bo_peak_pct,2)}%, plancher {bo_lock_ratio:.0f}% du pic = {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                bo_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(bo_peak_pct,2)}%, plancher {bo_lock_ratio:.0f}% du pic = {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+        elif not bo_close_reason and bo_peak_pct >= bo_early_arm:
+            bo_early_floor = round(bo_peak_pct - bo_trail_gap, 4)
+            if pnl_pct_live <= bo_early_floor:
+                bo_close_reason = "BREAKOUT_EARLY_FLOOR"
+                bo_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(bo_peak_pct,2)}%, plancher = {round(bo_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if bo_close_reason:
-            add_bot_log(user_id, bo_log_msg, "success" if bo_close_reason == "BREAKOUT_TRAILING_TP" else "warning")
+            add_bot_log(user_id, bo_log_msg, "success" if bo_close_reason in ("BREAKOUT_TRAILING_TP", "BREAKOUT_EARLY_FLOOR") else "warning")
             is_live_bo = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_bo:
@@ -2355,10 +2431,12 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
         rt_close_reason = None
         rt_log_msg = None
 
-        cfg_rt = conn.execute("SELECT range_trading_max_loss_pct, range_trading_trailing_arm_pct, range_trading_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        rt_max_loss_pct = cfg_rt["range_trading_max_loss_pct"] if cfg_rt and "range_trading_max_loss_pct" in cfg_rt.keys() and cfg_rt["range_trading_max_loss_pct"] is not None else 1.0
-        rt_arm_pct = cfg_rt["range_trading_trailing_arm_pct"] if cfg_rt and "range_trading_trailing_arm_pct" in cfg_rt.keys() and cfg_rt["range_trading_trailing_arm_pct"] is not None else 1.0
+        cfg_rt = conn.execute("SELECT range_trading_max_loss_pct, range_trading_trailing_arm_pct, range_trading_trailing_main_pct, range_trading_trailing_lock_ratio_pct, range_trading_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        rt_max_loss_pct = cfg_rt["range_trading_max_loss_pct"] if cfg_rt and "range_trading_max_loss_pct" in cfg_rt.keys() and cfg_rt["range_trading_max_loss_pct"] is not None else 0.3
+        rt_early_arm = cfg_rt["range_trading_trailing_arm_pct"] if cfg_rt and "range_trading_trailing_arm_pct" in cfg_rt.keys() and cfg_rt["range_trading_trailing_arm_pct"] is not None else 0.5
+        rt_main_arm = cfg_rt["range_trading_trailing_main_pct"] if cfg_rt and "range_trading_trailing_main_pct" in cfg_rt.keys() and cfg_rt["range_trading_trailing_main_pct"] is not None else 1.0
         rt_lock_ratio = cfg_rt["range_trading_trailing_lock_ratio_pct"] if cfg_rt and "range_trading_trailing_lock_ratio_pct" in cfg_rt.keys() and cfg_rt["range_trading_trailing_lock_ratio_pct"] is not None else 50.0
+        rt_trail_gap = cfg_rt["range_trading_trailing_gap_pct"] if cfg_rt and "range_trading_trailing_gap_pct" in cfg_rt.keys() and cfg_rt["range_trading_trailing_gap_pct"] is not None else 0.42
 
         if pnl_pct_live <= -rt_max_loss_pct:
             rt_close_reason = "RANGE_TRADE_MAX_LOSS"
@@ -2369,14 +2447,20 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             rt_peak_pct = pnl_pct_live
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (rt_peak_pct, trade["id"]))
 
-        if not rt_close_reason and rt_peak_pct >= rt_arm_pct:
+        # Trailing à DEUX PALIERS — même architecture que les 3 autres modes.
+        if not rt_close_reason and rt_peak_pct >= rt_main_arm:
             rt_floor = round(rt_peak_pct * (rt_lock_ratio / 100), 4)
             if pnl_pct_live <= rt_floor:
                 rt_close_reason = "RANGE_TRADE_TRAILING_TP"
-                rt_log_msg = f"🔒 {trade['coin']}: Range Trading trailing touché (pic {round(rt_peak_pct,2)}%, plancher {rt_lock_ratio:.0f}% du pic = {round(rt_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                rt_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(rt_peak_pct,2)}%, plancher {rt_lock_ratio:.0f}% du pic = {round(rt_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+        elif not rt_close_reason and rt_peak_pct >= rt_early_arm:
+            rt_early_floor = round(rt_peak_pct - rt_trail_gap, 4)
+            if pnl_pct_live <= rt_early_floor:
+                rt_close_reason = "RANGE_TRADE_EARLY_FLOOR"
+                rt_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(rt_peak_pct,2)}%, plancher = {round(rt_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if rt_close_reason:
-            add_bot_log(user_id, rt_log_msg, "success" if rt_close_reason == "RANGE_TRADE_TRAILING_TP" else "warning")
+            add_bot_log(user_id, rt_log_msg, "success" if rt_close_reason in ("RANGE_TRADE_TRAILING_TP", "RANGE_TRADE_EARLY_FLOOR") else "warning")
             is_live_rt = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_rt:
@@ -2418,7 +2502,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
             return float(cfg_qp[cfg_key])
         return fallback
 
-    max_loss_pct = pick("custom_max_loss_pct", "max_loss_pct", 1.0)
+    max_loss_pct = pick("custom_max_loss_pct", "max_loss_pct", 0.3)
 
     # BUG CORRIGÉ (principe général, tous modes) : le levier sert UNIQUEMENT à amplifier le
     # gain/la perte en dollars — il ne doit JAMAIS intervenir dans la décision de sortie.
@@ -4986,6 +5070,8 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_rsi_min: Optional[float] = None
     accumulation_short_rsi_max: Optional[float] = None
     accumulation_trailing_arm_pct: Optional[float] = None
+    accumulation_trailing_main_pct: Optional[float] = None
+    accumulation_trailing_gap_pct: Optional[float] = None
     accumulation_trailing_lock_ratio_pct: Optional[float] = None
     breakout_enabled: Optional[bool] = None
     breakout_short_enabled: Optional[bool] = None
@@ -4996,6 +5082,8 @@ class UpdateConfigRequest(BaseModel):
     breakout_confirm_buffer_pct: Optional[float] = None
     breakout_max_loss_pct: Optional[float] = None
     breakout_trailing_arm_pct: Optional[float] = None
+    breakout_trailing_main_pct: Optional[float] = None
+    breakout_trailing_gap_pct: Optional[float] = None
     breakout_trailing_lock_ratio_pct: Optional[float] = None
     breakout_trading_mode: Optional[str] = None
     range_trading_enabled: Optional[bool] = None
@@ -5003,6 +5091,8 @@ class UpdateConfigRequest(BaseModel):
     range_trading_leverage: Optional[int] = None
     range_trading_max_loss_pct: Optional[float] = None
     range_trading_trailing_arm_pct: Optional[float] = None
+    range_trading_trailing_main_pct: Optional[float] = None
+    range_trading_trailing_gap_pct: Optional[float] = None
     range_trading_trailing_lock_ratio_pct: Optional[float] = None
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
@@ -5174,7 +5264,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
         "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
         "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
-        "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 1.0,
+        "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.5,
+        "accumulation_trailing_main_pct": config["accumulation_trailing_main_pct"] if "accumulation_trailing_main_pct" in config.keys() and config["accumulation_trailing_main_pct"] is not None else 1.0,
+        "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] is not None else 0.42,
         "accumulation_trailing_lock_ratio_pct": config["accumulation_trailing_lock_ratio_pct"] if "accumulation_trailing_lock_ratio_pct" in config.keys() and config["accumulation_trailing_lock_ratio_pct"] is not None else 50.0,
         "breakout_enabled": config["breakout_enabled"] if "breakout_enabled" in config.keys() and config["breakout_enabled"] is not None else 0,
         "breakout_short_enabled": config["breakout_short_enabled"] if "breakout_short_enabled" in config.keys() and config["breakout_short_enabled"] is not None else 0,
@@ -5183,15 +5275,19 @@ def get_config(user_id: int = Depends(get_current_user)):
         "breakout_short_leverage": config["breakout_short_leverage"] if "breakout_short_leverage" in config.keys() and config["breakout_short_leverage"] else 2,
         "breakout_volume_mult": config["breakout_volume_mult"] if "breakout_volume_mult" in config.keys() and config["breakout_volume_mult"] is not None else 1.5,
         "breakout_confirm_buffer_pct": config["breakout_confirm_buffer_pct"] if "breakout_confirm_buffer_pct" in config.keys() and config["breakout_confirm_buffer_pct"] is not None else 0.3,
-        "breakout_max_loss_pct": config["breakout_max_loss_pct"] if "breakout_max_loss_pct" in config.keys() and config["breakout_max_loss_pct"] is not None else 1.0,
-        "breakout_trailing_arm_pct": config["breakout_trailing_arm_pct"] if "breakout_trailing_arm_pct" in config.keys() and config["breakout_trailing_arm_pct"] is not None else 1.0,
+        "breakout_max_loss_pct": config["breakout_max_loss_pct"] if "breakout_max_loss_pct" in config.keys() and config["breakout_max_loss_pct"] is not None else 0.3,
+        "breakout_trailing_arm_pct": config["breakout_trailing_arm_pct"] if "breakout_trailing_arm_pct" in config.keys() and config["breakout_trailing_arm_pct"] is not None else 0.5,
+        "breakout_trailing_main_pct": config["breakout_trailing_main_pct"] if "breakout_trailing_main_pct" in config.keys() and config["breakout_trailing_main_pct"] is not None else 1.0,
+        "breakout_trailing_gap_pct": config["breakout_trailing_gap_pct"] if "breakout_trailing_gap_pct" in config.keys() and config["breakout_trailing_gap_pct"] is not None else 0.42,
         "breakout_trailing_lock_ratio_pct": config["breakout_trailing_lock_ratio_pct"] if "breakout_trailing_lock_ratio_pct" in config.keys() and config["breakout_trailing_lock_ratio_pct"] is not None else 50.0,
         "breakout_trading_mode": config["breakout_trading_mode"] if "breakout_trading_mode" in config.keys() and config["breakout_trading_mode"] else "paper",
         "range_trading_enabled": config["range_trading_enabled"] if "range_trading_enabled" in config.keys() and config["range_trading_enabled"] is not None else 0,
         "range_trading_max_positions": config["range_trading_max_positions"] if "range_trading_max_positions" in config.keys() and config["range_trading_max_positions"] else 5,
         "range_trading_leverage": config["range_trading_leverage"] if "range_trading_leverage" in config.keys() and config["range_trading_leverage"] else 2,
-        "range_trading_max_loss_pct": config["range_trading_max_loss_pct"] if "range_trading_max_loss_pct" in config.keys() and config["range_trading_max_loss_pct"] is not None else 1.0,
-        "range_trading_trailing_arm_pct": config["range_trading_trailing_arm_pct"] if "range_trading_trailing_arm_pct" in config.keys() and config["range_trading_trailing_arm_pct"] is not None else 1.0,
+        "range_trading_max_loss_pct": config["range_trading_max_loss_pct"] if "range_trading_max_loss_pct" in config.keys() and config["range_trading_max_loss_pct"] is not None else 0.3,
+        "range_trading_trailing_arm_pct": config["range_trading_trailing_arm_pct"] if "range_trading_trailing_arm_pct" in config.keys() and config["range_trading_trailing_arm_pct"] is not None else 0.5,
+        "range_trading_trailing_main_pct": config["range_trading_trailing_main_pct"] if "range_trading_trailing_main_pct" in config.keys() and config["range_trading_trailing_main_pct"] is not None else 1.0,
+        "range_trading_trailing_gap_pct": config["range_trading_trailing_gap_pct"] if "range_trading_trailing_gap_pct" in config.keys() and config["range_trading_trailing_gap_pct"] is not None else 0.42,
         "range_trading_trailing_lock_ratio_pct": config["range_trading_trailing_lock_ratio_pct"] if "range_trading_trailing_lock_ratio_pct" in config.keys() and config["range_trading_trailing_lock_ratio_pct"] is not None else 50.0,
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
@@ -5201,7 +5297,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
         "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
-        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 1.0,
+        "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
@@ -5210,7 +5306,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "qp_lock_trigger_usd": config["qp_lock_trigger_usd"] if "qp_lock_trigger_usd" in config.keys() and config["qp_lock_trigger_usd"] else 1.5,
         "qp_arm_low_usd": config["qp_arm_low_usd"] if "qp_arm_low_usd" in config.keys() and config["qp_arm_low_usd"] else 1.1,
         "qp_floor_low_usd": config["qp_floor_low_usd"] if "qp_floor_low_usd" in config.keys() and config["qp_floor_low_usd"] else 0.6,
-        "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 1.0,
+        "max_loss_pct": config["max_loss_pct"] if "max_loss_pct" in config.keys() and config["max_loss_pct"] else 0.3,
         "early_floor_arm_pct": config["early_floor_arm_pct"] if "early_floor_arm_pct" in config.keys() and config["early_floor_arm_pct"] is not None else 0.5,
         "trailing_gap_pct": config["trailing_gap_pct"] if "trailing_gap_pct" in config.keys() and config["trailing_gap_pct"] else 0.42,
         "qp_lock_trigger_pct": config["qp_lock_trigger_pct"] if "qp_lock_trigger_pct" in config.keys() and config["qp_lock_trigger_pct"] else 0.63,
@@ -5321,6 +5417,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_rsi_max=? WHERE user_id=?", (req.accumulation_short_rsi_max, user_id))
     if req.accumulation_trailing_arm_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
+    if req.accumulation_trailing_main_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_main_pct=? WHERE user_id=?", (req.accumulation_trailing_main_pct, user_id))
+    if req.accumulation_trailing_gap_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_trailing_gap_pct=? WHERE user_id=?", (req.accumulation_trailing_gap_pct, user_id))
     if req.accumulation_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_lock_ratio_pct=? WHERE user_id=?", (req.accumulation_trailing_lock_ratio_pct, user_id))
     if req.breakout_enabled is not None:
@@ -5341,6 +5441,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET breakout_max_loss_pct=? WHERE user_id=?", (req.breakout_max_loss_pct, user_id))
     if req.breakout_trailing_arm_pct is not None:
         conn.execute("UPDATE bot_config SET breakout_trailing_arm_pct=? WHERE user_id=?", (req.breakout_trailing_arm_pct, user_id))
+    if req.breakout_trailing_main_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_trailing_main_pct=? WHERE user_id=?", (req.breakout_trailing_main_pct, user_id))
+    if req.breakout_trailing_gap_pct is not None:
+        conn.execute("UPDATE bot_config SET breakout_trailing_gap_pct=? WHERE user_id=?", (req.breakout_trailing_gap_pct, user_id))
     if req.breakout_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET breakout_trailing_lock_ratio_pct=? WHERE user_id=?", (req.breakout_trailing_lock_ratio_pct, user_id))
     if req.breakout_trading_mode is not None:
@@ -5355,6 +5459,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET range_trading_max_loss_pct=? WHERE user_id=?", (req.range_trading_max_loss_pct, user_id))
     if req.range_trading_trailing_arm_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_arm_pct=? WHERE user_id=?", (req.range_trading_trailing_arm_pct, user_id))
+    if req.range_trading_trailing_main_pct is not None:
+        conn.execute("UPDATE bot_config SET range_trading_trailing_main_pct=? WHERE user_id=?", (req.range_trading_trailing_main_pct, user_id))
+    if req.range_trading_trailing_gap_pct is not None:
+        conn.execute("UPDATE bot_config SET range_trading_trailing_gap_pct=? WHERE user_id=?", (req.range_trading_trailing_gap_pct, user_id))
     if req.range_trading_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_lock_ratio_pct=? WHERE user_id=?", (req.range_trading_trailing_lock_ratio_pct, user_id))
     if req.range_trading_trading_mode is not None:
@@ -5939,9 +6047,9 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         # pas un désengagement total qui laisserait une position live sans aucune protection
         # côté exchange si le serveur devient injoignable.
         accum_max_loss_cfg = conn.execute("SELECT accumulation_max_loss_pct, hl_safety_sl_multiplier, breakout_max_loss_pct, range_trading_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 1.0
-        breakout_max_loss_for_sl = accum_max_loss_cfg["breakout_max_loss_pct"] if accum_max_loss_cfg and "breakout_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["breakout_max_loss_pct"] else 1.0
-        range_max_loss_for_sl = accum_max_loss_cfg["range_trading_max_loss_pct"] if accum_max_loss_cfg and "range_trading_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["range_trading_max_loss_pct"] else 1.0
+        accum_max_loss_for_sl = accum_max_loss_cfg["accumulation_max_loss_pct"] if accum_max_loss_cfg and "accumulation_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["accumulation_max_loss_pct"] else 0.3
+        breakout_max_loss_for_sl = accum_max_loss_cfg["breakout_max_loss_pct"] if accum_max_loss_cfg and "breakout_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["breakout_max_loss_pct"] else 0.3
+        range_max_loss_for_sl = accum_max_loss_cfg["range_trading_max_loss_pct"] if accum_max_loss_cfg and "range_trading_max_loss_pct" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["range_trading_max_loss_pct"] else 0.3
         safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (breakout_max_loss_for_sl if is_breakout else (range_max_loss_for_sl if is_range_trade else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 1.0)))
         try:
@@ -7240,7 +7348,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-19.1"
+BACKEND_BUILD_VERSION = "2026-08-19.3"
 
 @app.get("/api/version")
 def get_version():
