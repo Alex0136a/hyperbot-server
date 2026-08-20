@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.1";
+const APP_BUILD_VERSION = "2026-08-20.2";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -344,6 +344,7 @@ function App() {
   const [tab, setTab] = useState("dashboard");
   const [logs, setLogs] = useState([]);
   const [paper, setPaper] = useState(null);
+  const [spotHoldings, setSpotHoldings] = useState({open:[], closed:[]});
   const [aiContinuous, setAiContinuous] = useState(false);
   const [filterHours, setFilterHours] = useState(true);
   const [filterExtraHours, setFilterExtraHours] = useState(true);
@@ -353,6 +354,7 @@ function App() {
   const [breakoutEnabled, setBreakoutEnabled] = useState(false);
   const [breakoutShortEnabled, setBreakoutShortEnabled] = useState(false);
   const [rangeTradingEnabled, setRangeTradingEnabled] = useState(false);
+  const [spotAccumEnabled, setSpotAccumEnabled] = useState(false);
   const [finnhubKey, setFinnhubKey] = useState("");
   const [hlApiKey, setHlApiKey] = useState("");
   const [sendgridKey, setSendgridKey] = useState("");
@@ -436,6 +438,8 @@ function App() {
       // 1. PRIORITÉ ABSOLUE — trades ouverts et PnL
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
       setPaper(pap);
+      const spotH = await apiCall("/api/spot-holdings","GET",null,token);
+      setSpotHoldings(spotH || {open:[], closed:[]});
       // 2. Données secondaires en parallèle
       const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders, rangeOpps, topCoins] = await Promise.all([
         apiCall("/api/config","GET",null,token),
@@ -468,6 +472,7 @@ function App() {
       setBreakoutEnabled(!!cfg?.breakout_enabled);
       setBreakoutShortEnabled(!!cfg?.breakout_short_enabled);
       setRangeTradingEnabled(!!cfg?.range_trading_enabled);
+      setSpotAccumEnabled(!!cfg?.spot_accum_enabled);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -623,6 +628,20 @@ function App() {
       await apiCall("/api/config","PUT",{range_trading_trading_mode:mode},token);
       loadData();
       addLog(`Mode Range Trading: ${modeLabel}`, "system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+
+  const updateSpotAccumMode = async (mode) => {
+    if (mode === config?.spot_accum_trading_mode) return;
+    const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
+    const confirmMsg = mode === "live"
+      ? `Basculer Spot Accumulation en LIVE (argent réel) ?\n\n⚠️ CE MODE N'A PAS DE MAX LOSS — une position perdante est tenue indéfiniment, jamais vendue à perte. Nécessite un solde USDC dans votre compte SPOT Hyperliquid (distinct de la marge des perpétuels). Testez d'abord en Paper.\n\nConfirmer ?`
+      : `Repasser Spot Accumulation en Paper (simulation) ?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await apiCall("/api/config","PUT",{spot_accum_trading_mode:mode},token);
+      loadData();
+      addLog(`Mode Spot Accumulation: ${modeLabel}`, "system");
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
   };
 
@@ -1439,6 +1458,30 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#facc15",fontWeight:700}}>🪙 Mode Spot Accumulation (achat réel, aucun Max Loss)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Achète l'actif RÉEL au comptant (pas de levier), le tient jusqu'à l'objectif (% de l'amplitude du canal) puis trailing — <b style={{color:"#f87171"}}>aucune sortie forcée en perte</b>, contrairement à tous les autres modes. LONG uniquement. Exige un canal large (2.5% par défaut). Désactivé par défaut.</div>
+              </div>
+              <button onClick={()=>{
+                const v=!spotAccumEnabled; setSpotAccumEnabled(v);
+                apiCall("/api/config","PUT",{"spot_accum_enabled":v},token);
+              }} style={{background:spotAccumEnabled?"#3d3a0a":"#0f1629",border:spotAccumEnabled?"1px solid #facc15":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:spotAccumEnabled?"#facc15":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {spotAccumEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+            {spotAccumEnabled && (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0f1629"}}>
+                <div style={{fontSize:10,color:"#475569"}}>
+                  Mode Spot Accumulation — sélecteur indépendant, aucun filet de perte en Live
+                </div>
+                <div style={{display:"flex",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:6,overflow:"hidden"}}>
+                  <button onClick={()=>updateSpotAccumMode("paper")} style={{padding:"4px 10px",border:"none",background:config?.spot_accum_trading_mode!=="live"?"#1e2d4a":"transparent",color:config?.spot_accum_trading_mode!=="live"?"#fbbf24":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🎮 PAPER</button>
+                  <button onClick={()=>updateSpotAccumMode("live")} style={{padding:"4px 10px",border:"none",background:config?.spot_accum_trading_mode==="live"?"#052e16":"transparent",color:config?.spot_accum_trading_mode==="live"?"#34d399":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔴 LIVE</button>
+                </div>
+              </div>
+            )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
               </div>
@@ -1700,6 +1743,42 @@ Confirmer ?`
               }
             </div>
 
+            {/* SPOT ACCUMULATION */}
+            {(spotHoldings.open.length > 0 || spotHoldings.closed.length > 0) && (
+              <div style={{background:"#0f1629",border:"1px solid #3d3a0a",borderRadius:10,padding:16,marginTop:16}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — achat réel, aucun Max Loss</div>
+                {spotHoldings.open.length > 0 && spotHoldings.open.map(h=>(
+                  <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{color:"#34d399",fontSize:10,fontWeight:700}}>HOLD</span>
+                      <span style={{color:"#e2e8f0",fontSize:11}}>{h.coin}</span>
+                      <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.qty} {h.coin}</span>
+                      {!!h.is_live && <span style={{background:"#3d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔴 LIVE</span>}
+                      {!!h.trailing_armed && <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔒 armé</span>}
+                      <span style={{fontSize:9,color:"#334155"}}>objectif +{h.target_pct}% · pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
+                    </div>
+                    <span style={{color:h.pnl_pct>=0?"#34d399":"#f87171",fontSize:12,fontWeight:700}}>
+                      {h.pnl_pct>=0?"+":""}{Number(h.pnl_pct||0).toFixed(2)}% ({h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$)
+                    </span>
+                  </div>
+                ))}
+                {spotHoldings.closed.length > 0 && (
+                  <div style={{marginTop:spotHoldings.open.length>0?12:0}}>
+                    <div style={{fontSize:10,color:"#475569",marginBottom:8}}>Historique (50 derniers)</div>
+                    {spotHoldings.closed.map(h=>(
+                      <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <span style={{color:"#e2e8f0",fontSize:11}}>{h.coin}</span>
+                          <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.close_reason}</span>
+                        </div>
+                        <span style={{color:h.pnl>=0?"#34d399":"#f87171",fontSize:11,fontWeight:700}}>{h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* HISTORIQUE */}
             {paper?.closed_trades?.length > 0 && (
               <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
@@ -1842,6 +1921,13 @@ Confirmer ?`
                     {key:"range_trading_trailing_arm_pct",label:"Range Trading - palier PRÉCOCE (% PnL, se désactive au palier principal)",def:0.5,step:0.05,min:0.05,max:3},
                     {key:"range_trading_trailing_main_pct",label:"Range Trading - palier PRINCIPAL (% PnL, prend le relais du précoce)",def:1.0,step:0.05,min:0.1,max:5},
                     {key:"range_trading_trailing_gap_pct",label:"Range Trading - écart du palier précoce (% PnL)",def:0.42,step:0.01,min:0.05,max:3},
+                    {key:"spot_accum_max_positions",label:"Spot Accumulation - positions simultanées max",def:5,step:1,min:1,max:20},
+                    {key:"spot_accum_min_channel_pct",label:"Spot Accumulation - largeur minimale du canal (%)",def:2.5,step:0.1,min:0.5,max:10},
+                    {key:"spot_accum_proximity_pct",label:"Spot Accumulation - tolérance de proximité au support (%)",def:1.0,step:0.1,min:0.1,max:5},
+                    {key:"spot_accum_target_ratio_pct",label:"Spot Accumulation - objectif (% de l'amplitude du canal)",def:100,step:5,min:20,max:200},
+                    {key:"spot_accum_trailing_lock_ratio_pct",label:"Spot Accumulation - % du pic verrouillé une fois l'objectif atteint",def:50,step:5,min:10,max:90},
+                    {key:"spot_accum_momentum_margin_pct",label:"Spot Accumulation - marge momentum avant de bloquer (%)",def:0.3,step:0.05,min:0.05,max:2},
+                    {key:"spot_accum_candle_atr_mult",label:"Spot Accumulation - bougie max autorisée (× ATR)",def:2.0,step:0.1,min:1,max:5},
                     {key:"range_trading_trailing_lock_ratio_pct",label:"Range Trading - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
                     {key:"accumulation_momentum_margin_pct",label:"Accumulation - marge momentum avant de bloquer (%, 'couteau qui tombe')",def:0.3,step:0.05,min:0.05,max:2},
@@ -2702,7 +2788,7 @@ Confirmer ?`
         <div style={{padding:14}}>
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
-            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>20 août 2026</b>
+            <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>20 août 2026 (soir)</b>
           </div>
 
           {/* BOT PRINCIPAL */}
@@ -2812,6 +2898,27 @@ Confirmer ?`
               <li>Max Loss fixe (1% par défaut)</li>
               <li>Trailing à deux paliers : palier précoce dès 0.5% de PnL (plancher = pic - 0.42%), qui se désactive dès que le pic atteint 1% — le palier principal prend alors seul la main et verrouille 50% du pic (mêmes réglages qu'Accumulation/Breakout, valeurs indépendantes)</li>
               <li>Pas de TP fixe ni de toucher de cible — même logique que Breakout</li>
+            </ul>
+          </div>
+
+          {/* SPOT ACCUMULATION */}
+          <div style={{background:"#0a1628",border:"1px solid #3d3a0a",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:26,fontWeight:700,color:"#facc15",marginBottom:10}}>🪙 Spot Accumulation</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Achète l'actif RÉEL au comptant sur le wallet Hyperliquid (pas un contrat à levier) et le tient jusqu'au bon moment pour revendre. <b style={{color:"#f87171"}}>Aucun Max Loss</b> — c'est le principe même du mode : une position perdante n'est jamais vendue à perte, elle attend indéfiniment. Table de suivi dédiée (`spot_holdings`), séparée des trades à levier. LONG uniquement (pas de short en spot sans emprunt). Désactivé par défaut.</div>
+
+            <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
+            <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
+              <li>Canal (support-résistance) ≥ 2.5% par défaut — bien plus large qu'Accumulation à levier (0.5%), pour capter un vrai va-et-vient plutôt qu'un micro-mouvement</li>
+              <li>Support détecté à proximité (tolérance réglable, 1% par défaut)</li>
+              <li>Momentum cohérent (prix pas déjà passé sous le support, bougie pas anormale vs ATR) + retournement confirmé (RSI ET MACD obligatoires) + tendance pas clairement baissière</li>
+              <li>Taille = 50% du capital ÷ positions Spot Accumulation simultanées max, sans levier</li>
+            </ul>
+
+            <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
+            <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
+              <li><b style={{color:"#f87171"}}>Pas de Max Loss</b> — un holding en perte reste tenu indéfiniment</li>
+              <li>Objectif = % de l'amplitude du canal à l'achat (100% par défaut) — une fois atteint, un trailing s'arme et verrouille 50% du pic, laisse courir au-delà</li>
+              <li>Tant que l'objectif n'est pas atteint, rien ne se passe — c'est voulu, "attendre le bon moment"</li>
             </ul>
           </div>
 
