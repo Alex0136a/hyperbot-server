@@ -541,6 +541,32 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # ==================== Momentum cohérent + cohérence ATR/SL (retrait de la zone RSI
+        # obligatoire à l'entrée) ====================
+        # Marge (%) au-delà du niveau tolérée avant de juger qu'une "vraie" chute/hausse est
+        # déjà en cours (rattraper un couteau qui tombe) — au-delà, l'entrée est bloquée même
+        # si le retournement se confirme techniquement.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_momentum_margin_pct REAL DEFAULT 0.3")
+        conn.commit()
+    except: pass
+    try:
+        # Multiplicateur ATR au-delà duquel la dernière bougie est jugée anormalement large
+        # (mouvement violent/instable, pas un rebond contrôlé) — bloque l'entrée.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_candle_atr_mult REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        # Bornes (× le Max Loss configuré) entre lesquelles l'ATR (en % du prix) doit se situer
+        # pour qu'un coin soit jugé tradable en Accumulation — ni trop calme (bruit pur avant que
+        # le SL ne coupe), ni trop agité (le SL coupe sur une bougie normale).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_atr_sl_min_mult REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_atr_sl_max_mult REAL DEFAULT 2.5")
+        conn.commit()
+    except: pass
+    try:
         # Tolérance de proximité (%) entre le prix actuel et le support/résistance détecté pour
         # considérer un candidat Accumulation "assez proche" du niveau — auparavant codée en dur
         # à 1.0%, ce qui rejetait silencieusement des candidats où RSI + niveau étaient réunis
@@ -3358,39 +3384,70 @@ async def scan_markets(user_id: int):
             # (plafond de positions atteint) — traité après la boucle, une fois tous les
             # candidats de ce cycle connus.
             if config and config["accumulation_enabled"] and rsi is not None:
-                accum_rsi_min = config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0
-                accum_rsi_max = config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0
-                if accum_rsi_min <= rsi < accum_rsi_max:
-                    accum_long_in_range_count += 1
-                    # RSI dans la bonne fourchette — diagnostic détaillé de pourquoi ça achète
-                    # ou non, pour ne plus jamais avoir à deviner après coup (limité à 1 log
-                    # par coin toutes les 2h pour ne pas noyer les logs).
-                    diag_key = (user_id, coin)
-                    last_diag = accumulation_diagnostic_cache.get(diag_key)
-                    should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
+                # RSI n'est plus un filtre de zone obligatoire — la détection part maintenant de
+                # la proximité support/résistance + tendance, avec le momentum et l'ATR comme
+                # garde-fous de qualité plutôt qu'un simple couloir RSI. RSI reste utilisé plus
+                # bas comme composante du retournement (pente, pas niveau).
+                accum_long_in_range_count += 1
+                diag_key = (user_id, coin)
+                last_diag = accumulation_diagnostic_cache.get(diag_key)
+                should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
-                    channel_pct = (resistance - support) / support * 100 if support and resistance else 0
-                    accum_min_channel_pct = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
-                    if support is None:
+                channel_pct = (resistance - support) / support * 100 if support and resistance else 0
+                accum_min_channel_pct = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
+                if support is None:
+                    if should_log_diag:
+                        accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                        add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f}, aucun support détecté à proximité — pas d'achat", "info")
+                elif resistance is not None and channel_pct < accum_min_channel_pct:
+                    if should_log_diag:
+                        accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                        add_bot_log(user_id, f"💰🔍 {coin}: support proche, mais canal trop étroit ({channel_pct:.2f}% < {accum_min_channel_pct}%) — pas assez de marge, pas d'achat", "info")
+                else:
+                    accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                    near_support = abs(price - support) / support * 100 <= accum_proximity_pct
+                    if not near_support:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette Accumulation, mais aucun support détecté à proximité — pas d'achat", "info")
-                    elif resistance is not None and channel_pct < accum_min_channel_pct:
-                        # Canal trop étroit — bloque l'entrée (pas juste le TP par défaut).
-                        # Réintroduit après avoir observé des toucher-de-cible à ~0% de PnL sur
-                        # des canaux quasi nuls (cible collée à l'entrée) — voir aussi le
-                        # garde-fou d'armement minimum (0.3%) ajouté séparément sur la sortie.
-                        if should_log_diag:
-                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support proche, mais canal trop étroit ({channel_pct:.2f}% < {accum_min_channel_pct}%) — pas assez de marge, pas d'achat", "info")
+                            dist_pct = abs(price - support) / support * 100
+                            add_bot_log(user_id, f"💰🔍 {coin}: support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct}%) — pas d'achat", "info")
                     else:
-                        accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
-                        near_support = abs(price - support) / support * 100 <= accum_proximity_pct
-                        if not near_support:
+                        # Momentum COHÉRENT — évite de "rattraper un couteau qui tombe" : combine
+                        # deux vérifications (1) le prix n'est pas déjà passé franchement SOUS le
+                        # support (une vraie chute déjà en cours, pas juste un test du niveau) et
+                        # (2) la dernière bougie n'a pas une amplitude anormalement grande par
+                        # rapport à l'ATR (mouvement violent/instable, pas un rebond contrôlé).
+                        accum_momentum_margin = config["accumulation_momentum_margin_pct"] if "accumulation_momentum_margin_pct" in config.keys() and config["accumulation_momentum_margin_pct"] is not None else 0.3
+                        price_not_breached = price >= support * (1 - accum_momentum_margin / 100)
+                        atr_val = tech.get("atr")
+                        accum_candle_atr_mult = config["accumulation_candle_atr_mult"] if "accumulation_candle_atr_mult" in config.keys() and config["accumulation_candle_atr_mult"] is not None else 2.0
+                        candle_not_extreme = True
+                        if atr_val and candles:
+                            last_candle_range = candles[-1]["h"] - candles[-1]["l"]
+                            candle_not_extreme = last_candle_range <= atr_val * accum_candle_atr_mult
+                        momentum_ok = price_not_breached and candle_not_extreme
+
+                        # Cohérence ATR / SL — l'ATR (converti en % du prix) doit se situer entre
+                        # 50% et 250% du Max Loss configuré : ni un marché trop calme (l'ATR ne
+                        # justifierait presque aucun mouvement avant que le SL coupe, bruit pur),
+                        # ni trop agité (l'ATR dépasserait largement le SL, chaque bougie normale
+                        # suffirait à couper la position avant même un vrai retournement).
+                        accum_max_loss_for_atr = config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3
+                        accum_atr_min_mult = config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5
+                        accum_atr_max_mult = config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5
+                        atr_pct = (atr_val / price * 100) if atr_val and price else None
+                        atr_coherent = atr_pct is not None and (accum_max_loss_for_atr * accum_atr_min_mult) <= atr_pct <= (accum_max_loss_for_atr * accum_atr_max_mult)
+
+                        if not momentum_ok:
                             if should_log_diag:
                                 accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                                dist_pct = abs(price - support) / support * 100
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette, support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct}%) — pas d'achat", "info")
+                                raison_mom = "prix déjà passé sous le support (chute en cours)" if not price_not_breached else "dernière bougie anormalement large vs ATR"
+                                add_bot_log(user_id, f"💰🔍 {coin}: support proche mais momentum pas cohérent ({raison_mom}) — pas d'achat (évite de rattraper un couteau qui tombe)", "info")
+                        elif not atr_coherent:
+                            if should_log_diag:
+                                accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                                raison_atr = "marché trop calme" if (atr_pct is not None and atr_pct < accum_max_loss_for_atr * accum_atr_min_mult) else "marché trop agité"
+                                add_bot_log(user_id, f"💰🔍 {coin}: support proche mais ATR ({round(atr_pct,3) if atr_pct else '?'}%) hors plage cohérente avec le SL ({raison_atr}) — pas d'achat", "info")
                         else:
                             # Remplace la couleur de bougie (figée, jusqu'à 15 min de retard) par
                             # le prix RÉEL en continu — le prix peut bouger de plus de 2% dans
@@ -3406,7 +3463,9 @@ async def scan_markets(user_id: int):
                                 if rsi_prev is not None and rsi > rsi_prev:
                                     rsi_recovering = True
                             macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
-                            reversal_confirmed = price_bouncing_up and (rsi_recovering or macd_bull_confirm)
+                            # MACD désormais OBLIGATOIRE (ET), plus une alternative au RSI (OU) —
+                            # le retournement doit être confirmé par les deux indicateurs à la fois.
+                            reversal_confirmed = price_bouncing_up and rsi_recovering and macd_bull_confirm
                             # Filtre de tendance de fond — même calcul que le bot principal (MACD
                             # croisé ET du bon côté de zéro). N'exige PAS que la tendance soit
                             # haussière (Accumulation existe justement pour les marchés SANS
@@ -3441,33 +3500,59 @@ async def scan_markets(user_id: int):
             # logique inversée : RSI haut (surachat) + résistance détectée + retournement
             # baissier confirmé (bougie rouge + RSI qui redescend OU MACD qui devient baissier).
             if config and config["accumulation_short_enabled"] and rsi is not None:
-                accum_short_rsi_min = config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0
-                accum_short_rsi_max = config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0
-                if accum_short_rsi_min <= rsi < accum_short_rsi_max:
-                    accum_short_in_range_count += 1
-                    diag_key_short = (user_id, coin, "SHORT")
-                    last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
-                    should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
+                accum_short_in_range_count += 1
+                diag_key_short = (user_id, coin, "SHORT")
+                last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
+                should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
 
-                    channel_pct_short = (resistance - support) / support * 100 if support and resistance else 0
-                    accum_min_channel_pct_short = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
-                    if resistance is None:
+                channel_pct_short = (resistance - support) / support * 100 if support and resistance else 0
+                accum_min_channel_pct_short = config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5
+                if resistance is None:
+                    if should_log_diag_short:
+                        accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                        add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f}, aucune résistance détectée à proximité — pas de vente", "info")
+                elif support is not None and channel_pct_short < accum_min_channel_pct_short:
+                    if should_log_diag_short:
+                        accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                        add_bot_log(user_id, f"💰🔍 {coin}: résistance proche, mais canal trop étroit ({channel_pct_short:.2f}% < {accum_min_channel_pct_short}%) — pas assez de marge, pas de vente", "info")
+                else:
+                    accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                    near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
+                    if not near_resistance:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT Accumulation, mais aucune résistance détectée à proximité — pas de vente", "info")
-                    elif support is not None and channel_pct_short < accum_min_channel_pct_short:
-                        # Miroir LONG — voir commentaire ci-dessus.
-                        if should_log_diag_short:
-                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                            add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance proche, mais canal trop étroit ({channel_pct_short:.2f}% < {accum_min_channel_pct_short}%) — pas assez de marge, pas de vente", "info")
+                            dist_pct = abs(price - resistance) / resistance * 100
+                            add_bot_log(user_id, f"💰🔍 {coin}: résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct_short}%) — pas de vente", "info")
                     else:
-                        accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
-                        near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
-                        if not near_resistance:
+                        # Momentum COHÉRENT — miroir du LONG : évite de vendre pendant une hausse
+                        # franche déjà en cours à travers la résistance.
+                        accum_momentum_margin_s = config["accumulation_momentum_margin_pct"] if "accumulation_momentum_margin_pct" in config.keys() and config["accumulation_momentum_margin_pct"] is not None else 0.3
+                        price_not_breached_s = price <= resistance * (1 + accum_momentum_margin_s / 100)
+                        atr_val_s = tech.get("atr")
+                        accum_candle_atr_mult_s = config["accumulation_candle_atr_mult"] if "accumulation_candle_atr_mult" in config.keys() and config["accumulation_candle_atr_mult"] is not None else 2.0
+                        candle_not_extreme_s = True
+                        if atr_val_s and candles:
+                            last_candle_range_s = candles[-1]["h"] - candles[-1]["l"]
+                            candle_not_extreme_s = last_candle_range_s <= atr_val_s * accum_candle_atr_mult_s
+                        momentum_ok_s = price_not_breached_s and candle_not_extreme_s
+
+                        # Cohérence ATR / SL — miroir du LONG.
+                        accum_max_loss_for_atr_s = config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3
+                        accum_atr_min_mult_s = config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5
+                        accum_atr_max_mult_s = config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5
+                        atr_pct_s = (atr_val_s / price * 100) if atr_val_s and price else None
+                        atr_coherent_s = atr_pct_s is not None and (accum_max_loss_for_atr_s * accum_atr_min_mult_s) <= atr_pct_s <= (accum_max_loss_for_atr_s * accum_atr_max_mult_s)
+
+                        if not momentum_ok_s:
                             if should_log_diag_short:
                                 accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                                dist_pct = abs(price - resistance) / resistance * 100
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} dans la fourchette SHORT, résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct_short}%) — pas de vente", "info")
+                                raison_mom_s = "prix déjà passé au-dessus de la résistance (hausse en cours)" if not price_not_breached_s else "dernière bougie anormalement large vs ATR"
+                                add_bot_log(user_id, f"💰🔍 {coin}: résistance proche mais momentum pas cohérent ({raison_mom_s}) — pas de vente", "info")
+                        elif not atr_coherent_s:
+                            if should_log_diag_short:
+                                accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                                raison_atr_s = "marché trop calme" if (atr_pct_s is not None and atr_pct_s < accum_max_loss_for_atr_s * accum_atr_min_mult_s) else "marché trop agité"
+                                add_bot_log(user_id, f"💰🔍 {coin}: résistance proche mais ATR ({round(atr_pct_s,3) if atr_pct_s else '?'}%) hors plage cohérente avec le SL ({raison_atr_s}) — pas de vente", "info")
                         else:
                             # Miroir du LONG : compare le prix actuel au plus haut récent (3
                             # dernières bougies) pour confirmer un rebond baissier réel, sans
@@ -3480,7 +3565,8 @@ async def scan_markets(user_id: int):
                                 if rsi_prev_short is not None and rsi < rsi_prev_short:
                                     rsi_falling = True
                             macd_bear_confirm = bool(macd and macd["macd"] < macd["signal"])
-                            reversal_confirmed_short = price_bouncing_down and (rsi_falling or macd_bear_confirm)
+                            # MACD désormais OBLIGATOIRE (ET), plus une alternative (OU).
+                            reversal_confirmed_short = price_bouncing_down and rsi_falling and macd_bear_confirm
                             # Filtre de tendance de fond — miroir du LONG. Bloque si la tendance
                             # est clairement HAUSSIÈRE (une "résistance" dans une tendance
                             # haussière soutenue cède souvent, le repli de 3 bougies n'étant que
@@ -5072,8 +5158,6 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_max_positions: Optional[int] = None
     accumulation_short_leverage: Optional[int] = None
     accumulation_long_leverage: Optional[int] = None
-    accumulation_short_rsi_min: Optional[float] = None
-    accumulation_short_rsi_max: Optional[float] = None
     accumulation_trailing_arm_pct: Optional[float] = None
     accumulation_trailing_main_pct: Optional[float] = None
     accumulation_trailing_gap_pct: Optional[float] = None
@@ -5102,10 +5186,12 @@ class UpdateConfigRequest(BaseModel):
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
     accumulation_min_channel_pct: Optional[float] = None
+    accumulation_momentum_margin_pct: Optional[float] = None
+    accumulation_candle_atr_mult: Optional[float] = None
+    accumulation_atr_sl_min_mult: Optional[float] = None
+    accumulation_atr_sl_max_mult: Optional[float] = None
     accumulation_proximity_pct: Optional[float] = None
     accumulation_rsi_threshold: Optional[float] = None
-    accumulation_rsi_min: Optional[float] = None
-    accumulation_rsi_max: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_max_loss_pct: Optional[float] = None
     accumulation_qp_arm_pct: Optional[float] = None
@@ -5267,8 +5353,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_max_positions": config["accumulation_short_max_positions"] if "accumulation_short_max_positions" in config.keys() and config["accumulation_short_max_positions"] else 8,
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
         "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
-        "accumulation_short_rsi_min": config["accumulation_short_rsi_min"] if "accumulation_short_rsi_min" in config.keys() and config["accumulation_short_rsi_min"] is not None else 60.0,
-        "accumulation_short_rsi_max": config["accumulation_short_rsi_max"] if "accumulation_short_rsi_max" in config.keys() and config["accumulation_short_rsi_max"] else 85.0,
         "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.5,
         "accumulation_trailing_main_pct": config["accumulation_trailing_main_pct"] if "accumulation_trailing_main_pct" in config.keys() and config["accumulation_trailing_main_pct"] is not None else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] is not None else 0.42,
@@ -5297,10 +5381,12 @@ def get_config(user_id: int = Depends(get_current_user)):
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
         "accumulation_min_channel_pct": config["accumulation_min_channel_pct"] if "accumulation_min_channel_pct" in config.keys() and config["accumulation_min_channel_pct"] is not None else 0.5,
+        "accumulation_momentum_margin_pct": config["accumulation_momentum_margin_pct"] if "accumulation_momentum_margin_pct" in config.keys() and config["accumulation_momentum_margin_pct"] is not None else 0.3,
+        "accumulation_candle_atr_mult": config["accumulation_candle_atr_mult"] if "accumulation_candle_atr_mult" in config.keys() and config["accumulation_candle_atr_mult"] is not None else 2.0,
+        "accumulation_atr_sl_min_mult": config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5,
+        "accumulation_atr_sl_max_mult": config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
-        "accumulation_rsi_min": config["accumulation_rsi_min"] if "accumulation_rsi_min" in config.keys() and config["accumulation_rsi_min"] is not None else 15.0,
-        "accumulation_rsi_max": config["accumulation_rsi_max"] if "accumulation_rsi_max" in config.keys() and config["accumulation_rsi_max"] else 40.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
@@ -5416,10 +5502,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_leverage=? WHERE user_id=?", (req.accumulation_short_leverage, user_id))
     if req.accumulation_long_leverage is not None:
         conn.execute("UPDATE bot_config SET accumulation_long_leverage=? WHERE user_id=?", (req.accumulation_long_leverage, user_id))
-    if req.accumulation_short_rsi_min is not None:
-        conn.execute("UPDATE bot_config SET accumulation_short_rsi_min=? WHERE user_id=?", (req.accumulation_short_rsi_min, user_id))
-    if req.accumulation_short_rsi_max is not None:
-        conn.execute("UPDATE bot_config SET accumulation_short_rsi_max=? WHERE user_id=?", (req.accumulation_short_rsi_max, user_id))
     if req.accumulation_trailing_arm_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
     if req.accumulation_trailing_main_pct is not None:
@@ -5476,14 +5558,18 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_exit_tolerance_ratio=? WHERE user_id=?", (req.accumulation_exit_tolerance_ratio, user_id))
     if req.accumulation_min_channel_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_min_channel_pct=? WHERE user_id=?", (req.accumulation_min_channel_pct, user_id))
+    if req.accumulation_momentum_margin_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_momentum_margin_pct=? WHERE user_id=?", (req.accumulation_momentum_margin_pct, user_id))
+    if req.accumulation_candle_atr_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_candle_atr_mult=? WHERE user_id=?", (req.accumulation_candle_atr_mult, user_id))
+    if req.accumulation_atr_sl_min_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_atr_sl_min_mult=? WHERE user_id=?", (req.accumulation_atr_sl_min_mult, user_id))
+    if req.accumulation_atr_sl_max_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_atr_sl_max_mult=? WHERE user_id=?", (req.accumulation_atr_sl_max_mult, user_id))
     if req.accumulation_proximity_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_proximity_pct=? WHERE user_id=?", (req.accumulation_proximity_pct, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
-    if req.accumulation_rsi_min is not None:
-        conn.execute("UPDATE bot_config SET accumulation_rsi_min=? WHERE user_id=?", (req.accumulation_rsi_min, user_id))
-    if req.accumulation_rsi_max is not None:
-        conn.execute("UPDATE bot_config SET accumulation_rsi_max=? WHERE user_id=?", (req.accumulation_rsi_max, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
     if req.accumulation_max_loss_pct is not None:
@@ -7353,7 +7439,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.1"
+BACKEND_BUILD_VERSION = "2026-08-20.2"
 
 @app.get("/api/version")
 def get_version():
