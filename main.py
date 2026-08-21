@@ -635,7 +635,14 @@ def init_db():
         # mais le prix à peine trop loin au moment précis du scan (~3min). Réglable désormais :
         # l'élargir (ex: 2-3%) augmente la fréquence des opportunités détectées, au prix d'une
         # entrée un peu moins précisément collée au niveau.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_pct REAL DEFAULT 1.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_pct REAL DEFAULT 2.5")
+        conn.commit()
+    except: pass
+    try:
+        # Relevé de 0.5%/1.0% à 2.5% — beaucoup d'écarts observés en conditions réelles se
+        # situaient entre 2 et 5%, largement au-dessus de l'ancien seuil, expliquant en partie
+        # pourquoi peu de trades Accumulation s'ouvraient malgré des niveaux détectés.
+        conn.execute("UPDATE bot_config SET accumulation_proximity_pct=2.5 WHERE accumulation_proximity_pct IN (0.5, 1.0)")
         conn.commit()
     except: pass
     try:
@@ -3650,7 +3657,7 @@ async def scan_markets(user_id: int):
                         accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                         add_bot_log(user_id, f"💰🔍 {coin}: support proche, mais canal trop étroit ({channel_pct:.2f}% < {accum_min_channel_pct}%) — pas assez de marge, pas d'achat", "info")
                 else:
-                    accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                    accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5
                     near_support = abs(price - support) / support * 100 <= accum_proximity_pct
                     if not near_support:
                         if should_log_diag:
@@ -3766,7 +3773,7 @@ async def scan_markets(user_id: int):
                         accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                         add_bot_log(user_id, f"💰🔍 {coin}: résistance proche, mais canal trop étroit ({channel_pct_short:.2f}% < {accum_min_channel_pct_short}%) — pas assez de marge, pas de vente", "info")
                 else:
-                    accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0
+                    accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5
                     near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
                     if not near_resistance:
                         if should_log_diag_short:
@@ -5780,7 +5787,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_candle_atr_mult": config["accumulation_candle_atr_mult"] if "accumulation_candle_atr_mult" in config.keys() and config["accumulation_candle_atr_mult"] is not None else 2.0,
         "accumulation_atr_sl_min_mult": config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5,
         "accumulation_atr_sl_max_mult": config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5,
-        "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 1.0,
+        "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
@@ -7916,7 +7923,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.8"
+BACKEND_BUILD_VERSION = "2026-08-20.9"
 
 @app.get("/api/version")
 def get_version():
