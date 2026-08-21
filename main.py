@@ -3845,7 +3845,7 @@ async def scan_markets(user_id: int):
             # minimum bien plus large (2.5% par défaut, contre 0.5% pour l'Accumulation à
             # levier) — pas de Max Loss ici, donc pas question d'entrer sur un mouvement de
             # bruit : il faut un vrai va-et-vient qui vaut la peine d'être tenu jusqu'au bout.
-            if config and config.get("spot_accum_enabled") and support and resistance:
+            if config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] and support and resistance:
                 spot_channel_pct = (resistance - support) / support * 100
                 spot_min_channel = config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5
                 if spot_channel_pct >= spot_min_channel:
@@ -4250,7 +4250,7 @@ async def scan_markets(user_id: int):
                     add_bot_log(user_id, f"⛔ {coin}: Range Trading auto {cand_action} — tentative échouée ({e}) — nouvelle tentative au prochain cycle", "warning")
 
         # ==================== MODE SPOT ACCUMULATION — ouverture (achat réel/paper) ====================
-        if spot_accum_candidates and config and config.get("spot_accum_enabled"):
+        if spot_accum_candidates and config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"]:
             for cand in spot_accum_candidates:
                 coin = cand["coin"]
                 conn_sp = get_db()
@@ -7910,7 +7910,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.6"
+BACKEND_BUILD_VERSION = "2026-08-20.7"
 
 @app.get("/api/version")
 def get_version():
