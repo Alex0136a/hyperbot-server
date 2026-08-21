@@ -1733,9 +1733,15 @@ def get_hl_account_value_verbose(account_address: str):
     """Identique à get_hl_account_value mais renvoie aussi le message d'erreur réel (ou None si
     succès) — pour pouvoir le journaliser côté utilisateur (add_bot_log) au lieu de seulement
     l'imprimer côté serveur, invisible depuis l'interface.
-    Essaie plusieurs champs (accountValue, withdrawable, solde spot) car Hyperliquid a introduit
-    un système de "compte unifié" qui peut faire que marginSummary.accountValue seul ne
-    reflète plus tout le solde réel (ex: 224$ visibles sur le site mais accountValue à 0)."""
+    BUG CORRIGÉ : cette fonction ne basculait sur le solde spot que si le côté perpétuels
+    renvoyait EXACTEMENT 0 — sur un compte "unifié" Hyperliquid où le perp peut renvoyer un
+    petit montant non nul (la marge déjà allouée aux positions perp ouvertes, sur CE mode ou
+    n'importe quel autre mode live actif), la fonction s'arrêtait là avec ce petit montant au
+    lieu du vrai total. Observé concrètement : Bilan affichait 217$ (via get_hl_balance_breakdown,
+    qui préfère déjà le solde spot dès qu'il est non nul), mais le sizing Accumulation calculait
+    sur une valeur bien plus basse — 5 trades ouverts au plancher de sécurité $10 alors que
+    217$ ÷ 5 aurait dû donner ~21.7$ chacun. Même logique de préférence spot que
+    get_hl_balance_breakdown désormais, pour que TOUT sizing live utilise le même vrai total."""
     if not HL_SDK_AVAILABLE:
         return 0.0, "hyperliquid-python-sdk non installé sur le serveur"
     if not account_address:
@@ -1745,23 +1751,25 @@ def get_hl_account_value_verbose(account_address: str):
         state = info.user_state(account_address)
         account_value = float(state.get("marginSummary", {}).get("accountValue", 0) or 0)
         withdrawable = float(state.get("withdrawable", 0) or 0)
-        best_value = max(account_value, withdrawable)
-        if best_value > 0:
-            return best_value, None
-        # Rien trouvé côté perp — tente le solde spot (compte unifié / USDC spot séparé)
+        spot_total = 0.0
         try:
             spot_state = info.spot_user_state(account_address)
             spot_total = sum(
                 float(b.get("total", 0) or 0) for b in spot_state.get("balances", [])
                 if b.get("coin") in ("USDC", "USD")
             )
-            if spot_total > 0:
-                return spot_total, None
         except Exception:
-            pass
-        # Toujours 0 partout — expose la structure brute (clés de premier niveau + valeurs
+            pass  # solde spot non lisible — repli sur le perp seul plutôt que planter
+        # Solde spot préféré dès qu'il est non nul (compte unifié — voir get_hl_balance_breakdown
+        # pour l'explication complète), pas seulement en dernier recours si le perp est à 0.
+        if spot_total > 0:
+            return spot_total, None
+        best_value = max(account_value, withdrawable)
+        if best_value > 0:
+            return best_value, None
+        # Rien trouvé nulle part — expose la structure brute (clés de premier niveau + valeurs
         # de marginSummary) pour diagnostiquer précisément au lieu de deviner à l'aveugle.
-        diag = f"accountValue={account_value}, withdrawable={withdrawable}, clés reçues={list(state.keys())}, marginSummary={state.get('marginSummary')}"
+        diag = f"accountValue={account_value}, withdrawable={withdrawable}, spot={spot_total}, clés reçues={list(state.keys())}, marginSummary={state.get('marginSummary')}"
         return 0.0, diag
     except Exception as e:
         return 0.0, str(e)
@@ -6458,22 +6466,36 @@ def get_spot_holdings(user_id: int = Depends(get_current_user)):
 
 class UpdateSpotTargetRequest(BaseModel):
     holding_id: int
-    target_pct: float
+    target_pct: Optional[float] = None
+    target_price: Optional[float] = None
 
 @app.put("/api/spot-holdings/target")
 def update_spot_holding_target(req: UpdateSpotTargetRequest, user_id: int = Depends(get_current_user)):
     conn = get_db()
-    holding = conn.execute("SELECT id FROM spot_holdings WHERE id=? AND user_id=? AND status='OPEN'", (req.holding_id, user_id)).fetchone()
+    holding = conn.execute("SELECT id, entry_price FROM spot_holdings WHERE id=? AND user_id=? AND status='OPEN'", (req.holding_id, user_id)).fetchone()
     if not holding:
         conn.close()
         raise HTTPException(status_code=404, detail="Holding introuvable ou déjà clôturé")
+    if req.target_price is not None:
+        # Prix cible en $ — plus pratique pour ajuster en comparant directement au graphique
+        # Hyperliquid, converti ici en % (ce que la logique de sortie compare réellement).
+        if req.target_price <= holding["entry_price"]:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Le prix cible ({req.target_price}$) doit être supérieur au prix d'entrée ({holding['entry_price']}$)")
+        target_pct = round((req.target_price - holding["entry_price"]) / holding["entry_price"] * 100, 4)
+    elif req.target_pct is not None:
+        target_pct = req.target_pct
+    else:
+        conn.close()
+        raise HTTPException(status_code=400, detail="target_price ou target_pct requis")
     # Réinitialise l'armement du trailing — un nouvel objectif doit être réévalué proprement,
     # même principe que le TP manuel des autres modes (évite un plancher figé sur l'ancien seuil).
-    conn.execute("UPDATE spot_holdings SET target_pct=?, trailing_armed=0 WHERE id=?", (req.target_pct, req.holding_id))
+    conn.execute("UPDATE spot_holdings SET target_pct=?, trailing_armed=0 WHERE id=?", (target_pct, req.holding_id))
     conn.commit()
     conn.close()
-    add_bot_log(user_id, f"🎯 Spot Accumulation: objectif modifié manuellement à +{req.target_pct}% (holding #{req.holding_id})", "info")
-    return {"success": True}
+    price_info = f" (prix cible ${req.target_price})" if req.target_price is not None else ""
+    add_bot_log(user_id, f"🎯 Spot Accumulation: objectif modifié manuellement à +{target_pct}%{price_info} (holding #{req.holding_id})", "info")
+    return {"success": True, "target_pct": target_pct}
 
 @app.get("/api/paper/portfolio")
 def get_paper_portfolio(user_id: int = Depends(get_current_user)):
@@ -7923,7 +7945,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.9"
+BACKEND_BUILD_VERSION = "2026-08-20.11"
 
 @app.get("/api/version")
 def get_version():
