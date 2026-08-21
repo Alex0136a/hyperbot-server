@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.6";
+const APP_BUILD_VERSION = "2026-08-20.8";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1773,9 +1773,12 @@ Confirmer ?`
             </div>
 
             {/* SPOT ACCUMULATION */}
-            {(spotHoldings.open.length > 0 || spotHoldings.closed.length > 0) && (
+            {(spotHoldings.open.length > 0 || spotHoldings.closed.length > 0 || config?.spot_accum_enabled) && (
               <div style={{background:"#0f1629",border:"1px solid #3d3a0a",borderRadius:10,padding:16,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — achat réel, aucun Max Loss</div>
+                {spotHoldings.open.length === 0 && spotHoldings.closed.length === 0 && (
+                  <div style={{fontSize:10,color:"#475569",fontStyle:"italic"}}>Mode actif, en attente d'un canal ≥{config?.spot_accum_min_channel_pct||2.5}% avec retournement confirmé — aucun achat pour l'instant. Consultez les logs "💰🔍" pour voir pourquoi chaque coin n'a pas encore qualifié.</div>
+                )}
                 {spotHoldings.open.length > 0 && spotHoldings.open.map(h=>(
                   <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a",flexWrap:"wrap",gap:6}}>
                     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -1785,18 +1788,18 @@ Confirmer ?`
                       {!!h.is_live && <span style={{background:"#3d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔴 LIVE</span>}
                       {!!h.trailing_armed && <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔒 armé</span>}
                       <span style={{fontSize:9,color:"#334155"}}>pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
-                      <span style={{fontSize:9,color:"#475569"}}>🎯 objectif:</span>
-                      <input type="number" step="1" min="1" value={spotTargetInputs[h.id] !== undefined ? spotTargetInputs[h.id] : h.target_pct}
+                      <span style={{fontSize:9,color:"#475569"}}>🎯 objectif ($):</span>
+                      <input type="number" step="0.0001" min="0" value={spotTargetInputs[h.id] !== undefined ? spotTargetInputs[h.id] : (h.entry_price*(1+h.target_pct/100)).toFixed(6)}
                         onChange={e=>setSpotTargetInputs(p=>({...p,[h.id]:e.target.value}))}
-                        style={{width:50,background:"#0a0e1a",border:"1px solid #3d3a0a",borderRadius:4,padding:"2px 4px",color:"#facc15",fontSize:10}}/>
-                      <span style={{fontSize:9,color:"#475569"}}>%</span>
+                        style={{width:80,background:"#0a0e1a",border:"1px solid #3d3a0a",borderRadius:4,padding:"2px 4px",color:"#facc15",fontSize:10}}/>
+                      <span style={{fontSize:9,color:"#475569"}}>(soit +{h.target_pct}%)</span>
                       <button onClick={async()=>{
-                        const v = spotTargetInputs[h.id] !== undefined ? Number(spotTargetInputs[h.id]) : h.target_pct;
+                        const v = spotTargetInputs[h.id] !== undefined ? Number(spotTargetInputs[h.id]) : h.entry_price*(1+h.target_pct/100);
                         try{
-                          await apiCall("/api/spot-holdings/target","PUT",{holding_id:h.id,target_pct:v},token);
+                          const r = await apiCall("/api/spot-holdings/target","PUT",{holding_id:h.id,target_price:v},token);
                           setSpotTargetInputs(p=>{const n={...p};delete n[h.id];return n;});
                           loadData();
-                          addLog(`Spot ${h.coin}: objectif modifié à +${v}%`,"system");
+                          addLog(`Spot ${h.coin}: objectif modifié à $${v} (+${r.target_pct}%)`,"system");
                         }catch(e){addLog("Erreur: "+e.message,"error");}
                       }} style={{background:"#3d3a0a",border:"1px solid #facc15",borderRadius:4,padding:"2px 8px",color:"#facc15",fontSize:9,cursor:"pointer",fontWeight:700}}>Modifier</button>
                     </div>
