@@ -3635,7 +3635,6 @@ async def scan_markets(user_id: int):
                 # la proximité support/résistance + tendance, avec le momentum et l'ATR comme
                 # garde-fous de qualité plutôt qu'un simple couloir RSI. RSI reste utilisé plus
                 # bas comme composante du retournement (pente, pas niveau).
-                accum_long_in_range_count += 1
                 diag_key = (user_id, coin)
                 last_diag = accumulation_diagnostic_cache.get(diag_key)
                 should_log_diag = not last_diag or (datetime.utcnow() - last_diag).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
@@ -3659,6 +3658,11 @@ async def scan_markets(user_id: int):
                             dist_pct = abs(price - support) / support * 100
                             add_bot_log(user_id, f"💰🔍 {coin}: support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct}%) — pas d'achat", "info")
                     else:
+                        # Compteur du résumé périodique : uniquement les coins RÉELLEMENT proches
+                        # d'un support maintenant (pas "tout coin scanné", devenu vrai depuis le
+                        # retrait du filtre RSI obligatoire — sinon LONG et SHORT affichaient
+                        # systématiquement le même chiffre, celui du nombre total de coins actifs).
+                        accum_long_in_range_count += 1
                         # Momentum COHÉRENT — évite de "rattraper un couteau qui tombe" : combine
                         # deux vérifications (1) le prix n'est pas déjà passé franchement SOUS le
                         # support (une vraie chute déjà en cours, pas juste un test du niveau) et
@@ -3747,7 +3751,6 @@ async def scan_markets(user_id: int):
             # logique inversée : RSI haut (surachat) + résistance détectée + retournement
             # baissier confirmé (bougie rouge + RSI qui redescend OU MACD qui devient baissier).
             if config and config["accumulation_short_enabled"] and rsi is not None:
-                accum_short_in_range_count += 1
                 diag_key_short = (user_id, coin, "SHORT")
                 last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
                 should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
@@ -3771,6 +3774,9 @@ async def scan_markets(user_id: int):
                             dist_pct = abs(price - resistance) / resistance * 100
                             add_bot_log(user_id, f"💰🔍 {coin}: résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct_short}%) — pas de vente", "info")
                     else:
+                        # Même correction que le LONG : ne compte que les coins réellement
+                        # proches d'une résistance, pas tout coin scanné.
+                        accum_short_in_range_count += 1
                         # Momentum COHÉRENT — miroir du LONG : évite de vendre pendant une hausse
                         # franche déjà en cours à travers la résistance.
                         accum_momentum_margin_s = config["accumulation_momentum_margin_pct"] if "accumulation_momentum_margin_pct" in config.keys() and config["accumulation_momentum_margin_pct"] is not None else 0.3
@@ -4056,9 +4062,9 @@ async def scan_markets(user_id: int):
                 conn_summary_check.close()
                 add_bot_log(user_id,
                     f"💰 Accumulation — LONG {'ON' if config['accumulation_enabled'] else 'OFF'} "
-                    f"({accum_long_in_range_count} coin(s) en zone RSI survente) · "
+                    f"({accum_long_in_range_count} coin(s) proche(s) d'un support) · "
                     f"SHORT {'ON' if config['accumulation_short_enabled'] else 'OFF'} "
-                    f"({accum_short_in_range_count} coin(s) en zone RSI surachat) · "
+                    f"({accum_short_in_range_count} coin(s) proche(s) d'une résistance) · "
                     f"{open_accum_count} position(s) ouverte(s) — scan actif, en attente d'un support/résistance proche + retournement confirmé",
                     "info")
 
@@ -7910,7 +7916,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.7"
+BACKEND_BUILD_VERSION = "2026-08-20.8"
 
 @app.get("/api/version")
 def get_version():
