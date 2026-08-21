@@ -568,6 +568,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Marge de confirmation (%) au-delà du support avant de considérer qu'il a VRAIMENT
+        # cédé (pas juste une mèche) — déclenche une vente de REPOSITIONNEMENT, pas un Max
+        # Loss : le pari initial est invalidé, on libère le capital pour racheter sur le
+        # nouveau support (plus bas) une fois qu'il sera détecté et confirmé à son tour.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_breakdown_buffer_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_lock_ratio_pct REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -3107,8 +3115,9 @@ async def manage_spot_holdings(user_id: int, prices: dict):
     un % du pic, laisse courir au-delà)."""
     conn = get_db()
     holdings = conn.execute("SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)).fetchall()
-    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     lock_ratio = config["spot_accum_trailing_lock_ratio_pct"] if config and "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0
+    breakdown_buffer = config["spot_accum_breakdown_buffer_pct"] if config and "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0
     conn.close()
 
     for h in holdings:
@@ -3125,13 +3134,24 @@ async def manage_spot_holdings(user_id: int, prices: dict):
                      (cur, peak_pct, round(pnl, 4), round(pnl_pct, 4), h["id"]))
 
         close_reason = None
+        # Cassure de support CONFIRMÉE — PAS un Max Loss (la position ne ferme jamais juste
+        # parce qu'elle est dans le rouge), mais un vrai REPOSITIONNEMENT : si le niveau qui
+        # justifiait l'achat cède franchement (au-delà d'une marge de confirmation, pas juste
+        # une mèche), le pari initial est invalidé — on vend pour libérer le capital, qui
+        # pourra racheter sur le NOUVEAU support (plus bas) dès qu'il sera détecté et confirmé,
+        # au prochain cycle de détection normal (mêmes garde-fous qu'à l'achat initial).
+        if h["support_price"]:
+            breakdown_level = h["support_price"] * (1 - breakdown_buffer / 100)
+            if cur < breakdown_level:
+                close_reason = "SPOT_ACCUM_BREAKDOWN_REPOSITION"
+
         target_pct = h["target_pct"] or 100.0
         trailing_armed = bool(h["trailing_armed"])
-        if not trailing_armed and pnl_pct >= target_pct:
+        if not close_reason and not trailing_armed and pnl_pct >= target_pct:
             conn.execute("UPDATE spot_holdings SET trailing_armed=1 WHERE id=?", (h["id"],))
             trailing_armed = True
             add_bot_log(user_id, f"🎯 {h['coin']}: objectif Spot Accumulation atteint (+{round(pnl_pct,2)}% ≥ +{target_pct}%) — trailing armé, la position continue de courir au-delà", "info")
-        elif trailing_armed:
+        elif not close_reason and trailing_armed:
             floor_pct = round(peak_pct * (lock_ratio / 100), 4)
             if pnl_pct <= floor_pct:
                 close_reason = "SPOT_ACCUM_TARGET_TRAILING"
@@ -3163,7 +3183,10 @@ async def manage_spot_holdings(user_id: int, prices: dict):
                     conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                                  (h["size_usdc"], round(final_pnl, 4), user_id))
                 conn.commit()
-                add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher {lock_ratio:.0f}% du pic = +{round(peak_pct*(lock_ratio/100),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
+                if close_reason == "SPOT_ACCUM_BREAKDOWN_REPOSITION":
+                    add_bot_log(user_id, f"📉 {h['coin']}: Spot Accumulation — support cassé confirmé (${cur:.4g} < ${h['support_price']*(1-breakdown_buffer/100):.4g}) — vente de repositionnement {round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%), rachat possible sur le nouveau support plus bas dès qu'il sera confirmé", "warning")
+                else:
+                    add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher {lock_ratio:.0f}% du pic = +{round(peak_pct*(lock_ratio/100),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
         conn.close()
 
 async def scan_markets(user_id: int):
@@ -5537,6 +5560,7 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_momentum_margin_pct: Optional[float] = None
     spot_accum_candle_atr_mult: Optional[float] = None
     spot_accum_trading_mode: Optional[str] = None
+    spot_accum_breakdown_buffer_pct: Optional[float] = None
     range_trading_trailing_lock_ratio_pct: Optional[float] = None
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
@@ -5741,6 +5765,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_momentum_margin_pct": config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3,
         "spot_accum_candle_atr_mult": config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0,
         "spot_accum_trading_mode": config["spot_accum_trading_mode"] if "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper",
+        "spot_accum_breakdown_buffer_pct": config["spot_accum_breakdown_buffer_pct"] if "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0,
         "range_trading_trailing_lock_ratio_pct": config["range_trading_trailing_lock_ratio_pct"] if "range_trading_trailing_lock_ratio_pct" in config.keys() and config["range_trading_trailing_lock_ratio_pct"] is not None else 50.0,
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
@@ -5932,6 +5957,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_candle_atr_mult=? WHERE user_id=?", (req.spot_accum_candle_atr_mult, user_id))
     if req.spot_accum_trading_mode is not None:
         conn.execute("UPDATE bot_config SET spot_accum_trading_mode=? WHERE user_id=?", (req.spot_accum_trading_mode, user_id))
+    if req.spot_accum_breakdown_buffer_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_breakdown_buffer_pct=? WHERE user_id=?", (req.spot_accum_breakdown_buffer_pct, user_id))
     if req.range_trading_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_lock_ratio_pct=? WHERE user_id=?", (req.range_trading_trailing_lock_ratio_pct, user_id))
     if req.range_trading_trading_mode is not None:
@@ -7883,7 +7910,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.5"
+BACKEND_BUILD_VERSION = "2026-08-20.6"
 
 @app.get("/api/version")
 def get_version():
