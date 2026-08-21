@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.5";
+const APP_BUILD_VERSION = "2026-08-20.6";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1943,7 +1943,7 @@ Confirmer ?`
                     {key:"accumulation_short_leverage",label:"Accumulation SHORT - levier",def:2,step:1,min:1,max:10},
                     {key:"accumulation_long_leverage",label:"Accumulation LONG - levier",def:2,step:1,min:1,max:10},
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
-                    {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:1.0,step:0.1,min:0.1,max:10},
+                    {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:2.5,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
                     {key:"accumulation_trailing_arm_pct",label:"Accumulation - palier PRÉCOCE (% PnL, se désactive au palier principal)",def:0.5,step:0.05,min:0.05,max:3},
                     {key:"accumulation_trailing_main_pct",label:"Accumulation - palier PRINCIPAL (% PnL, prend le relais du précoce)",def:1.0,step:0.05,min:0.1,max:5},
