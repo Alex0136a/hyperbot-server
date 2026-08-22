@@ -324,6 +324,20 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Relevé de x1 à x2 minimum, à la demande explicite de l'utilisateur — LONG n'est plus
+        # "sans levier" par défaut.
+        conn.execute("UPDATE bot_config SET accumulation_long_leverage=2 WHERE accumulation_long_leverage=1")
+        conn.commit()
+    except: pass
+    try:
+        # Levier BOOSTÉ pour les actifs déjà identifiés comme "meilleurs performers" (même
+        # classement que la priorité de détection, voir get_top_performing_coins/
+        # accumulation_top_coins) — un edge démontré sur l'historique récent justifie un levier
+        # plus élevé que le plancher générique appliqué à tous les autres coins.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_top_leverage INTEGER DEFAULT 3")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_short_rsi_min REAL DEFAULT 60.0")
         conn.commit()
     except: pass
@@ -4154,7 +4168,13 @@ async def scan_markets(user_id: int):
                 accum_target = config["accumulation_target_pct"] if "accumulation_target_pct" in config.keys() and config["accumulation_target_pct"] else 2.0
                 accum_leverage_short = config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2
                 accum_leverage_long = config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2
-                accum_leverage = accum_leverage_short if is_short_cand else accum_leverage_long
+                accum_leverage_base = accum_leverage_short if is_short_cand else accum_leverage_long
+                accum_top_leverage = config["accumulation_top_leverage"] if "accumulation_top_leverage" in config.keys() and config["accumulation_top_leverage"] else 3
+                # Boost de levier sur les coins déjà identifiés "meilleurs performers" (même
+                # classement que la priorité de détection) — un edge démontré sur l'historique
+                # récent justifie un levier plus élevé que le plancher générique.
+                is_top_coin = coin in accumulation_top_coins
+                accum_leverage = accum_top_leverage if is_top_coin else accum_leverage_base
                 try:
                     # Les DEUX niveaux sont mémorisés sur le trade (pas seulement celui proche de
                     # l'entrée) : le niveau opposé sert de CIBLE de prise de profit (résistance
@@ -4175,7 +4195,7 @@ async def scan_markets(user_id: int):
                                                             accumulation_channel_pct=channel_pct_c, is_manual=False)
                     priority_tag = "priorité top-10" if coin in accumulation_top_coins else "hors top-10"
                     niveau_label = "résistance" if is_short_cand else "support"
-                    add_bot_log(user_id, f"🤖💰 Accumulation auto {cand_action} ({priority_tag}): {message} (RSI {rsi_c:.1f}, {niveau_label} ${level_c:.4g}, retournement confirmé)", "success")
+                    add_bot_log(user_id, f"🤖💰 Accumulation auto {cand_action} ({priority_tag}, x{accum_leverage}{' boosté' if is_top_coin else ''}): {message} (RSI {rsi_c:.1f}, {niveau_label} ${level_c:.4g}, retournement confirmé)", "success")
                 except ValueError as e:
                     # BUG CORRIGÉ : les échecs étaient avalés en silence (aucun log), y compris
                     # un échec d'ouverture LIVE (marge insuffisante, rejet Hyperliquid, etc.) —
@@ -5548,6 +5568,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_max_positions: Optional[int] = None
     accumulation_short_leverage: Optional[int] = None
     accumulation_long_leverage: Optional[int] = None
+    accumulation_top_leverage: Optional[int] = None
     accumulation_trailing_arm_pct: Optional[float] = None
     accumulation_trailing_main_pct: Optional[float] = None
     accumulation_trailing_gap_pct: Optional[float] = None
@@ -5753,6 +5774,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_max_positions": config["accumulation_short_max_positions"] if "accumulation_short_max_positions" in config.keys() and config["accumulation_short_max_positions"] else 8,
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
         "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
+        "accumulation_top_leverage": config["accumulation_top_leverage"] if "accumulation_top_leverage" in config.keys() and config["accumulation_top_leverage"] else 3,
         "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.5,
         "accumulation_trailing_main_pct": config["accumulation_trailing_main_pct"] if "accumulation_trailing_main_pct" in config.keys() and config["accumulation_trailing_main_pct"] is not None else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] is not None else 0.42,
@@ -5912,6 +5934,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_short_leverage=? WHERE user_id=?", (req.accumulation_short_leverage, user_id))
     if req.accumulation_long_leverage is not None:
         conn.execute("UPDATE bot_config SET accumulation_long_leverage=? WHERE user_id=?", (req.accumulation_long_leverage, user_id))
+    if req.accumulation_top_leverage is not None:
+        conn.execute("UPDATE bot_config SET accumulation_top_leverage=? WHERE user_id=?", (req.accumulation_top_leverage, user_id))
     if req.accumulation_trailing_arm_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
     if req.accumulation_trailing_main_pct is not None:
@@ -7945,7 +7969,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.11"
+BACKEND_BUILD_VERSION = "2026-08-20.12"
 
 @app.get("/api/version")
 def get_version():
