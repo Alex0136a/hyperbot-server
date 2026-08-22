@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.8";
+const APP_BUILD_VERSION = "2026-08-20.9";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1944,7 +1944,8 @@ Confirmer ?`
                     {key:"accumulation_max_positions",label:"Accumulation - positions max simultanées (LONG)",def:5,step:1,min:1,max:50},
                     {key:"accumulation_short_max_positions",label:"Accumulation SHORT - positions max simultanées",def:8,step:1,min:1,max:50},
                     {key:"accumulation_short_leverage",label:"Accumulation SHORT - levier",def:2,step:1,min:1,max:10},
-                    {key:"accumulation_long_leverage",label:"Accumulation LONG - levier",def:2,step:1,min:1,max:10},
+                    {key:"accumulation_long_leverage",label:"Accumulation LONG - levier minimum",def:2,step:1,min:1,max:10},
+                    {key:"accumulation_top_leverage",label:"Accumulation - levier boosté sur les meilleurs actifs (top-10)",def:3,step:1,min:1,max:10},
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
                     {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:2.5,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
@@ -2882,7 +2883,7 @@ Confirmer ?`
               <li><b style={{color:"#f8fafc"}}>Cohérence ATR/SL</b> : l'ATR (en % du prix) doit se situer entre 50% et 250% du Max Loss configuré — ni marché trop calme (bruit pur avant que le SL coupe), ni trop agité (le SL coupe sur une bougie normale)</li>
               <li><b style={{color:"#f8fafc"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ET</i> MACD qui bascule dans le bon sens (les deux désormais obligatoires, plus une alternative)</li>
               <li><b style={{color:"#f8fafc"}}>Filtre de tendance de fond</b> : LONG bloqué si la tendance (MACD) est clairement baissière, SHORT bloqué si clairement haussière — pas besoin d'être favorable (Accumulation vise les marchés sans tendance nette), juste pas franchement contre. Évite les "supports"/"résistances" qui cèdent dans une tendance soutenue</li>
-              <li>Levier dédié, séparé LONG/SHORT (x2 par défaut chacun)</li>
+              <li>Levier dédié, séparé LONG/SHORT (x2 minimum par défaut chacun) — <b style={{color:"#f8fafc"}}>boosté à x3</b> sur les actifs déjà identifiés comme meilleurs performers (même classement que la priorité de détection, net positif sur l'historique récent)</li>
               <li>Taille = 50% du capital ÷ positions Accumulation simultanées max</li>
               <li>Aucune restriction de corrélation appliquée (indépendant du bot principal)</li>
             </ul>
