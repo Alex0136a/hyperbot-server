@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.9";
+const APP_BUILD_VERSION = "2026-08-20.10";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -403,6 +403,7 @@ function App() {
   const [spotTargetInputs, setSpotTargetInputs] = useState({});
   const [channelDiag, setChannelDiag] = useState(null);
   const [channelDiagLoading, setChannelDiagLoading] = useState(false);
+  const [spotRotationEnabled, setSpotRotationEnabled] = useState(false);
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -476,6 +477,7 @@ function App() {
       setBreakoutShortEnabled(!!cfg?.breakout_short_enabled);
       setRangeTradingEnabled(!!cfg?.range_trading_enabled);
       setSpotAccumEnabled(!!cfg?.spot_accum_enabled);
+      setSpotRotationEnabled(!!cfg?.spot_accum_rotation_enabled);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -1511,6 +1513,19 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#facc15",fontWeight:700}}>🔄 Rotation Spot Accumulation</div>
+                <div style={{fontSize:10,color:"#334155"}}>Si tous les emplacements sont pleins et qu'un holding a DÉJÀ atteint son objectif (trailing armé), le fermer pour libérer la place si un nouveau candidat présente un canal nettement meilleur (seuil réglable). Ne ferme jamais un holding encore sous son objectif. Désactivé par défaut.</div>
+              </div>
+              <button onClick={()=>{
+                const v=!spotRotationEnabled; setSpotRotationEnabled(v);
+                apiCall("/api/config","PUT",{"spot_accum_rotation_enabled":v},token);
+              }} style={{background:spotRotationEnabled?"#3d3a0a":"#0f1629",border:spotRotationEnabled?"1px solid #facc15":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:spotRotationEnabled?"#facc15":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {spotRotationEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯🔒 Plafond absolu de PnL ({config?.hard_cap_pct||2.5}%)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Ferme dès que ce % est atteint, même si QP/TTP voudrait continuer — désactivé par défaut. Seuil réglable dans "Réglages avancés"</div>
               </div>
@@ -1785,6 +1800,7 @@ Confirmer ?`
                       <span style={{color:"#34d399",fontSize:10,fontWeight:700}}>HOLD</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{h.coin}</span>
                       <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.qty} {h.coin}</span>
+                      <span style={{background:"#0a1628",color:"#facc15",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>{h.size_usdc}$</span>
                       {!!h.is_live && <span style={{background:"#3d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔴 LIVE</span>}
                       {!!h.trailing_armed && <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔒 armé</span>}
                       <span style={{fontSize:9,color:"#334155"}}>pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
@@ -1802,6 +1818,14 @@ Confirmer ?`
                           addLog(`Spot ${h.coin}: objectif modifié à $${v} (+${r.target_pct}%)`,"system");
                         }catch(e){addLog("Erreur: "+e.message,"error");}
                       }} style={{background:"#3d3a0a",border:"1px solid #facc15",borderRadius:4,padding:"2px 8px",color:"#facc15",fontSize:9,cursor:"pointer",fontWeight:700}}>Modifier</button>
+                      <button onClick={async()=>{
+                        if(!window.confirm(`Fermer ${h.coin} maintenant (PnL actuel: ${h.pnl_pct>=0?"+":""}${Number(h.pnl_pct||0).toFixed(2)}%) ?`)) return;
+                        try{
+                          const r = await apiCall("/api/spot-holdings/close","POST",{holding_id:h.id},token);
+                          loadData();
+                          addLog(`Spot ${h.coin} fermé manuellement — ${r.pnl>=0?"+":""}${r.pnl}$ (${r.pnl_pct>=0?"+":""}${r.pnl_pct}%)`,"system");
+                        }catch(e){addLog("Erreur: "+e.message,"error");}
+                      }} style={{background:"#2d0a0a",border:"1px solid #f87171",borderRadius:4,padding:"2px 8px",color:"#f87171",fontSize:9,cursor:"pointer",fontWeight:700}}>Fermer</button>
                     </div>
                     <span style={{color:h.pnl_pct>=0?"#34d399":"#f87171",fontSize:12,fontWeight:700}}>
                       {h.pnl_pct>=0?"+":""}{Number(h.pnl_pct||0).toFixed(2)}% ({h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$)
@@ -1976,6 +2000,10 @@ Confirmer ?`
                     {key:"spot_accum_momentum_margin_pct",label:"Spot Accumulation - marge momentum avant de bloquer (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"spot_accum_candle_atr_mult",label:"Spot Accumulation - bougie max autorisée (× ATR)",def:2.0,step:0.1,min:1,max:5},
                     {key:"spot_accum_breakdown_buffer_pct",label:"Spot Accumulation - marge de cassure du support avant repositionnement (%)",def:1.0,step:0.1,min:0.2,max:5},
+                    {key:"spot_accum_min_room_pct",label:"Spot Accumulation - marge minimale jusqu'à la résistance (%)",def:1.5,step:0.1,min:0.2,max:10},
+                    {key:"spot_accum_live_fixed_size_usd",label:"Spot Accumulation LIVE - taille fixe par trade ($)",def:50,step:5,min:10,max:1000},
+                    {key:"spot_accum_live_max_positions",label:"Spot Accumulation LIVE - positions simultanées max",def:2,step:1,min:1,max:10},
+                    {key:"spot_accum_rotation_min_improvement_mult",label:"Spot Accumulation - amélioration minimale pour rotation (× canal actuel)",def:1.2,step:0.05,min:1,max:3},
                     {key:"range_trading_trailing_lock_ratio_pct",label:"Range Trading - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
                     {key:"accumulation_momentum_margin_pct",label:"Accumulation - marge momentum avant de bloquer (%, 'couteau qui tombe')",def:0.3,step:0.05,min:0.05,max:2},
@@ -2968,6 +2996,10 @@ Confirmer ?`
               <li>Objectif = % de l'amplitude du canal à l'achat (100% par défaut) — une fois atteint, un trailing s'arme et verrouille 50% du pic, laisse courir au-delà</li>
               <li>Tant que l'objectif n'est pas atteint, rien ne se passe — c'est voulu, "attendre le bon moment"</li>
               <li><b style={{color:"#f8fafc"}}>Repositionnement sur cassure confirmée</b> (pas un Max Loss) : si le support qui justifiait l'achat cède franchement (marge de confirmation, 1% par défaut), le pari est jugé invalidé — vente immédiate pour libérer le capital, qui pourra racheter sur le nouveau support (plus bas) une fois détecté et confirmé à son tour, avec les mêmes garde-fous qu'à l'achat initial</li>
+              <li>Fermeture manuelle disponible à tout moment (bouton "Fermer" sur chaque holding, onglet Paper Trading)</li>
+              <li><b style={{color:"#f8fafc"}}>Marge minimale jusqu'à la résistance</b> (1.5% par défaut) : bloque l'achat si le prix a dérivé trop près de la résistance, même si le support est proche — garantit qu'il reste vraiment de la place pour monter</li>
+              <li><b style={{color:"#f8fafc"}}>Live : taille et positions distinctes du Paper</b> — 50$ fixes par trade, 2 positions max par défaut (au lieu de la formule 50%/positions max), volontairement plus prudent tant que le mode n'a pas fait ses preuves en argent réel</li>
+              <li><b style={{color:"#f8fafc"}}>Rotation</b> (désactivée par défaut) : si tous les emplacements sont pleins et qu'un holding a DÉJÀ atteint son objectif (trailing armé), le fermer pour libérer la place si un nouveau candidat présente un canal nettement meilleur (seuil réglable, x1.2 par défaut) — ne ferme jamais un holding encore sous son objectif</li>
             </ul>
           </div>
 
