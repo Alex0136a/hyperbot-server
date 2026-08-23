@@ -6893,6 +6893,52 @@ def unblock_all_mode_coins(mode: str, user_id: int = Depends(get_current_user)):
     add_bot_log(user_id, f"✅ {MODE_LABELS[mode]}: tous les actifs débloqués d'un coup", "info")
     return {"success": True}
 
+# Filtre SQL par mode sur paper_trades — mêmes flags que les badges déjà utilisés partout.
+MODE_SQL_FILTER = {
+    "main": "(is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_range_trade IS NULL OR is_range_trade=0)",
+    "accumulation": "is_accumulation=1",
+    "breakout": "is_breakout=1",
+    "range": "is_range_trade=1",
+}
+
+@app.get("/api/mode-performance/{mode}")
+def get_mode_performance(mode: str, user_id: int = Depends(get_current_user)):
+    """Classement par actif sur l'historique CLÔTURÉ de ce mode — même principe que
+    /api/spot-accum/performance, généralisé aux 4 autres modes via paper_trades."""
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    mode_filter = MODE_SQL_FILTER[mode]
+    rows = conn.execute(f"""
+        SELECT coin, COUNT(*) as total,
+            SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as net_pnl,
+            AVG(pnl_pct) as avg_pnl_pct
+        FROM paper_trades WHERE user_id=? AND status='CLOSED' AND {mode_filter}
+        GROUP BY coin ORDER BY avg_pnl_pct DESC
+    """, (user_id,)).fetchall()
+    totals_row = conn.execute(f"""
+        SELECT
+            SUM(CASE WHEN pnl>0 THEN pnl ELSE 0 END) as total_gains,
+            SUM(CASE WHEN pnl<=0 THEN pnl ELSE 0 END) as total_losses
+        FROM paper_trades WHERE user_id=? AND status='CLOSED' AND {mode_filter}
+    """, (user_id,)).fetchone()
+    conn.close()
+    total_gains = round(totals_row["total_gains"] or 0, 4)
+    total_losses = round(totals_row["total_losses"] or 0, 4)
+    ranking = []
+    for r in rows:
+        total = r["total"] or 0
+        wins = r["wins"] or 0
+        ranking.append({
+            "coin": r["coin"], "total": total, "wins": wins, "losses": r["losses"] or 0,
+            "win_rate": round(wins / total * 100, 1) if total else 0,
+            "net_pnl": round(r["net_pnl"] or 0, 4),
+            "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3),
+        })
+    return {"ranking": ranking, "total_gains": total_gains, "total_losses": total_losses, "net": round(total_gains + total_losses, 4)}
+
 class UpdateSpotTargetRequest(BaseModel):
     holding_id: int
     target_pct: Optional[float] = None
@@ -8478,7 +8524,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.22"
+BACKEND_BUILD_VERSION = "2026-08-20.23"
 
 @app.get("/api/version")
 def get_version():
