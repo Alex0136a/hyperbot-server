@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.21";
+const APP_BUILD_VERSION = "2026-08-20.22";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -509,13 +509,22 @@ function App() {
     setToken(""); setEmail("");
   };
 
+  // Protection anti-condition de course : si loadData() est déjà en vol quand on clique sur un
+  // toggle, sa réponse (avec l'ANCIENNE valeur, capturée avant le clic) peut arriver APRÈS que
+  // le clic ait mis à jour l'état local — et l'écraser en revenant à l'ancien état quelques
+  // secondes après. Un numéro de séquence ignore toute réponse devenue obsolète avant qu'elle
+  // ne touche le state.
+  const loadDataSeqRef = useRef(0);
+
   const loadData = useCallback(async () => {
     if (!token) return;
+    const mySeq = ++loadDataSeqRef.current;
     try {
       // 1. PRIORITÉ ABSOLUE — trades ouverts et PnL
       const pap = await apiCall("/api/paper/portfolio","GET",null,token);
-      setPaper(pap);
       const spotH = await apiCall("/api/spot-holdings","GET",null,token);
+      if (mySeq !== loadDataSeqRef.current) return;  // une requête plus récente a déjà démarré, on abandonne celle-ci
+      setPaper(pap);
       setSpotHoldings(spotH || {open:[], closed:[]});
       // 2. Données secondaires en parallèle
       const [cfg, sigs, prc, st, pos, botLogsRes, aiUse, sigsHist, pausedRes, minConfRes, maxConfRes, mktData, pendOrders, rangeOpps, topCoins] = await Promise.all([
@@ -535,6 +544,7 @@ function App() {
         apiCall("/api/range-opportunities","GET",null,token),
         apiCall("/api/coins/top-performing","GET",null,token),
       ]);
+      if (mySeq !== loadDataSeqRef.current) return;  // idem — requête plus récente déjà en vol
       setMarketData(mktData?.data||{});
       setPendingOrders({pending:pendOrders?.pending||[], history:pendOrders?.history||[]});
       setRangeOpportunities(rangeOpps?.opportunities||[]);
