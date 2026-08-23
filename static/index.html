@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.18";
+const APP_BUILD_VERSION = "2026-08-20.20";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -412,6 +412,30 @@ function App() {
   const [spotAccumMarketLoading, setSpotAccumMarketLoading] = useState(false);
   const [spotAccumPerf, setSpotAccumPerf] = useState(null);
   const [spotAccumPerfLoading, setSpotAccumPerfLoading] = useState(false);
+  const [modeMarketVisible, setModeMarketVisible] = useState({});
+  const [modeMarketData, setModeMarketData] = useState({});
+  const [modeMarketLoading, setModeMarketLoading] = useState({});
+
+  const loadModeMarket = async (mode) => {
+    setModeMarketLoading(p=>({...p,[mode]:true}));
+    try {
+      const r = await apiCall(`/api/mode-coins/${mode}`,"GET",null,token);
+      setModeMarketData(p=>({...p,[mode]:r}));
+    } catch(e){ addLog("Erreur marché: "+e.message,"error"); }
+    setModeMarketLoading(p=>({...p,[mode]:false}));
+  };
+  const toggleModeMarketCoin = async (mode, coin, currentlyBlocked) => {
+    try {
+      await apiCall(`/api/mode-coins/${mode}/${currentlyBlocked?"unblock":"block"}`,"POST",{coin},token);
+      loadModeMarket(mode);
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+  const blockAllModeMarket = async (mode, block) => {
+    try {
+      await apiCall(`/api/mode-coins/${mode}/${block?"block-all":"unblock-all"}`,"POST",null,token);
+      loadModeMarket(mode);
+    } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
 
   const loadSpotAccumMarket = async () => {
     setSpotAccumMarketLoading(true);
@@ -1170,6 +1194,12 @@ Confirmer ?`
                 </button>
               ))}
               <button onClick={()=>{
+                setActiveCoins(ALL_COINS);
+                apiCall("/api/config","PUT",{active_coins:ALL_COINS},token)
+                  .then(()=>addLog(`✅ Les ${ALL_COINS.length} actifs activés (sauvegardé)`, "system"))
+                  .catch(e=>addLog(`❌ Échec sauvegarde: ${e.message}`, "error"));
+              }} style={{background:"transparent",border:"1px solid #34d399",borderRadius:6,padding:"5px 12px",color:"#34d399",fontSize:11,marginRight:8}}>Tout activer</button>
+              <button onClick={()=>{
                 setActiveCoins([]);
                 apiCall("/api/config","PUT",{active_coins:[]},token)
                   .then(()=>addLog("⭕ Tous les actifs désactivés (sauvegardé)", "system"))
@@ -1778,21 +1808,59 @@ Confirmer ?`
 
           {paperSubTab !== "all" && (() => {
             const modeMap = {
-              principal: {key:"main_bot_enabled", val:mainBotEnabled, setter:setMainBotEnabled, label:"Bot principal"},
-              accumulation: {key:"accumulation_enabled", val:accumulationEnabled, setter:setAccumulationEnabled, label:"Accumulation LONG"},
-              breakout: {key:"breakout_enabled", val:breakoutEnabled, setter:setBreakoutEnabled, label:"Breakout LONG"},
-              range: {key:"range_trading_enabled", val:rangeTradingEnabled, setter:setRangeTradingEnabled, label:"Range Trading"},
-              spot: {key:"spot_accum_enabled", val:spotAccumEnabled, setter:setSpotAccumEnabled, label:"Spot Accumulation"},
+              principal: {key:"main_bot_enabled", val:mainBotEnabled, setter:setMainBotEnabled, label:"Bot principal", endpointMode:"main"},
+              accumulation: {key:"accumulation_enabled", val:accumulationEnabled, setter:setAccumulationEnabled, label:"Accumulation LONG", endpointMode:"accumulation"},
+              breakout: {key:"breakout_enabled", val:breakoutEnabled, setter:setBreakoutEnabled, label:"Breakout LONG", endpointMode:"breakout"},
+              range: {key:"range_trading_enabled", val:rangeTradingEnabled, setter:setRangeTradingEnabled, label:"Range Trading", endpointMode:"range"},
+              spot: {key:"spot_accum_enabled", val:spotAccumEnabled, setter:setSpotAccumEnabled, label:"Spot Accumulation", endpointMode:null},
             };
             const m = modeMap[paperSubTab];
             if (!m) return null;
+            const marketOpen = !!modeMarketVisible[m.endpointMode];
+            const marketData = modeMarketData[m.endpointMode];
             return (
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"8px 14px",marginBottom:12}}>
+              <>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"8px 14px",marginBottom:marketOpen?0:12}}>
                 <span style={{fontSize:10,color:"#94a3b8"}}>{m.label} — {m.val?"ouvre normalement de nouveaux trades":"n'ouvre plus de nouveaux trades (les positions déjà ouvertes continuent normalement)"}</span>
-                <button onClick={()=>toggleModeEnabled(m.key, m.val, m.setter, m.label)} style={{background:m.val?"#052e16":"#2d0a0a",border:m.val?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:m.val?"#34d399":"#f87171",fontSize:10,cursor:"pointer",fontWeight:700}}>
-                  {m.val?"▶️ Marche":"⏸️ Arrêt"}
-                </button>
+                <div style={{display:"flex",gap:8}}>
+                  {m.endpointMode && (
+                    <button onClick={()=>{
+                      const v = !marketOpen;
+                      setModeMarketVisible(p=>({...p,[m.endpointMode]:v}));
+                      if (v && !marketData) loadModeMarket(m.endpointMode);
+                    }} style={{background:marketOpen?"#1e2d4a":"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#60a5fa",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                      🗺️ Marché
+                    </button>
+                  )}
+                  <button onClick={()=>toggleModeEnabled(m.key, m.val, m.setter, m.label)} style={{background:m.val?"#052e16":"#2d0a0a",border:m.val?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:m.val?"#34d399":"#f87171",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                    {m.val?"▶️ Marche":"⏸️ Arrêt"}
+                  </button>
+                </div>
               </div>
+              {marketOpen && m.endpointMode && (
+                <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderTop:"none",borderRadius:"0 0 8px 8px",padding:14,marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <span style={{fontSize:10,color:"#475569"}}>Bloquer un actif l'exclut uniquement de {m.label} — les autres modes ne sont pas affectés. Un clic suffit.</span>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>blockAllModeMarket(m.endpointMode,false)} style={{background:"transparent",border:"1px solid #34d399",borderRadius:5,padding:"3px 10px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Tout débloquer</button>
+                      <button onClick={()=>blockAllModeMarket(m.endpointMode,true)} style={{background:"transparent",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:9,cursor:"pointer"}}>Tout bloquer</button>
+                    </div>
+                  </div>
+                  {modeMarketLoading[m.endpointMode] && <div style={{fontSize:10,color:"#475569"}}>⏳ Chargement...</div>}
+                  {marketData && <div style={{fontSize:9,color:"#334155",marginBottom:6}}>{marketData.coins.length} actif(s)</div>}
+                  <div style={{maxHeight:400,overflowY:"auto"}}>
+                    {marketData && marketData.coins.map(c=>(
+                      <div key={c.coin} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0",borderBottom:"1px solid #0a0e1a"}}>
+                        <span style={{color:c.blocked?"#475569":"#e2e8f0",fontSize:11,textDecoration:c.blocked?"line-through":"none"}}>{c.coin}{c.blocked && <span style={{background:"#2d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,marginLeft:8}}>bloqué</span>}</span>
+                        <button onClick={()=>toggleModeMarketCoin(m.endpointMode, c.coin, c.blocked)} style={{background:c.blocked?"#052e16":"#2d0a0a",border:c.blocked?"1px solid #34d399":"1px solid #f87171",borderRadius:4,padding:"3px 10px",color:c.blocked?"#34d399":"#f87171",fontSize:9,cursor:"pointer",fontWeight:700}}>
+                          {c.blocked?"✅ Débloquer":"🚫 Bloquer"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              </>
             );
           })()}
 
@@ -1997,7 +2065,13 @@ Confirmer ?`
 
                 {spotAccumSubTab === "marche" && (
                   <div>
-                    <div style={{fontSize:10,color:"#475569",marginBottom:10}}>Bloquer un actif l'exclut uniquement de Spot Accumulation — les autres modes ne sont pas affectés. Un clic suffit. 🟢 performance positive · 🔴 négative · 🟡 pas encore évalué.</div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <span style={{fontSize:10,color:"#475569"}}>Bloquer un actif l'exclut uniquement de Spot Accumulation — les autres modes ne sont pas affectés. Un clic suffit. 🟢 positif · 🔴 négatif · 🟡 pas encore évalué.</span>
+                      <div style={{display:"flex",gap:6}}>
+                        <button onClick={async()=>{await apiCall("/api/spot-accum/unblock-all","POST",null,token); loadSpotAccumMarket();}} style={{background:"transparent",border:"1px solid #34d399",borderRadius:5,padding:"3px 10px",color:"#34d399",fontSize:9,cursor:"pointer"}}>Tout débloquer</button>
+                        <button onClick={async()=>{await apiCall("/api/spot-accum/block-all","POST",null,token); loadSpotAccumMarket();}} style={{background:"transparent",border:"1px solid #f87171",borderRadius:5,padding:"3px 10px",color:"#f87171",fontSize:9,cursor:"pointer"}}>Tout bloquer</button>
+                      </div>
+                    </div>
                     {spotAccumMarketLoading && <div style={{fontSize:10,color:"#475569"}}>⏳ Chargement...</div>}
                     {spotAccumMarket && <div style={{fontSize:9,color:"#334155",marginBottom:6}}>{spotAccumMarket.coins.length} actif(s)</div>}
                     <div style={{maxHeight:500,overflowY:"auto"}}>
@@ -3095,6 +3169,7 @@ Confirmer ?`
             <div style={{fontSize:26,fontWeight:700,color:"#93c5fd",marginBottom:10}}>🤖 Bot principal</div>
 
             <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Interrupteur marche/arrêt dédié</b> (indépendant de PAPER/LIVE et de l'interrupteur global) — désactivé, le bot principal n'ouvre plus de nouveaux trades, mais les positions déjà ouvertes continuent d'être gérées normalement. Même principe pour les 4 autres modes (Accumulation, Breakout, Range Trading, Spot Accumulation) — chacun a son propre interrupteur, visible dans Paramètres et dupliqué dans son sous-onglet Paper Trading.</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Blocage par actif indépendant par mode</b> : un coin peut être bloqué sur un mode (ex: SOL sur Breakout) sans affecter les autres — bouton "🗺️ Marché" à côté de l'interrupteur, dans chaque sous-onglet Paper Trading. "Tout bloquer"/"Tout débloquer" en un clic. Un même actif ne se comporte pas forcément pareil selon la stratégie</div>
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée — 4 conditions (simplifié depuis ~10, empilées elles laissaient passer trop peu de trades)</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
