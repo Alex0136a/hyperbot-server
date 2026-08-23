@@ -5767,6 +5767,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_target_pct: Optional[float] = None
     accumulation_size_usdc: Optional[float] = None
     accumulation_max_positions: Optional[int] = None
+    accumulation_enabled: Optional[bool] = None
     accumulation_short_enabled: Optional[bool] = None
     accumulation_short_max_positions: Optional[int] = None
     accumulation_short_leverage: Optional[int] = None
@@ -6143,6 +6144,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_size_usdc=? WHERE user_id=?", (req.accumulation_size_usdc, user_id))
     if req.accumulation_max_positions is not None:
         conn.execute("UPDATE bot_config SET accumulation_max_positions=? WHERE user_id=?", (req.accumulation_max_positions, user_id))
+    if req.accumulation_enabled is not None:
+        conn.execute("UPDATE bot_config SET accumulation_enabled=? WHERE user_id=?", (1 if req.accumulation_enabled else 0, user_id))
     if req.accumulation_short_enabled is not None:
         conn.execute("UPDATE bot_config SET accumulation_short_enabled=? WHERE user_id=?", (1 if req.accumulation_short_enabled else 0, user_id))
     if req.accumulation_short_max_positions is not None:
@@ -8524,7 +8527,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.23"
+BACKEND_BUILD_VERSION = "2026-08-20.24"
 
 @app.get("/api/version")
 def get_version():
