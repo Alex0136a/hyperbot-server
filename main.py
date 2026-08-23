@@ -6673,14 +6673,26 @@ def get_spot_holdings(user_id: int = Depends(get_current_user)):
 @app.get("/api/spot-accum/market")
 def get_spot_accum_market(user_id: int = Depends(get_current_user)):
     """Liste des actifs actifs (mêmes coins que le reste du bot) avec leur statut de blocage
-    SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici reste actif pour tous les autres modes."""
+    SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici reste actif pour tous les autres modes.
+    Inclut la performance moyenne (avg_pnl_pct) pour permettre la coloration côté interface :
+    vert = positif, rouge = négatif, jaune = pas encore évalué (aucun trade clôturé)."""
     conn = get_db()
     config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
     blocked_rows = conn.execute("SELECT coin, blocked_at, reason FROM spot_accum_blocked_coins WHERE user_id=?", (user_id,)).fetchall()
     blocked_map = {r["coin"]: {"blocked_at": r["blocked_at"], "reason": r["reason"]} for r in blocked_rows}
+    perf_rows = conn.execute("""
+        SELECT coin, COUNT(*) as total, AVG(pnl_pct) as avg_pnl_pct
+        FROM spot_holdings WHERE user_id=? AND status='CLOSED' GROUP BY coin
+    """, (user_id,)).fetchall()
+    perf_map = {r["coin"]: {"total": r["total"], "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3)} for r in perf_rows}
     conn.close()
-    coins = [{"coin": c, "blocked": c in blocked_map, "blocked_at": blocked_map.get(c, {}).get("blocked_at"), "reason": blocked_map.get(c, {}).get("reason")} for c in active_coins]
+    coins = [{
+        "coin": c, "blocked": c in blocked_map,
+        "blocked_at": blocked_map.get(c, {}).get("blocked_at"), "reason": blocked_map.get(c, {}).get("reason"),
+        "total_trades": perf_map.get(c, {}).get("total", 0),
+        "avg_pnl_pct": perf_map.get(c, {}).get("avg_pnl_pct"),
+    } for c in active_coins]
     return {"coins": coins}
 
 class SpotAccumBlockRequest(BaseModel):
@@ -6718,9 +6730,17 @@ def get_spot_accum_performance(user_id: int = Depends(get_current_user)):
             SUM(pnl) as net_pnl,
             AVG(pnl_pct) as avg_pnl_pct
         FROM spot_holdings WHERE user_id=? AND status='CLOSED'
-        GROUP BY coin ORDER BY net_pnl ASC
+        GROUP BY coin ORDER BY avg_pnl_pct DESC
     """, (user_id,)).fetchall()
+    totals_row = conn.execute("""
+        SELECT
+            SUM(CASE WHEN pnl>0 THEN pnl ELSE 0 END) as total_gains,
+            SUM(CASE WHEN pnl<=0 THEN pnl ELSE 0 END) as total_losses
+        FROM spot_holdings WHERE user_id=? AND status='CLOSED'
+    """, (user_id,)).fetchone()
     conn.close()
+    total_gains = round(totals_row["total_gains"] or 0, 4)
+    total_losses = round(totals_row["total_losses"] or 0, 4)  # déjà négatif ou 0
     ranking = []
     for r in rows:
         total = r["total"] or 0
@@ -6731,7 +6751,7 @@ def get_spot_accum_performance(user_id: int = Depends(get_current_user)):
             "net_pnl": round(r["net_pnl"] or 0, 4),
             "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3),
         })
-    return {"ranking": ranking}
+    return {"ranking": ranking, "total_gains": total_gains, "total_losses": total_losses, "net": round(total_gains + total_losses, 4)}
 
 class UpdateSpotTargetRequest(BaseModel):
     holding_id: int
@@ -8318,7 +8338,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.18"
+BACKEND_BUILD_VERSION = "2026-08-20.20"
 
 @app.get("/api/version")
 def get_version():
