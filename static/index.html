@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.13";
+const APP_BUILD_VERSION = "2026-08-20.14";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1835,8 +1835,8 @@ Confirmer ?`
                     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                       <span style={{color:"#34d399",fontSize:10,fontWeight:700}}>HOLD</span>
                       <span style={{color:"#e2e8f0",fontSize:11}}>{h.coin}</span>
-                      <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.qty} {h.coin}</span>
-                      <span style={{background:"#0a1628",color:"#facc15",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>{h.size_usdc}$</span>
+                      <span style={{background:"#0a1628",color:"#94a3b8",padding:"1px 6px",borderRadius:3,fontSize:9}}>entré à ${h.entry_price}</span>
+                      <span style={{background:"#0a1628",color:"#facc15",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>acheté pour {h.size_usdc}$</span>
                       {!!h.is_live && <span style={{background:"#3d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔴 LIVE</span>}
                       {!!h.trailing_armed && <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}}>🔒 armé</span>}
                       <span style={{fontSize:9,color:"#334155"}}>pic +{Number(h.peak_pct||0).toFixed(2)}%</span>
