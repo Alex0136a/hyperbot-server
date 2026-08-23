@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.11";
+const APP_BUILD_VERSION = "2026-08-20.13";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -405,6 +405,7 @@ function App() {
   const [channelDiagLoading, setChannelDiagLoading] = useState(false);
   const [spotRotationEnabled, setSpotRotationEnabled] = useState(false);
   const [paperSubTab, setPaperSubTab] = useState("all");
+  const [spotGivebackInputs, setSpotGivebackInputs] = useState({});
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -1853,6 +1854,33 @@ Confirmer ?`
                           addLog(`Spot ${h.coin}: objectif modifié à $${v} (+${r.target_pct}%)`,"system");
                         }catch(e){addLog("Erreur: "+e.message,"error");}
                       }} style={{background:"#3d3a0a",border:"1px solid #facc15",borderRadius:4,padding:"2px 8px",color:"#facc15",fontSize:9,cursor:"pointer",fontWeight:700}}>Modifier</button>
+                      {!!h.trailing_armed && (
+                        <>
+                          <span style={{fontSize:9,color:"#475569"}}>🔒 pullback max:</span>
+                          <input type="number" step="0.05" min="0.05" value={spotGivebackInputs[h.id] !== undefined ? spotGivebackInputs[h.id] : (h.max_giveback_pct_override ?? config?.spot_accum_trailing_max_giveback_pct ?? 0.5)}
+                            onChange={e=>setSpotGivebackInputs(p=>({...p,[h.id]:e.target.value}))}
+                            style={{width:45,background:"#0a0e1a",border:h.max_giveback_pct_override!=null?"1px solid #34d399":"1px solid #3d3a0a",borderRadius:4,padding:"2px 4px",color:"#facc15",fontSize:10}}/>
+                          <span style={{fontSize:9,color:"#475569"}}>{h.max_giveback_pct_override!=null?"% (custom)":"% (global)"}</span>
+                          <button onClick={async()=>{
+                            const v = spotGivebackInputs[h.id] !== undefined ? Number(spotGivebackInputs[h.id]) : h.max_giveback_pct_override;
+                            try{
+                              await apiCall("/api/spot-holdings/giveback","PUT",{holding_id:h.id,max_giveback_pct:v},token);
+                              setSpotGivebackInputs(p=>{const n={...p};delete n[h.id];return n;});
+                              loadData();
+                              addLog(`Spot ${h.coin}: pullback max modifié à ${v}%`,"system");
+                            }catch(e){addLog("Erreur: "+e.message,"error");}
+                          }} style={{background:"#3d3a0a",border:"1px solid #facc15",borderRadius:4,padding:"2px 8px",color:"#facc15",fontSize:9,cursor:"pointer",fontWeight:700}}>Modifier</button>
+                          {h.max_giveback_pct_override!=null && (
+                            <button onClick={async()=>{
+                              try{
+                                await apiCall("/api/spot-holdings/giveback","PUT",{holding_id:h.id,max_giveback_pct:null},token);
+                                loadData();
+                                addLog(`Spot ${h.coin}: pullback max remis au réglage global`,"system");
+                              }catch(e){addLog("Erreur: "+e.message,"error");}
+                            }} style={{background:"#0a0e1a",border:"1px solid #475569",borderRadius:4,padding:"2px 8px",color:"#94a3b8",fontSize:9,cursor:"pointer"}}>Retirer</button>
+                          )}
+                        </>
+                      )}
                       <button onClick={async()=>{
                         if(!window.confirm(`Fermer ${h.coin} maintenant (PnL actuel: ${h.pnl_pct>=0?"+":""}${Number(h.pnl_pct||0).toFixed(2)}%) ?`)) return;
                         try{
@@ -2043,6 +2071,7 @@ Confirmer ?`
                     {key:"spot_accum_live_fixed_size_usd",label:"Spot Accumulation LIVE - taille fixe par trade ($)",def:50,step:5,min:10,max:1000},
                     {key:"spot_accum_live_max_positions",label:"Spot Accumulation LIVE - positions simultanées max",def:2,step:1,min:1,max:10},
                     {key:"spot_accum_rotation_min_improvement_mult",label:"Spot Accumulation - amélioration minimale pour rotation (× canal actuel)",def:1.2,step:0.05,min:1,max:3},
+                    {key:"spot_accum_trailing_max_giveback_pct",label:"Spot Accumulation - pullback max depuis le pic une fois l'objectif atteint (points de %)",def:0.5,step:0.05,min:0.1,max:5},
                     {key:"range_trading_trailing_lock_ratio_pct",label:"Range Trading - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"accumulation_exit_tolerance_ratio",label:"Accumulation - tolérance de sortie proportionnelle (0-1, ex: 0.3=30% du pic)",def:0.3,step:0.05,min:0.05,max:1},
                     {key:"accumulation_momentum_margin_pct",label:"Accumulation - marge momentum avant de bloquer (%, 'couteau qui tombe')",def:0.3,step:0.05,min:0.05,max:2},
@@ -3032,7 +3061,7 @@ Confirmer ?`
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
               <li><b style={{color:"#f87171"}}>Pas de Max Loss</b> — un holding en perte reste tenu indéfiniment</li>
-              <li>Objectif = % de l'amplitude du canal à l'achat (100% par défaut) — une fois atteint, un trailing s'arme et verrouille 50% du pic, laisse courir au-delà</li>
+              <li>Objectif = % de l'amplitude du canal à l'achat (85% par défaut) — une fois atteint, un trailing s'arme et verrouille le PLUS STRICT entre 50% du pic et un plafond absolu de pullback depuis le pic (0.5 point de % par défaut) — évite de reperdre trop sur un gros pic (ex: 50% d'un pic à 10% donnerait 5 points de % perdus sans ce plafond). Modifiable par holding individuellement une fois le trailing armé (bouton dédié), en plus du réglage global</li>
               <li>Tant que l'objectif n'est pas atteint, rien ne se passe — c'est voulu, "attendre le bon moment"</li>
               <li><b style={{color:"#f8fafc"}}>Repositionnement sur cassure confirmée</b> (pas un Max Loss) : si le support qui justifiait l'achat cède franchement (marge de confirmation, 1% par défaut), le pari est jugé invalidé — vente immédiate pour libérer le capital, qui pourra racheter sur le nouveau support (plus bas) une fois détecté et confirmé à son tour, avec les mêmes garde-fous qu'à l'achat initial</li>
               <li>Fermeture manuelle disponible à tout moment (bouton "Fermer" sur chaque holding, onglet Paper Trading)</li>
