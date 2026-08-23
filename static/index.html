@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.20";
+const APP_BUILD_VERSION = "2026-08-20.21";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -412,9 +412,11 @@ function App() {
   const [spotAccumMarketLoading, setSpotAccumMarketLoading] = useState(false);
   const [spotAccumPerf, setSpotAccumPerf] = useState(null);
   const [spotAccumPerfLoading, setSpotAccumPerfLoading] = useState(false);
-  const [modeMarketVisible, setModeMarketVisible] = useState({});
+  const [modeInnerTab, setModeInnerTab] = useState("positions");
   const [modeMarketData, setModeMarketData] = useState({});
   const [modeMarketLoading, setModeMarketLoading] = useState({});
+  const [modePerfData, setModePerfData] = useState({});
+  const [modePerfLoading, setModePerfLoading] = useState({});
 
   const loadModeMarket = async (mode) => {
     setModeMarketLoading(p=>({...p,[mode]:true}));
@@ -423,6 +425,14 @@ function App() {
       setModeMarketData(p=>({...p,[mode]:r}));
     } catch(e){ addLog("Erreur marché: "+e.message,"error"); }
     setModeMarketLoading(p=>({...p,[mode]:false}));
+  };
+  const loadModePerf = async (mode) => {
+    setModePerfLoading(p=>({...p,[mode]:true}));
+    try {
+      const r = await apiCall(`/api/mode-performance/${mode}`,"GET",null,token);
+      setModePerfData(p=>({...p,[mode]:r}));
+    } catch(e){ addLog("Erreur performance: "+e.message,"error"); }
+    setModePerfLoading(p=>({...p,[mode]:false}));
   };
   const toggleModeMarketCoin = async (mode, coin, currentlyBlocked) => {
     try {
@@ -1800,7 +1810,7 @@ Confirmer ?`
               {id:"range",label:"📊 Range Trading"},
               {id:"spot",label:"🪙 Spot Accumulation"},
             ].map(st=>(
-              <button key={st.id} onClick={()=>setPaperSubTab(st.id)} style={{padding:"6px 12px",borderRadius:6,border:paperSubTab===st.id?"1px solid #60a5fa":"1px solid #1e2d4a",background:paperSubTab===st.id?"#0f1629":"transparent",color:paperSubTab===st.id?"#60a5fa":"#475569",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+              <button key={st.id} onClick={()=>{setPaperSubTab(st.id); setModeInnerTab("positions");}} style={{padding:"6px 12px",borderRadius:6,border:paperSubTab===st.id?"1px solid #60a5fa":"1px solid #1e2d4a",background:paperSubTab===st.id?"#0f1629":"transparent",color:paperSubTab===st.id?"#60a5fa":"#475569",fontSize:11,fontWeight:700,cursor:"pointer"}}>
                 {st.label}
               </button>
             ))}
@@ -1816,29 +1826,33 @@ Confirmer ?`
             };
             const m = modeMap[paperSubTab];
             if (!m) return null;
-            const marketOpen = !!modeMarketVisible[m.endpointMode];
             const marketData = modeMarketData[m.endpointMode];
+            const perfData = modePerfData[m.endpointMode];
             return (
               <>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"8px 14px",marginBottom:marketOpen?0:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"8px 14px",marginBottom:12}}>
                 <span style={{fontSize:10,color:"#94a3b8"}}>{m.label} — {m.val?"ouvre normalement de nouveaux trades":"n'ouvre plus de nouveaux trades (les positions déjà ouvertes continuent normalement)"}</span>
-                <div style={{display:"flex",gap:8}}>
-                  {m.endpointMode && (
-                    <button onClick={()=>{
-                      const v = !marketOpen;
-                      setModeMarketVisible(p=>({...p,[m.endpointMode]:v}));
-                      if (v && !marketData) loadModeMarket(m.endpointMode);
-                    }} style={{background:marketOpen?"#1e2d4a":"transparent",border:"1px solid #1e2d4a",borderRadius:6,padding:"5px 12px",color:"#60a5fa",fontSize:10,cursor:"pointer",fontWeight:700}}>
-                      🗺️ Marché
-                    </button>
-                  )}
-                  <button onClick={()=>toggleModeEnabled(m.key, m.val, m.setter, m.label)} style={{background:m.val?"#052e16":"#2d0a0a",border:m.val?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:m.val?"#34d399":"#f87171",fontSize:10,cursor:"pointer",fontWeight:700}}>
-                    {m.val?"▶️ Marche":"⏸️ Arrêt"}
-                  </button>
-                </div>
+                <button onClick={()=>toggleModeEnabled(m.key, m.val, m.setter, m.label)} style={{background:m.val?"#052e16":"#2d0a0a",border:m.val?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:m.val?"#34d399":"#f87171",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                  {m.val?"▶️ Marche":"⏸️ Arrêt"}
+                </button>
               </div>
-              {marketOpen && m.endpointMode && (
-                <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderTop:"none",borderRadius:"0 0 8px 8px",padding:14,marginBottom:12}}>
+
+              {m.endpointMode && (
+                <div style={{display:"flex",gap:6,marginBottom:12}}>
+                  {[{id:"positions",label:"📈 Positions"},{id:"marche",label:"🗺️ Marché"},{id:"performance",label:"🏆 Performance"}].map(it=>(
+                    <button key={it.id} onClick={()=>{
+                      setModeInnerTab(it.id);
+                      if (it.id==="marche" && !marketData) loadModeMarket(m.endpointMode);
+                      if (it.id==="performance" && !perfData) loadModePerf(m.endpointMode);
+                    }} style={{padding:"5px 10px",borderRadius:5,border:modeInnerTab===it.id?"1px solid #60a5fa":"1px solid #1e2d4a",background:modeInnerTab===it.id?"#0f1629":"transparent",color:modeInnerTab===it.id?"#60a5fa":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                      {it.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {m.endpointMode && modeInnerTab === "marche" && (
+                <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:14,marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                     <span style={{fontSize:10,color:"#475569"}}>Bloquer un actif l'exclut uniquement de {m.label} — les autres modes ne sont pas affectés. Un clic suffit.</span>
                     <div style={{display:"flex",gap:6}}>
@@ -1860,6 +1874,49 @@ Confirmer ?`
                   </div>
                 </div>
               )}
+
+              {m.endpointMode && modeInnerTab === "performance" && (
+                <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:14,marginBottom:12}}>
+                  {modePerfLoading[m.endpointMode] && <div style={{fontSize:10,color:"#475569"}}>⏳ Chargement...</div>}
+                  {perfData && perfData.ranking.length > 0 && (
+                    <div style={{display:"flex",gap:12,marginBottom:12,padding:10,background:"#0a0e1a",borderRadius:8,border:"1px solid #1e2d4a"}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:9,color:"#475569"}}>Total gains</div>
+                        <div style={{fontSize:14,fontWeight:700,color:"#34d399"}}>+{perfData.total_gains}$</div>
+                      </div>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:9,color:"#475569"}}>Total pertes</div>
+                        <div style={{fontSize:14,fontWeight:700,color:"#f87171"}}>{perfData.total_losses}$</div>
+                      </div>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:9,color:"#475569"}}>Net</div>
+                        <div style={{fontSize:14,fontWeight:700,color:perfData.net>=0?"#34d399":"#f87171"}}>{perfData.net>=0?"+":""}{perfData.net}$</div>
+                      </div>
+                    </div>
+                  )}
+                  {perfData && perfData.ranking.length === 0 && (
+                    <div style={{fontSize:10,color:"#475569",fontStyle:"italic"}}>Aucun trade {m.label} clôturé pour l'instant — le classement apparaîtra ici.</div>
+                  )}
+                  {perfData && perfData.ranking.length > 0 && (
+                    <>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#475569",padding:"4px 0",borderBottom:"1px solid #1e2d4a"}}>
+                        <span style={{flex:1}}>Actif</span>
+                        <span style={{width:50,textAlign:"right"}}>Trades</span>
+                        <span style={{width:60,textAlign:"right"}}>Winrate</span>
+                        <span style={{width:70,textAlign:"right"}}>Net $</span>
+                      </div>
+                      {perfData.ranking.map(r=>(
+                        <div key={r.coin} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,padding:"5px 0",borderBottom:"1px solid #0a0e1a"}}>
+                          <span style={{flex:1,color:"#e2e8f0"}}>{r.coin}</span>
+                          <span style={{width:50,textAlign:"right",color:"#94a3b8"}}>{r.total}</span>
+                          <span style={{width:60,textAlign:"right",color:r.win_rate>=50?"#34d399":"#f87171"}}>{r.win_rate}%</span>
+                          <span style={{width:70,textAlign:"right",fontWeight:700,color:r.net_pnl>=0?"#34d399":"#f87171"}}>{r.net_pnl>=0?"+":""}{r.net_pnl}$</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
               </>
             );
           })()}
@@ -1867,7 +1924,7 @@ Confirmer ?`
           <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:16,alignItems:"start"}}>
             {/* COLONNE GAUCHE — Trades ouverts + Historique, remontés */}
             <div>
-            {paperSubTab !== "spot" && (
+            {paperSubTab !== "spot" && (paperSubTab === "all" || modeInnerTab === "positions") && (
             <>
             {/* TRADES OUVERTS */}
             <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
@@ -2141,7 +2198,7 @@ Confirmer ?`
               </div>
             )}
 
-            {paperSubTab !== "spot" && (
+            {paperSubTab !== "spot" && (paperSubTab === "all" || modeInnerTab === "positions") && (
             <>
             {/* HISTORIQUE */}
             {paper?.closed_trades?.filter(t=>window.__matchesSubTab(t,paperSubTab))?.length > 0 && (
@@ -3169,7 +3226,8 @@ Confirmer ?`
             <div style={{fontSize:26,fontWeight:700,color:"#93c5fd",marginBottom:10}}>🤖 Bot principal</div>
 
             <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Interrupteur marche/arrêt dédié</b> (indépendant de PAPER/LIVE et de l'interrupteur global) — désactivé, le bot principal n'ouvre plus de nouveaux trades, mais les positions déjà ouvertes continuent d'être gérées normalement. Même principe pour les 4 autres modes (Accumulation, Breakout, Range Trading, Spot Accumulation) — chacun a son propre interrupteur, visible dans Paramètres et dupliqué dans son sous-onglet Paper Trading.</div>
-            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Blocage par actif indépendant par mode</b> : un coin peut être bloqué sur un mode (ex: SOL sur Breakout) sans affecter les autres — bouton "🗺️ Marché" à côté de l'interrupteur, dans chaque sous-onglet Paper Trading. "Tout bloquer"/"Tout débloquer" en un clic. Un même actif ne se comporte pas forcément pareil selon la stratégie</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Positions / Marché / Performance</b> : chaque sous-onglet Paper Trading (Bot principal, Accumulation, Breakout, Range Trading, Spot Accumulation) a sa propre structure à 3 onglets internes — Positions (trades ouverts + historique), Marché (bloquer/débloquer un actif d'un clic, "Tout bloquer"/"Tout débloquer", indépendant des autres modes), Performance (classement par actif, gains/pertes totaux). Un même actif ne se comporte pas forcément pareil selon la stratégie</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Interrupteur marche/arrêt</b> par mode, au-dessus de ces 3 onglets — désactivé, ce mode n'ouvre plus de nouveaux trades, mais les positions déjà ouvertes continuent d'être gérées normalement.</div>
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée — 4 conditions (simplifié depuis ~10, empilées elles laissaient passer trop peu de trades)</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
