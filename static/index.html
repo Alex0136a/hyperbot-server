@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.15";
+const APP_BUILD_VERSION = "2026-08-20.17";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1954,25 +1954,50 @@ Confirmer ?`
 
                 {spotAccumSubTab === "marche" && (
                   <div>
-                    <div style={{fontSize:10,color:"#475569",marginBottom:10}}>Bloquer un actif l'exclut uniquement de Spot Accumulation — les autres modes ne sont pas affectés. Un clic suffit.</div>
+                    <div style={{fontSize:10,color:"#475569",marginBottom:10}}>Bloquer un actif l'exclut uniquement de Spot Accumulation — les autres modes ne sont pas affectés. Un clic suffit. 🟢 performance positive · 🔴 négative · 🟡 pas encore évalué.</div>
                     {spotAccumMarketLoading && <div style={{fontSize:10,color:"#475569"}}>⏳ Chargement...</div>}
-                    {spotAccumMarket && spotAccumMarket.coins.map(c=>(
+                    {spotAccumMarket && <div style={{fontSize:9,color:"#334155",marginBottom:6}}>{spotAccumMarket.coins.length} actif(s)</div>}
+                    <div style={{maxHeight:500,overflowY:"auto"}}>
+                    {spotAccumMarket && spotAccumMarket.coins.map(c=>{
+                      const perfColor = c.total_trades > 0 ? (c.avg_pnl_pct >= 0 ? "#34d399" : "#f87171") : "#facc15";
+                      return (
                       <div key={c.coin} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0a0e1a"}}>
                         <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <span style={{width:8,height:8,borderRadius:"50%",background:perfColor,display:"inline-block"}}></span>
                           <span style={{color:c.blocked?"#475569":"#e2e8f0",fontSize:11,textDecoration:c.blocked?"line-through":"none"}}>{c.coin}</span>
                           {c.blocked && <span style={{background:"#2d0a0a",color:"#f87171",padding:"1px 6px",borderRadius:3,fontSize:9}}>bloqué</span>}
+                          {c.total_trades > 0 && <span style={{fontSize:9,color:perfColor}}>{c.avg_pnl_pct>=0?"+":""}{c.avg_pnl_pct}% moy. ({c.total_trades} trade{c.total_trades>1?"s":""})</span>}
+                          {c.total_trades === 0 && <span style={{fontSize:9,color:"#facc15"}}>pas encore évalué</span>}
                         </div>
                         <button onClick={()=>toggleSpotAccumBlock(c.coin, c.blocked)} style={{background:c.blocked?"#052e16":"#2d0a0a",border:c.blocked?"1px solid #34d399":"1px solid #f87171",borderRadius:4,padding:"3px 10px",color:c.blocked?"#34d399":"#f87171",fontSize:9,cursor:"pointer",fontWeight:700}}>
                           {c.blocked?"✅ Débloquer":"🚫 Bloquer"}
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
+                    </div>
                   </div>
                 )}
 
                 {spotAccumSubTab === "performance" && (
                   <div>
                     {spotAccumPerfLoading && <div style={{fontSize:10,color:"#475569"}}>⏳ Chargement...</div>}
+                    {spotAccumPerf && spotAccumPerf.ranking.length > 0 && (
+                      <div style={{display:"flex",gap:12,marginBottom:12,padding:10,background:"#0a0e1a",borderRadius:8,border:"1px solid #1e2d4a"}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:9,color:"#475569"}}>Total gains</div>
+                          <div style={{fontSize:14,fontWeight:700,color:"#34d399"}}>+{spotAccumPerf.total_gains}$</div>
+                        </div>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:9,color:"#475569"}}>Total pertes</div>
+                          <div style={{fontSize:14,fontWeight:700,color:"#f87171"}}>{spotAccumPerf.total_losses}$</div>
+                        </div>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:9,color:"#475569"}}>Net</div>
+                          <div style={{fontSize:14,fontWeight:700,color:spotAccumPerf.net>=0?"#34d399":"#f87171"}}>{spotAccumPerf.net>=0?"+":""}{spotAccumPerf.net}$</div>
+                        </div>
+                      </div>
+                    )}
                     {spotAccumPerf && spotAccumPerf.ranking.length === 0 && (
                       <div style={{fontSize:10,color:"#475569",fontStyle:"italic"}}>Aucun trade Spot Accumulation clôturé pour l'instant — le classement apparaîtra ici.</div>
                     )}
