@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.10";
+const APP_BUILD_VERSION = "2026-08-20.11";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -404,6 +404,7 @@ function App() {
   const [channelDiag, setChannelDiag] = useState(null);
   const [channelDiagLoading, setChannelDiagLoading] = useState(false);
   const [spotRotationEnabled, setSpotRotationEnabled] = useState(false);
+  const [paperSubTab, setPaperSubTab] = useState("all");
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
   const [newCondValue, setNewCondValue] = useState("");
@@ -1696,15 +1697,47 @@ Confirmer ?`
             ))}
           </div>
 
+          {(() => {
+            // Filtre les trades par mode pour les sous-onglets — un seul point de vérité,
+            // réutilisé pour les trades ouverts ET l'historique, cohérent avec les badges déjà
+            // affichés ailleurs (is_accumulation, is_breakout, is_range_trade).
+            window.__matchesSubTab = (t, sub) => {
+              if (sub === "all") return true;
+              if (sub === "principal") return !t.is_accumulation && !t.is_breakout && !t.is_range_trade;
+              if (sub === "accumulation") return !!t.is_accumulation;
+              if (sub === "breakout") return !!t.is_breakout;
+              if (sub === "range") return !!t.is_range_trade;
+              return true;
+            };
+            return null;
+          })()}
+
+          <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
+            {[
+              {id:"all",label:"Tout"},
+              {id:"principal",label:"🎯 Bot principal"},
+              {id:"accumulation",label:"💰 Accumulation"},
+              {id:"breakout",label:"🚀 Breakout"},
+              {id:"range",label:"📊 Range Trading"},
+              {id:"spot",label:"🪙 Spot Accumulation"},
+            ].map(st=>(
+              <button key={st.id} onClick={()=>setPaperSubTab(st.id)} style={{padding:"6px 12px",borderRadius:6,border:paperSubTab===st.id?"1px solid #60a5fa":"1px solid #1e2d4a",background:paperSubTab===st.id?"#0f1629":"transparent",color:paperSubTab===st.id?"#60a5fa":"#475569",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                {st.label}
+              </button>
+            ))}
+          </div>
+
           <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:16,alignItems:"start"}}>
             {/* COLONNE GAUCHE — Trades ouverts + Historique, remontés */}
             <div>
+            {paperSubTab !== "spot" && (
+            <>
             {/* TRADES OUVERTS */}
             <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16,marginBottom:16}}>
               <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📈 Trades ouverts</div>
-              {!paper?.open_trades?.length
+              {!paper?.open_trades?.filter(t=>window.__matchesSubTab(t,paperSubTab))?.length
                 ? <div style={{color:"#334155",fontSize:11,textAlign:"center",padding:"20px 0"}}>Aucun trade ouvert — exécutez un signal !</div>
-                : paper.open_trades.map(trade=>(
+                : paper.open_trades.filter(t=>window.__matchesSubTab(t,paperSubTab)).map(trade=>(
                   <div key={trade.id} style={{background:"#0a0e1a",borderRadius:8,padding:12,marginBottom:8,border:`1px solid ${trade.pnl>=0?"#14532d":"#450a0a"}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                       <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -1786,9 +1819,11 @@ Confirmer ?`
                 ))
               }
             </div>
+            </>
+            )}
 
             {/* SPOT ACCUMULATION */}
-            {(spotHoldings.open.length > 0 || spotHoldings.closed.length > 0 || config?.spot_accum_enabled) && (
+            {(paperSubTab === "all" || paperSubTab === "spot") && (spotHoldings.open.length > 0 || spotHoldings.closed.length > 0 || config?.spot_accum_enabled) && (
               <div style={{background:"#0f1629",border:"1px solid #3d3a0a",borderRadius:10,padding:16,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — achat réel, aucun Max Loss</div>
                 {spotHoldings.open.length === 0 && spotHoldings.closed.length === 0 && (
@@ -1849,11 +1884,13 @@ Confirmer ?`
               </div>
             )}
 
+            {paperSubTab !== "spot" && (
+            <>
             {/* HISTORIQUE */}
-            {paper?.closed_trades?.length > 0 && (
+            {paper?.closed_trades?.filter(t=>window.__matchesSubTab(t,paperSubTab))?.length > 0 && (
               <div style={{background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:10,padding:16}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12}}>📋 Historique (50 derniers)</div>
-                {paper.closed_trades.map(trade=>(
+                {paper.closed_trades.filter(t=>window.__matchesSubTab(t,paperSubTab)).map(trade=>(
                   <div key={trade.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a0e1a"}}>
                     <div style={{display:"flex",gap:8,alignItems:"center"}}>
                       <span style={{color:trade.action==="LONG"?"#34d399":"#f87171",fontSize:10,fontWeight:700}}>{trade.action}</span>
@@ -1893,6 +1930,8 @@ Confirmer ?`
                   </div>
                 ))}
               </div>
+            )}
+            </>
             )}
             </div>
 
