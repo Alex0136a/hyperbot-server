@@ -618,6 +618,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Plafond de pullback maximum (points de %) depuis le pic une fois le trailing armé —
+        # le plancher retenu est le PLUS STRICT entre ce plafond et le ratio de verrouillage
+        # habituel, pour éviter de reperdre trop sur un gros pic (ex: 50% d'un pic à 10% =
+        # 5 points de % perdus, bien plus que souhaité une fois l'objectif atteint).
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_trailing_max_giveback_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN range_trading_trailing_lock_ratio_pct REAL DEFAULT 50.0")
         conn.commit()
     except: pass
@@ -1551,6 +1559,13 @@ def init_db():
         conn.commit()
     except Exception as e:
         print(f"⚠️ Échec création spot_holdings: {e}")
+    try:
+        # Surcharge PAR HOLDING du plafond de pullback (points de %) une fois le trailing armé
+        # — si NULL, le réglage global spot_accum_trailing_max_giveback_pct s'applique.
+        conn.execute("ALTER TABLE spot_holdings ADD COLUMN max_giveback_pct_override REAL")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -3172,9 +3187,10 @@ async def manage_spot_holdings(user_id: int, prices: dict):
     un % du pic, laisse courir au-delà)."""
     conn = get_db()
     holdings = conn.execute("SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)).fetchall()
-    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct, spot_accum_trailing_max_giveback_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     lock_ratio = config["spot_accum_trailing_lock_ratio_pct"] if config and "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0
     breakdown_buffer = config["spot_accum_breakdown_buffer_pct"] if config and "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0
+    max_giveback = config["spot_accum_trailing_max_giveback_pct"] if config and "spot_accum_trailing_max_giveback_pct" in config.keys() and config["spot_accum_trailing_max_giveback_pct"] is not None else 0.5
     conn.close()
 
     for h in holdings:
@@ -3209,7 +3225,14 @@ async def manage_spot_holdings(user_id: int, prices: dict):
             trailing_armed = True
             add_bot_log(user_id, f"🎯 {h['coin']}: objectif Spot Accumulation atteint (+{round(pnl_pct,2)}% ≥ +{target_pct}%) — trailing armé, la position continue de courir au-delà", "info")
         elif not close_reason and trailing_armed:
-            floor_pct = round(peak_pct * (lock_ratio / 100), 4)
+            # Plancher = le PLUS STRICT des deux : le ratio de verrouillage habituel (% du pic)
+            # OU un plafond absolu de pullback (0.5 point de % par défaut) — sur un gros pic,
+            # le ratio seul (ex: 50% d'un pic à 10%) laisserait reperdre 5 points de %, bien
+            # plus que ce qui est voulu une fois l'objectif atteint.
+            floor_ratio = round(peak_pct * (lock_ratio / 100), 4)
+            effective_giveback = h["max_giveback_pct_override"] if h.get("max_giveback_pct_override") is not None else max_giveback
+            floor_giveback = round(peak_pct - effective_giveback, 4)
+            floor_pct = max(floor_ratio, floor_giveback)
             if pnl_pct <= floor_pct:
                 close_reason = "SPOT_ACCUM_TARGET_TRAILING"
 
@@ -3243,7 +3266,8 @@ async def manage_spot_holdings(user_id: int, prices: dict):
                 if close_reason == "SPOT_ACCUM_BREAKDOWN_REPOSITION":
                     add_bot_log(user_id, f"📉 {h['coin']}: Spot Accumulation — support cassé confirmé (${cur:.4g} < ${h['support_price']*(1-breakdown_buffer/100):.4g}) — vente de repositionnement {round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%), rachat possible sur le nouveau support plus bas dès qu'il sera confirmé", "warning")
                 else:
-                    add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher {lock_ratio:.0f}% du pic = +{round(peak_pct*(lock_ratio/100),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
+                    log_giveback = h["max_giveback_pct_override"] if h.get("max_giveback_pct_override") is not None else max_giveback
+                    add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher = max({lock_ratio:.0f}% du pic, pic -{log_giveback}%{' custom' if h.get('max_giveback_pct_override') is not None else ''}) = +{round(max(peak_pct*(lock_ratio/100), peak_pct-log_giveback),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
         conn.close()
 
 async def scan_markets(user_id: int):
@@ -5718,6 +5742,7 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_live_max_positions: Optional[int] = None
     spot_accum_rotation_enabled: Optional[bool] = None
     spot_accum_rotation_min_improvement_mult: Optional[float] = None
+    spot_accum_trailing_max_giveback_pct: Optional[float] = None
     range_trading_trailing_lock_ratio_pct: Optional[float] = None
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
@@ -5929,6 +5954,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_live_max_positions": config["spot_accum_live_max_positions"] if "spot_accum_live_max_positions" in config.keys() and config["spot_accum_live_max_positions"] else 2,
         "spot_accum_rotation_enabled": config["spot_accum_rotation_enabled"] if "spot_accum_rotation_enabled" in config.keys() and config["spot_accum_rotation_enabled"] is not None else 0,
         "spot_accum_rotation_min_improvement_mult": config["spot_accum_rotation_min_improvement_mult"] if "spot_accum_rotation_min_improvement_mult" in config.keys() and config["spot_accum_rotation_min_improvement_mult"] is not None else 1.2,
+        "spot_accum_trailing_max_giveback_pct": config["spot_accum_trailing_max_giveback_pct"] if "spot_accum_trailing_max_giveback_pct" in config.keys() and config["spot_accum_trailing_max_giveback_pct"] is not None else 0.5,
         "range_trading_trailing_lock_ratio_pct": config["range_trading_trailing_lock_ratio_pct"] if "range_trading_trailing_lock_ratio_pct" in config.keys() and config["range_trading_trailing_lock_ratio_pct"] is not None else 50.0,
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
@@ -6134,6 +6160,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_rotation_enabled=? WHERE user_id=?", (1 if req.spot_accum_rotation_enabled else 0, user_id))
     if req.spot_accum_rotation_min_improvement_mult is not None:
         conn.execute("UPDATE bot_config SET spot_accum_rotation_min_improvement_mult=? WHERE user_id=?", (req.spot_accum_rotation_min_improvement_mult, user_id))
+    if req.spot_accum_trailing_max_giveback_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_trailing_max_giveback_pct=? WHERE user_id=?", (req.spot_accum_trailing_max_giveback_pct, user_id))
     if req.range_trading_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_lock_ratio_pct=? WHERE user_id=?", (req.range_trading_trailing_lock_ratio_pct, user_id))
     if req.range_trading_trading_mode is not None:
@@ -6650,6 +6678,27 @@ def update_spot_holding_target(req: UpdateSpotTargetRequest, user_id: int = Depe
     price_info = f" (prix cible ${req.target_price})" if req.target_price is not None else ""
     add_bot_log(user_id, f"🎯 Spot Accumulation: objectif modifié manuellement à +{target_pct}%{price_info} (holding #{req.holding_id})", "info")
     return {"success": True, "target_pct": target_pct}
+
+class UpdateSpotGivebackRequest(BaseModel):
+    holding_id: int
+    max_giveback_pct: Optional[float] = None  # None = retire la surcharge, revient au réglage global
+
+@app.put("/api/spot-holdings/giveback")
+def update_spot_holding_giveback(req: UpdateSpotGivebackRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    holding = conn.execute("SELECT id FROM spot_holdings WHERE id=? AND user_id=? AND status='OPEN'", (req.holding_id, user_id)).fetchone()
+    if not holding:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Holding introuvable ou déjà clôturé")
+    if req.max_giveback_pct is not None and req.max_giveback_pct <= 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Le pullback max doit être strictement positif")
+    conn.execute("UPDATE spot_holdings SET max_giveback_pct_override=? WHERE id=?", (req.max_giveback_pct, req.holding_id))
+    conn.commit()
+    conn.close()
+    msg = f"pullback max modifié manuellement à {req.max_giveback_pct} points de %" if req.max_giveback_pct is not None else "pullback max remis au réglage global"
+    add_bot_log(user_id, f"🔒 Spot Accumulation: {msg} (holding #{req.holding_id})", "info")
+    return {"success": True, "max_giveback_pct": req.max_giveback_pct}
 
 class CloseSpotHoldingRequest(BaseModel):
     holding_id: int
@@ -8177,7 +8226,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.14"
+BACKEND_BUILD_VERSION = "2026-08-20.16"
 
 @app.get("/api/version")
 def get_version():
