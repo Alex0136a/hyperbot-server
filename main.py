@@ -6817,15 +6817,20 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     le prix de fill réel de l'exchange fait foi (comptabilité PnL doit refléter la réalité).
     `is_accumulation` : mode achat/vente sans Max Loss/QP/TTP classiques, sortie uniquement
     au % de gain visé (accumulation_target_pct) ou aux garde-fous Accumulation dédiés — jamais
-    de vente/rachat forcé en perte au-delà du plafond dédié. LONG forcé à x1 (spot-like) ;
-    SHORT garde le levier transmis (généralement x2, réglage séparé du LONG).
+    de vente/rachat forcé en perte au-delà du plafond dédié. LONG et SHORT utilisent tous les
+    deux le levier transmis par l'appelant (chacun son propre réglage configurable).
     Retourne (message, fill_price) ou lève une exception avec le détail de l'échec."""
     if action not in ("LONG", "SHORT"):
         raise ValueError("Action invalide (LONG ou SHORT)")
     if size_usdc <= 0 or leverage <= 0:
         raise ValueError("Taille et levier doivent être positifs")
-    if is_accumulation and action == "LONG":
-        leverage = 1  # spot-like, pas de levier en mode Accumulation LONG (le SHORT garde le levier transmis)
+    # BUG CORRIGÉ : cette ligne forçait leverage=1 pour TOUT trade Accumulation LONG,
+    # écrasant silencieusement le levier configuré (accumulation_long_leverage, x2 minimum)
+    # et le boost top-10 (accumulation_top_leverage, x3) — vestige de l'époque où
+    # Accumulation LONG était volontairement sans levier, jamais retiré quand ce principe a
+    # changé. Observé concrètement : logs montrant "x3 boosté" au calcul mais "x1" à
+    # l'exécution réelle, sans aucun avertissement (pas un refus Hyperliquid, notre propre
+    # code écrasait la valeur avant même l'appel à l'exchange).
     conn = get_db()
     ensure_portfolio(user_id, conn)
     # Accumulation SHORT utilise son propre sélecteur paper/live, indépendant de celui de
@@ -8226,7 +8231,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.16"
+BACKEND_BUILD_VERSION = "2026-08-20.17"
 
 @app.get("/api/version")
 def get_version():
