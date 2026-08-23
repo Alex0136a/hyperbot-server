@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.17";
+const APP_BUILD_VERSION = "2026-08-20.18";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -404,6 +404,7 @@ function App() {
   const [channelDiag, setChannelDiag] = useState(null);
   const [channelDiagLoading, setChannelDiagLoading] = useState(false);
   const [spotRotationEnabled, setSpotRotationEnabled] = useState(false);
+  const [mainBotEnabled, setMainBotEnabled] = useState(true);
   const [paperSubTab, setPaperSubTab] = useState("all");
   const [spotGivebackInputs, setSpotGivebackInputs] = useState({});
   const [spotAccumSubTab, setSpotAccumSubTab] = useState("positions");
@@ -430,6 +431,17 @@ function App() {
       loadSpotAccumMarket();
       addLog(`Spot ${coin}: ${currentlyBlocked?"débloqué":"bloqué"}`,"system");
     } catch(e){ addLog("Erreur: "+e.message,"error"); }
+  };
+  // Bascule marche/arrêt générique — bloque UNIQUEMENT l'ouverture de nouveaux trades pour le
+  // mode concerné, les positions déjà ouvertes continuent d'être gérées normalement (aucun de
+  // ces toggles n'affecte manage_open_trade / manage_spot_holdings, indépendants).
+  const toggleModeEnabled = async (configKey, currentValue, setter, label) => {
+    const v = !currentValue;
+    setter(v);
+    try {
+      await apiCall("/api/config","PUT",{[configKey]:v},token);
+      addLog(`${label}: ${v?"▶️ Marche":"⏸️ Arrêt"} — les positions déjà ouvertes continuent normalement`,"system");
+    } catch(e){ addLog("Erreur: "+e.message,"error"); setter(!v); }
   };
   const [hlRealBalance, setHlRealBalance] = useState(null);
   const [newCondType, setNewCondType] = useState("PRICE_BELOW");
@@ -505,6 +517,7 @@ function App() {
       setRangeTradingEnabled(!!cfg?.range_trading_enabled);
       setSpotAccumEnabled(!!cfg?.spot_accum_enabled);
       setSpotRotationEnabled(!!cfg?.spot_accum_rotation_enabled);
+      setMainBotEnabled(cfg?.main_bot_enabled !== 0);
       if(cfg?.finnhub_key_preview) setFinnhubKey(cfg?.finnhub_key_preview);
       setFilterWeekend(cfg?.filter_weekend === 1); // OFF par défaut pour crypto
       setFilterMacro(cfg?.filter_macro === 1);
@@ -1376,6 +1389,16 @@ Confirmer ?`
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
               <div>
+                <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>🎯 Mode Bot principal (suivi de tendance)</div>
+                <div style={{fontSize:10,color:"#334155"}}>Indépendant de PAPER/LIVE et de l'interrupteur global — désactivé ici, le bot principal n'ouvre plus de nouveaux trades, mais les positions déjà ouvertes continuent d'être gérées normalement (Max Loss, trailing). Activé par défaut.</div>
+              </div>
+              <button onClick={()=>toggleModeEnabled("main_bot_enabled", mainBotEnabled, setMainBotEnabled, "Bot principal")} style={{background:mainBotEnabled?"#052e16":"#0f1629",border:mainBotEnabled?"1px solid #34d399":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:mainBotEnabled?"#34d399":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                {mainBotEnabled?"✅ ON":"⭕ OFF"}
+              </button>
+            </div>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0f1629"}}>
+              <div>
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation LONG (achat auto sur support + retournement confirmé)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (momentum cohérent + MACD + ATR cohérent avec le SL), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
               </div>
@@ -1752,6 +1775,26 @@ Confirmer ?`
               </button>
             ))}
           </div>
+
+          {paperSubTab !== "all" && (() => {
+            const modeMap = {
+              principal: {key:"main_bot_enabled", val:mainBotEnabled, setter:setMainBotEnabled, label:"Bot principal"},
+              accumulation: {key:"accumulation_enabled", val:accumulationEnabled, setter:setAccumulationEnabled, label:"Accumulation LONG"},
+              breakout: {key:"breakout_enabled", val:breakoutEnabled, setter:setBreakoutEnabled, label:"Breakout LONG"},
+              range: {key:"range_trading_enabled", val:rangeTradingEnabled, setter:setRangeTradingEnabled, label:"Range Trading"},
+              spot: {key:"spot_accum_enabled", val:spotAccumEnabled, setter:setSpotAccumEnabled, label:"Spot Accumulation"},
+            };
+            const m = modeMap[paperSubTab];
+            if (!m) return null;
+            return (
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1629",border:"1px solid #1e2d4a",borderRadius:8,padding:"8px 14px",marginBottom:12}}>
+                <span style={{fontSize:10,color:"#94a3b8"}}>{m.label} — {m.val?"ouvre normalement de nouveaux trades":"n'ouvre plus de nouveaux trades (les positions déjà ouvertes continuent normalement)"}</span>
+                <button onClick={()=>toggleModeEnabled(m.key, m.val, m.setter, m.label)} style={{background:m.val?"#052e16":"#2d0a0a",border:m.val?"1px solid #34d399":"1px solid #f87171",borderRadius:6,padding:"5px 12px",color:m.val?"#34d399":"#f87171",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                  {m.val?"▶️ Marche":"⏸️ Arrêt"}
+                </button>
+              </div>
+            );
+          })()}
 
           <div style={{display:"grid",gridTemplateColumns:"1fr 420px",gap:16,alignItems:"start"}}>
             {/* COLONNE GAUCHE — Trades ouverts + Historique, remontés */}
@@ -3050,6 +3093,8 @@ Confirmer ?`
           {/* BOT PRINCIPAL */}
           <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:12,padding:16,marginBottom:12}}>
             <div style={{fontSize:26,fontWeight:700,color:"#93c5fd",marginBottom:10}}>🤖 Bot principal</div>
+
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f8fafc"}}>Interrupteur marche/arrêt dédié</b> (indépendant de PAPER/LIVE et de l'interrupteur global) — désactivé, le bot principal n'ouvre plus de nouveaux trades, mais les positions déjà ouvertes continuent d'être gérées normalement. Même principe pour les 4 autres modes (Accumulation, Breakout, Range Trading, Spot Accumulation) — chacun a son propre interrupteur, visible dans Paramètres et dupliqué dans son sous-onglet Paper Trading.</div>
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée — 4 conditions (simplifié depuis ~10, empilées elles laissaient passer trop peu de trades)</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
