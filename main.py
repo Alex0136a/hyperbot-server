@@ -1566,6 +1566,23 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        # Liste de blocage d'actifs SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici ne sera
+        # jamais candidat pour ce mode, même s'il reste actif pour tous les autres modes
+        # (bot principal, Accumulation, Breakout, Range Trading). Permet d'exclure un actif aux
+        # mauvaises performances sans le retirer de la liste globale.
+        conn.execute("""CREATE TABLE IF NOT EXISTS spot_accum_blocked_coins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            coin TEXT NOT NULL,
+            blocked_at TEXT DEFAULT (datetime('now')),
+            reason TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, coin)
+        )""")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ Échec création spot_accum_blocked_coins: {e}")
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -3466,6 +3483,13 @@ async def scan_markets(user_id: int):
         # Liste vide tant que l'historique est insuffisant (< min_trades par coin) — dans ce cas,
         # aucune restriction n'est appliquée (pas encore assez de recul).
         accumulation_top_coins = top_performing_coins if config and config["accumulation_enabled"] else []
+        conn_spot_blocked = get_db()
+        spot_accum_blocked_set = set(
+            r["coin"] for r in conn_spot_blocked.execute(
+                "SELECT coin FROM spot_accum_blocked_coins WHERE user_id=?", (user_id,)
+            ).fetchall()
+        )
+        conn_spot_blocked.close()
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
         breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
@@ -3932,7 +3956,7 @@ async def scan_markets(user_id: int):
             # minimum bien plus large (2.5% par défaut, contre 0.5% pour l'Accumulation à
             # levier) — pas de Max Loss ici, donc pas question d'entrer sur un mouvement de
             # bruit : il faut un vrai va-et-vient qui vaut la peine d'être tenu jusqu'au bout.
-            if config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] and support and resistance:
+            if config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] and coin not in spot_accum_blocked_set and support and resistance:
                 spot_channel_pct = (resistance - support) / support * 100
                 spot_min_channel = config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5
                 if spot_channel_pct >= spot_min_channel:
@@ -6646,6 +6670,69 @@ def get_spot_holdings(user_id: int = Depends(get_current_user)):
     conn.close()
     return {"open": [dict(h) for h in open_h], "closed": [dict(h) for h in closed_h]}
 
+@app.get("/api/spot-accum/market")
+def get_spot_accum_market(user_id: int = Depends(get_current_user)):
+    """Liste des actifs actifs (mêmes coins que le reste du bot) avec leur statut de blocage
+    SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici reste actif pour tous les autres modes."""
+    conn = get_db()
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
+    blocked_rows = conn.execute("SELECT coin, blocked_at, reason FROM spot_accum_blocked_coins WHERE user_id=?", (user_id,)).fetchall()
+    blocked_map = {r["coin"]: {"blocked_at": r["blocked_at"], "reason": r["reason"]} for r in blocked_rows}
+    conn.close()
+    coins = [{"coin": c, "blocked": c in blocked_map, "blocked_at": blocked_map.get(c, {}).get("blocked_at"), "reason": blocked_map.get(c, {}).get("reason")} for c in active_coins]
+    return {"coins": coins}
+
+class SpotAccumBlockRequest(BaseModel):
+    coin: str
+    reason: Optional[str] = None
+
+@app.post("/api/spot-accum/block")
+def block_spot_accum_coin(req: SpotAccumBlockRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO spot_accum_blocked_coins (user_id, coin, blocked_at, reason) VALUES (?,?,datetime('now'),?)",
+                 (user_id, req.coin, req.reason))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🚫🪙 Spot Accumulation: {req.coin} bloqué manuellement" + (f" ({req.reason})" if req.reason else "") + " — ce mode ne l'utilisera plus, les autres modes ne sont pas affectés", "info")
+    return {"success": True}
+
+@app.post("/api/spot-accum/unblock")
+def unblock_spot_accum_coin(req: SpotAccumBlockRequest, user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    conn.execute("DELETE FROM spot_accum_blocked_coins WHERE user_id=? AND coin=?", (user_id, req.coin))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"✅🪙 Spot Accumulation: {req.coin} débloqué", "info")
+    return {"success": True}
+
+@app.get("/api/spot-accum/performance")
+def get_spot_accum_performance(user_id: int = Depends(get_current_user)):
+    """Classement par actif sur l'historique CLÔTURÉ Spot Accumulation — sert à repérer les
+    actifs aux mauvaises performances à bloquer via /api/spot-accum/block."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT coin, COUNT(*) as total,
+            SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as net_pnl,
+            AVG(pnl_pct) as avg_pnl_pct
+        FROM spot_holdings WHERE user_id=? AND status='CLOSED'
+        GROUP BY coin ORDER BY net_pnl ASC
+    """, (user_id,)).fetchall()
+    conn.close()
+    ranking = []
+    for r in rows:
+        total = r["total"] or 0
+        wins = r["wins"] or 0
+        ranking.append({
+            "coin": r["coin"], "total": total, "wins": wins, "losses": r["losses"] or 0,
+            "win_rate": round(wins / total * 100, 1) if total else 0,
+            "net_pnl": round(r["net_pnl"] or 0, 4),
+            "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3),
+        })
+    return {"ranking": ranking}
+
 class UpdateSpotTargetRequest(BaseModel):
     holding_id: int
     target_pct: Optional[float] = None
@@ -8231,7 +8318,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.17"
+BACKEND_BUILD_VERSION = "2026-08-20.18"
 
 @app.get("/api/version")
 def get_version():
