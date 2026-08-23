@@ -1590,6 +1590,23 @@ def init_db():
         conn.commit()
     except Exception as e:
         print(f"⚠️ Échec création spot_accum_blocked_coins: {e}")
+    try:
+        # Blocage par mode GÉNÉRIQUE — un actif peut être bloqué indépendamment sur chaque
+        # mode (bot principal, Accumulation, Breakout, Range Trading), car un même coin ne se
+        # comporte pas forcément pareil selon la stratégie. Spot Accumulation garde sa propre
+        # table dédiée (spot_accum_blocked_coins), déjà en place et fonctionnelle.
+        conn.execute("""CREATE TABLE IF NOT EXISTS mode_blocked_coins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            coin TEXT NOT NULL,
+            blocked_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, mode, coin)
+        )""")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ Échec création mode_blocked_coins: {e}")
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -3497,6 +3514,15 @@ async def scan_markets(user_id: int):
             ).fetchall()
         )
         conn_spot_blocked.close()
+        conn_mode_blocked = get_db()
+        mode_blocked_rows = conn_mode_blocked.execute(
+            "SELECT mode, coin FROM mode_blocked_coins WHERE user_id=?", (user_id,)
+        ).fetchall()
+        conn_mode_blocked.close()
+        main_bot_blocked_set = set(r["coin"] for r in mode_blocked_rows if r["mode"] == "main")
+        accumulation_blocked_set = set(r["coin"] for r in mode_blocked_rows if r["mode"] == "accumulation")
+        breakout_blocked_set = set(r["coin"] for r in mode_blocked_rows if r["mode"] == "breakout")
+        range_blocked_set = set(r["coin"] for r in mode_blocked_rows if r["mode"] == "range")
         accumulation_candidates = []  # rempli pendant la boucle, traité après (priorité top-10 sans exclure les autres)
         breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
@@ -3614,7 +3640,7 @@ async def scan_markets(user_id: int):
                 qualifies = biais_direction is not None and biais_confiance >= 70
 
             if qualifies:
-                if config and config["range_trading_enabled"]:
+                if config and config["range_trading_enabled"] and coin not in range_blocked_set:
                     range_trade_candidates.append({
                         "coin": coin, "action": biais_direction, "confidence": biais_confiance,
                         "support": support, "resistance": resistance, "channel_pct": channel_pct,
@@ -3658,7 +3684,7 @@ async def scan_markets(user_id: int):
             # retournement DANS le range (Accumulation), on entre quand le prix CASSE le range,
             # confirmé par un dépassement du niveau (marge de confirmation) ET une expansion de
             # volume sur la bougie de cassure. Système de momentum, pas de retour à la moyenne.
-            if config and (config["breakout_enabled"] or config["breakout_short_enabled"]) and resistance and support:
+            if config and (config["breakout_enabled"] or config["breakout_short_enabled"]) and coin not in breakout_blocked_set and resistance and support:
                 breakout_scanned_count += 1
                 buf_bo = config["breakout_confirm_buffer_pct"] if "breakout_confirm_buffer_pct" in config.keys() and config["breakout_confirm_buffer_pct"] is not None else 0.3
                 vol_mult_bo = config["breakout_volume_mult"] if "breakout_volume_mult" in config.keys() and config["breakout_volume_mult"] is not None else 1.5
@@ -3742,7 +3768,7 @@ async def scan_markets(user_id: int):
             # conditions est éligible. Le top-10 sert uniquement de PRIORITÉ en cas de conflit
             # (plafond de positions atteint) — traité après la boucle, une fois tous les
             # candidats de ce cycle connus.
-            if config and config["accumulation_enabled"] and rsi is not None:
+            if config and config["accumulation_enabled"] and coin not in accumulation_blocked_set and rsi is not None:
                 # RSI n'est plus un filtre de zone obligatoire — la détection part maintenant de
                 # la proximité support/résistance + tendance, avec le momentum et l'ATR comme
                 # garde-fous de qualité plutôt qu'un simple couloir RSI. RSI reste utilisé plus
@@ -3862,7 +3888,7 @@ async def scan_markets(user_id: int):
             # Miroir SHORT — switch, plafond de positions et levier séparés du LONG. Même
             # logique inversée : RSI haut (surachat) + résistance détectée + retournement
             # baissier confirmé (bougie rouge + RSI qui redescend OU MACD qui devient baissier).
-            if config and config["accumulation_short_enabled"] and rsi is not None:
+            if config and config["accumulation_short_enabled"] and coin not in accumulation_blocked_set and rsi is not None:
                 diag_key_short = (user_id, coin, "SHORT")
                 last_diag_short = accumulation_diagnostic_cache.get(diag_key_short)
                 should_log_diag_short = not last_diag_short or (datetime.utcnow() - last_diag_short).total_seconds() >= ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS * 3600
@@ -4071,6 +4097,8 @@ async def scan_markets(user_id: int):
             # scanner/ouvrir sans interruption.
             main_bot_enabled = config["main_bot_enabled"] if config and "main_bot_enabled" in config.keys() and config["main_bot_enabled"] is not None else 1
             if not main_bot_enabled:
+                continue
+            if coin in main_bot_blocked_set:
                 continue
             
             # Skip les coins opportunistes si confiance pas encore connue
@@ -6739,6 +6767,27 @@ def unblock_spot_accum_coin(req: SpotAccumBlockRequest, user_id: int = Depends(g
     add_bot_log(user_id, f"✅🪙 Spot Accumulation: {req.coin} débloqué", "info")
     return {"success": True}
 
+@app.post("/api/spot-accum/block-all")
+def block_all_spot_accum_coins(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
+    for c in active_coins:
+        conn.execute("INSERT OR REPLACE INTO spot_accum_blocked_coins (user_id, coin, blocked_at) VALUES (?,?,datetime('now'))", (user_id, c))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🚫🪙 Spot Accumulation: tous les actifs ({len(active_coins)}) bloqués d'un coup", "info")
+    return {"success": True, "count": len(active_coins)}
+
+@app.post("/api/spot-accum/unblock-all")
+def unblock_all_spot_accum_coins(user_id: int = Depends(get_current_user)):
+    conn = get_db()
+    conn.execute("DELETE FROM spot_accum_blocked_coins WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, "✅🪙 Spot Accumulation: tous les actifs débloqués d'un coup", "info")
+    return {"success": True}
+
 @app.get("/api/spot-accum/performance")
 def get_spot_accum_performance(user_id: int = Depends(get_current_user)):
     """Classement par actif sur l'historique CLÔTURÉ Spot Accumulation — sert à repérer les
@@ -6773,6 +6822,76 @@ def get_spot_accum_performance(user_id: int = Depends(get_current_user)):
             "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3),
         })
     return {"ranking": ranking, "total_gains": total_gains, "total_losses": total_losses, "net": round(total_gains + total_losses, 4)}
+
+VALID_MODES = ("main", "accumulation", "breakout", "range")
+MODE_LABELS = {"main": "Bot principal", "accumulation": "Accumulation", "breakout": "Breakout", "range": "Range Trading"}
+
+@app.get("/api/mode-coins/{mode}")
+def get_mode_coins(mode: str, user_id: int = Depends(get_current_user)):
+    """Liste des actifs actifs avec leur statut de blocage SPÉCIFIQUE à ce mode — un coin
+    bloqué ici reste actif pour tous les autres modes. Même principe que /api/spot-accum/market,
+    généralisé aux 4 autres modes (bot principal, Accumulation, Breakout, Range Trading)."""
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
+    blocked_rows = conn.execute("SELECT coin, blocked_at FROM mode_blocked_coins WHERE user_id=? AND mode=?", (user_id, mode)).fetchall()
+    blocked_map = {r["coin"]: r["blocked_at"] for r in blocked_rows}
+    conn.close()
+    coins = [{"coin": c, "blocked": c in blocked_map, "blocked_at": blocked_map.get(c)} for c in active_coins]
+    return {"mode": mode, "coins": coins}
+
+class ModeCoinBlockRequest(BaseModel):
+    coin: str
+
+@app.post("/api/mode-coins/{mode}/block")
+def block_mode_coin(mode: str, req: ModeCoinBlockRequest, user_id: int = Depends(get_current_user)):
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO mode_blocked_coins (user_id, mode, coin, blocked_at) VALUES (?,?,?,datetime('now'))",
+                 (user_id, mode, req.coin))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🚫 {MODE_LABELS[mode]}: {req.coin} bloqué manuellement — les autres modes ne sont pas affectés", "info")
+    return {"success": True}
+
+@app.post("/api/mode-coins/{mode}/unblock")
+def unblock_mode_coin(mode: str, req: ModeCoinBlockRequest, user_id: int = Depends(get_current_user)):
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    conn.execute("DELETE FROM mode_blocked_coins WHERE user_id=? AND mode=? AND coin=?", (user_id, mode, req.coin))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"✅ {MODE_LABELS[mode]}: {req.coin} débloqué", "info")
+    return {"success": True}
+
+@app.post("/api/mode-coins/{mode}/block-all")
+def block_all_mode_coins(mode: str, user_id: int = Depends(get_current_user)):
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    config = conn.execute("SELECT active_coins FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    active_coins = json.loads(config["active_coins"]) if config and config["active_coins"] else []
+    for c in active_coins:
+        conn.execute("INSERT OR REPLACE INTO mode_blocked_coins (user_id, mode, coin, blocked_at) VALUES (?,?,?,datetime('now'))", (user_id, mode, c))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🚫 {MODE_LABELS[mode]}: tous les actifs ({len(active_coins)}) bloqués d'un coup — les autres modes ne sont pas affectés", "info")
+    return {"success": True, "count": len(active_coins)}
+
+@app.post("/api/mode-coins/{mode}/unblock-all")
+def unblock_all_mode_coins(mode: str, user_id: int = Depends(get_current_user)):
+    if mode not in VALID_MODES:
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    conn = get_db()
+    conn.execute("DELETE FROM mode_blocked_coins WHERE user_id=? AND mode=?", (user_id, mode))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"✅ {MODE_LABELS[mode]}: tous les actifs débloqués d'un coup", "info")
+    return {"success": True}
 
 class UpdateSpotTargetRequest(BaseModel):
     holding_id: int
@@ -8359,7 +8478,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.21"
+BACKEND_BUILD_VERSION = "2026-08-20.22"
 
 @app.get("/api/version")
 def get_version():
