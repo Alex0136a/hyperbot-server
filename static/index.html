@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.22";
+const APP_BUILD_VERSION = "2026-08-20.23";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1452,10 +1452,7 @@ Confirmer ?`
                 <div style={{fontSize:11,color:"#94a3b8",fontWeight:700}}>💰 Mode Accumulation LONG (achat auto sur support + retournement confirmé)</div>
                 <div style={{fontSize:10,color:"#334155"}}>Achète sans levier sur support confirmé (momentum cohérent + MACD + ATR cohérent avec le SL), taille en % du capital (compound). Revend au % de gain visé, ou si le support casse pour de bon (marge réglable). Désactivé par défaut. Réglages dans "Réglages avancés"</div>
               </div>
-              <button onClick={()=>{
-                const v=!accumulationEnabled; setAccumulationEnabled(v);
-                apiCall("/api/config/filters","PUT",{"accumulation_enabled":v},token);
-              }} style={{background:accumulationEnabled?"#1e3a5f22":"#0f1629",border:accumulationEnabled?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:accumulationEnabled?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
+              <button onClick={()=>toggleModeEnabled("accumulation_enabled", accumulationEnabled, setAccumulationEnabled, "Accumulation LONG")} style={{background:accumulationEnabled?"#1e3a5f22":"#0f1629",border:accumulationEnabled?"1px solid #60a5fa":"1px solid #1e2d4a",borderRadius:6,padding:"6px 14px",color:accumulationEnabled?"#60a5fa":"#475569",fontSize:10,cursor:"pointer",fontWeight:700}}>
                 {accumulationEnabled?"✅ ON":"⭕ OFF"}
               </button>
             </div>
