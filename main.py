@@ -5315,6 +5315,19 @@ async def connect_hyperliquid_ws():
                                     cur = float(mids[coin])
                                     await process_trade_on_price(trade["user_id"], trade, cur, conn)
 
+                            # Holdings Spot Accumulation — même principe que ci-dessus : la
+                            # surveillance (objectif/trailing/repositionnement) ne doit JAMAIS
+                            # dépendre de is_running, sous peine de laisser un holding sans
+                            # capital protection réelle (ce mode n'a déjà pas de Max Loss par
+                            # conception — le laisser aussi sans surveillance quand le bot est
+                            # arrêté serait pire encore).
+                            open_holdings_ws = conn.execute(
+                                "SELECT DISTINCT user_id FROM spot_holdings WHERE status='OPEN'"
+                            ).fetchall()
+                            ws_prices_float = {k: float(v) for k, v in mids.items()}
+                            for row in open_holdings_ws:
+                                await manage_spot_holdings(row["user_id"], ws_prices_float)
+
                             # Ordres programmés à condition de PRIX — vérifiés à chaque tick temps
                             # réel (pas seulement au cycle de scan ~3min), indépendamment de
                             # is_running (une intention manuelle de l'utilisateur, pas de l'auto-trading)
@@ -5417,13 +5430,18 @@ async def update_open_positions(user_id: int):
     """Filet de secours (toutes les 5s, uniquement si le WebSocket est déconnecté) :
     appelle EXACTEMENT la même fonction que le WebSocket et scan_markets — manage_open_trade —
     pour que le Trailing Profit / Max Loss continue à s'appliquer même pendant une coupure WS.
-    Aucune logique de fermeture propre ici : un seul cerveau, plusieurs déclencheurs."""
+    Aucune logique de fermeture propre ici : un seul cerveau, plusieurs déclencheurs.
+    Gère aussi les holdings Spot Accumulation, pour la même raison — leur surveillance ne doit
+    dépendre ni de is_running ni de l'état du WebSocket."""
     conn = get_db()
     paper_trades = conn.execute(
         "SELECT * FROM paper_trades WHERE user_id=? AND status='OPEN'",
         (user_id,)
     ).fetchall()
-    if not paper_trades:
+    spot_holdings_open = conn.execute(
+        "SELECT id FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)
+    ).fetchall()
+    if not paper_trades and not spot_holdings_open:
         conn.close()
         return
     # Utiliser WebSocket si disponible, sinon REST
@@ -5432,6 +5450,8 @@ async def update_open_positions(user_id: int):
     else:
         async with httpx.AsyncClient() as client:
             prices = await fetch_all_metas(client)
+    if spot_holdings_open:
+        await manage_spot_holdings(user_id, prices)
     for trade in paper_trades:
         trade = dict(trade)
         cur = prices.get(trade["coin"])
@@ -8157,7 +8177,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.13"
+BACKEND_BUILD_VERSION = "2026-08-20.14"
 
 @app.get("/api/version")
 def get_version():
