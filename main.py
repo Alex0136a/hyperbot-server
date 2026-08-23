@@ -539,6 +539,13 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Interrupteur dédié au bot principal — indépendant de is_running (global, arrête toute
+        # la boucle de scan). Activé par défaut (1) pour ne rien changer au comportement
+        # existant tant que l'utilisateur ne l'a pas explicitement désactivé.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN main_bot_enabled INTEGER DEFAULT 1")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_max_positions INTEGER DEFAULT 5")
         conn.commit()
     except: pass
@@ -4055,6 +4062,16 @@ async def scan_markets(user_id: int):
             if coin_already_open and not ai_continuous:
                 add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte - analyse IA skippée", "info")
                 continue
+
+            # Interrupteur dédié au bot principal — indépendant de is_running (qui arrête TOUTE
+            # la boucle de scan, y compris la détection des autres modes). Désactivé ici, le
+            # bot principal n'ouvre plus rien de nouveau, mais les positions déjà ouvertes
+            # continuent d'être gérées normalement (même fonction manage_open_trade que tout le
+            # reste, appelée indépendamment de ce toggle) — et les autres modes continuent de
+            # scanner/ouvrir sans interruption.
+            main_bot_enabled = config["main_bot_enabled"] if config and "main_bot_enabled" in config.keys() and config["main_bot_enabled"] is not None else 1
+            if not main_bot_enabled:
+                continue
             
             # Skip les coins opportunistes si confiance pas encore connue
             # (on les analyse quand même mais on filtre après)
@@ -5752,6 +5769,7 @@ class UpdateConfigRequest(BaseModel):
     range_trading_trailing_main_pct: Optional[float] = None
     range_trading_trailing_gap_pct: Optional[float] = None
     spot_accum_enabled: Optional[bool] = None
+    main_bot_enabled: Optional[bool] = None
     spot_accum_max_positions: Optional[int] = None
     spot_accum_min_channel_pct: Optional[float] = None
     spot_accum_proximity_pct: Optional[float] = None
@@ -5964,6 +5982,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "range_trading_trailing_main_pct": config["range_trading_trailing_main_pct"] if "range_trading_trailing_main_pct" in config.keys() and config["range_trading_trailing_main_pct"] is not None else 1.0,
         "range_trading_trailing_gap_pct": config["range_trading_trailing_gap_pct"] if "range_trading_trailing_gap_pct" in config.keys() and config["range_trading_trailing_gap_pct"] is not None else 0.42,
         "spot_accum_enabled": config["spot_accum_enabled"] if "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] is not None else 0,
+        "main_bot_enabled": config["main_bot_enabled"] if "main_bot_enabled" in config.keys() and config["main_bot_enabled"] is not None else 1,
         "spot_accum_max_positions": config["spot_accum_max_positions"] if "spot_accum_max_positions" in config.keys() and config["spot_accum_max_positions"] else 5,
         "spot_accum_min_channel_pct": config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5,
         "spot_accum_proximity_pct": config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0,
@@ -6156,6 +6175,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET range_trading_trailing_gap_pct=? WHERE user_id=?", (req.range_trading_trailing_gap_pct, user_id))
     if req.spot_accum_enabled is not None:
         conn.execute("UPDATE bot_config SET spot_accum_enabled=? WHERE user_id=?", (1 if req.spot_accum_enabled else 0, user_id))
+    if req.main_bot_enabled is not None:
+        conn.execute("UPDATE bot_config SET main_bot_enabled=? WHERE user_id=?", (1 if req.main_bot_enabled else 0, user_id))
     if req.spot_accum_max_positions is not None:
         conn.execute("UPDATE bot_config SET spot_accum_max_positions=? WHERE user_id=?", (req.spot_accum_max_positions, user_id))
     if req.spot_accum_min_channel_pct is not None:
@@ -8338,7 +8359,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.20"
+BACKEND_BUILD_VERSION = "2026-08-20.21"
 
 @app.get("/api/version")
 def get_version():
