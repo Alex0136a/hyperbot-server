@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.23";
+const APP_BUILD_VERSION = "2026-08-20.24";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1849,8 +1849,8 @@ Confirmer ?`
                   {[{id:"positions",label:"📈 Positions"},{id:"marche",label:"🗺️ Marché"},{id:"performance",label:"🏆 Performance"}].map(it=>(
                     <button key={it.id} onClick={()=>{
                       setModeInnerTab(it.id);
-                      if (it.id==="marche" && !marketData) loadModeMarket(m.endpointMode);
-                      if (it.id==="performance" && !perfData) loadModePerf(m.endpointMode);
+                      if (it.id==="marche") loadModeMarket(m.endpointMode);
+                      if (it.id==="performance") loadModePerf(m.endpointMode);
                     }} style={{padding:"5px 10px",borderRadius:5,border:modeInnerTab===it.id?"1px solid #60a5fa":"1px solid #1e2d4a",background:modeInnerTab===it.id?"#0f1629":"transparent",color:modeInnerTab===it.id?"#60a5fa":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>
                       {it.label}
                     </button>
@@ -2032,8 +2032,8 @@ Confirmer ?`
                   {[{id:"positions",label:"📈 Positions"},{id:"marche",label:"🗺️ Marché"},{id:"performance",label:"🏆 Performance"}].map(st=>(
                     <button key={st.id} onClick={()=>{
                       setSpotAccumSubTab(st.id);
-                      if (st.id==="marche" && !spotAccumMarket) loadSpotAccumMarket();
-                      if (st.id==="performance" && !spotAccumPerf) loadSpotAccumPerf();
+                      if (st.id==="marche") loadSpotAccumMarket();
+                      if (st.id==="performance") loadSpotAccumPerf();
                     }} style={{padding:"5px 10px",borderRadius:5,border:spotAccumSubTab===st.id?"1px solid #facc15":"1px solid #3d3a0a",background:spotAccumSubTab===st.id?"#1a1706":"transparent",color:spotAccumSubTab===st.id?"#facc15":"#475569",fontSize:10,fontWeight:700,cursor:"pointer"}}>
                       {st.label}
                     </button>
