@@ -2065,7 +2065,16 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
         inner_statuses = []
     if inner_statuses and "error" in inner_statuses[0]:
         raise RuntimeError(f"Ordre rejeté par Hyperliquid: {inner_statuses[0]['error']}")
-    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+    # BUG CORRIGÉ : "resting" (ordre accepté mais posé sur le carnet, PAS ENCORE rempli) était
+    # traité comme un succès au même titre que "filled" — le code retombait alors sur cur_price
+    # comme si l'ordre avait été exécuté, enregistrait une position en base de données, et
+    # posait même un SL de sécurité dessus, alors qu'AUCUNE position réelle n'existait sur
+    # Hyperliquid. Résultat concret observé : plusieurs "succès" loggés côté bot, rien de
+    # visible côté exchange. Seul "filled" confirme un remplissage réel — "resting" est
+    # désormais traité comme un échec (nouvelle tentative au prochain cycle), pas un succès.
+    if not inner_statuses or "filled" not in inner_statuses[0]:
+        if inner_statuses and "resting" in inner_statuses[0]:
+            raise RuntimeError(f"Ordre accepté mais PAS rempli (en attente sur le carnet Hyperliquid, 'resting') — aucune position réelle ouverte, annulé par sécurité plutôt que d'enregistrer une position fictive: {result}")
         raise RuntimeError(f"Statut d'ordre inattendu/non confirmé par Hyperliquid: {result}")
 
     # Prix de fill réel (si l'exchange le renvoie) — plus fiable qu'une estimation locale
@@ -2140,7 +2149,13 @@ def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = N
         inner_statuses = []
     if inner_statuses and "error" in inner_statuses[0]:
         raise RuntimeError(f"Fermeture rejetée par Hyperliquid: {inner_statuses[0]['error']}")
-    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+    # BUG CORRIGÉ (même défaut que hl_open_position, encore plus grave ici) : "resting" ne
+    # confirme PAS que la position a été fermée — elle resterait réellement ouverte sur
+    # Hyperliquid, mais le bot la marquerait comme fermée en base et arrêterait toute
+    # surveillance dessus (Max Loss, trailing...), la laissant sans aucune protection.
+    if not inner_statuses or "filled" not in inner_statuses[0]:
+        if inner_statuses and "resting" in inner_statuses[0]:
+            raise RuntimeError(f"Fermeture acceptée mais PAS confirmée (ordre en attente sur le carnet, 'resting') — la position pourrait rester réellement ouverte, nouvelle tentative au prochain cycle: {result}")
         raise RuntimeError(f"Statut de fermeture inattendu/non confirmé par Hyperliquid: {result}")
     return result
 
@@ -2174,7 +2189,10 @@ def hl_spot_buy(account_address: str, coin: str, size_usdc: float, cur_price: fl
         inner_statuses = []
     if inner_statuses and "error" in inner_statuses[0]:
         raise RuntimeError(f"Achat spot rejeté par Hyperliquid: {inner_statuses[0]['error']}")
-    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+    # BUG CORRIGÉ (même défaut que hl_open_position) : "resting" ne confirme pas un achat réel.
+    if not inner_statuses or "filled" not in inner_statuses[0]:
+        if inner_statuses and "resting" in inner_statuses[0]:
+            raise RuntimeError(f"Achat spot accepté mais PAS rempli (en attente sur le carnet, 'resting') — aucun achat réel confirmé, annulé par sécurité: {result}")
         raise RuntimeError(f"Statut d'achat spot inattendu/non confirmé: {result}")
 
     fill_price = cur_price
@@ -2202,7 +2220,11 @@ def hl_spot_sell(account_address: str, coin: str, qty: float):
         inner_statuses = []
     if inner_statuses and "error" in inner_statuses[0]:
         raise RuntimeError(f"Vente spot rejetée par Hyperliquid: {inner_statuses[0]['error']}")
-    if not inner_statuses or not any(k in inner_statuses[0] for k in ("filled", "resting")):
+    # BUG CORRIGÉ (même défaut que hl_close_position) : "resting" ne confirme pas la vente —
+    # le holding resterait réellement ouvert sur Hyperliquid alors que le bot le croit fermé.
+    if not inner_statuses or "filled" not in inner_statuses[0]:
+        if inner_statuses and "resting" in inner_statuses[0]:
+            raise RuntimeError(f"Vente spot acceptée mais PAS confirmée (en attente sur le carnet, 'resting') — le holding pourrait rester réellement ouvert, nouvelle tentative au prochain cycle: {result}")
         raise RuntimeError(f"Statut de vente spot inattendu/non confirmé: {result}")
 
     fill_price = None
@@ -8591,7 +8613,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.29"
+BACKEND_BUILD_VERSION = "2026-08-20.30"
 
 @app.get("/api/version")
 def get_version():
