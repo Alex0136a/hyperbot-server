@@ -563,11 +563,25 @@ def init_db():
         # mouvement observé sur ce coin précis. 85% par défaut (pas 100%) — viser l'amplitude
         # complète attend souvent un peu trop, 85% se déclenche plus facilement tout en restant
         # ambitieux. Modifiable par holding individuel (voir /api/spot-holdings/target).
-        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_target_ratio_pct REAL DEFAULT 85.0")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_target_ratio_pct REAL DEFAULT 70.0")
         conn.commit()
     except: pass
     try:
         conn.execute("UPDATE bot_config SET spot_accum_target_ratio_pct=85.0 WHERE spot_accum_target_ratio_pct=100.0")
+        conn.commit()
+    except: pass
+    try:
+        # Relevé à 70% (au lieu de 85%) — objectif se déclenche plus facilement, suivi d'un
+        # trailing pour laisser courir au-delà.
+        conn.execute("UPDATE bot_config SET spot_accum_target_ratio_pct=70.0 WHERE spot_accum_target_ratio_pct=85.0")
+        conn.commit()
+    except: pass
+    try:
+        # Stop Loss SIMPLE et INCONDITIONNEL — ajouté après expérience réelle : le principe
+        # "aucune perte forcée" ne fonctionne pas bien en pratique sur Hyperliquid (capital
+        # bloqué trop longtemps sur des positions qui ne remontent jamais). Vend dès que la
+        # perte atteint ce seuil, sans confirmation ni condition — modifiable.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_max_loss_pct REAL DEFAULT 1.5")
         conn.commit()
     except: pass
     try:
@@ -3244,40 +3258,19 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
     if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR", "EARLY_FLOOR"):
         await try_rapid_reentry(user_id, trade, conn)
 
-def _spot_bearish_reversal_confirmed(coin: str, tech_by_coin: dict) -> bool:
-    """Retournement BAISSIER confirmé pour ce coin — prix qui redescend depuis le plus haut
-    récent + RSI qui redescend + MACD baissier. Nécessite les données techniques du cycle de
-    scan (RSI/MACD/closes), absentes des vérifications temps réel (WebSocket/filet 5s) — ces
-    deux checks (stop loss sur retournement, trailing conditionné) ne s'évaluent donc qu'au
-    cycle de scan (~3min), pas à chaque tick de prix."""
-    if not tech_by_coin or coin not in tech_by_coin:
-        return False
-    t = tech_by_coin[coin]
-    closes = t.get("closes") or []
-    price = t.get("price")
-    rsi = t.get("rsi")
-    rsi_prev = t.get("rsi_prev")
-    macd_bear = t.get("macd_bear")
-    if price is None or rsi is None or rsi_prev is None or macd_bear is None or len(closes) < 3:
-        return False
-    recent_high = max(closes[-3:])
-    price_declining = price < recent_high * 0.999
-    rsi_falling = rsi < rsi_prev
-    return bool(price_declining and rsi_falling and macd_bear)
-
-async def manage_spot_holdings(user_id: int, prices: dict, tech_by_coin: dict = None):
-    """Gère les holdings Spot Accumulation ouverts — AUCUN Max Loss classique, par conception :
-    un holding perdant reste tenu (pas de vente juste parce qu'il est dans le rouge). Sortie sur
-    plusieurs mécanismes distincts : cassure de support confirmée (repositionnement), stop loss
-    sur retournement baissier confirmé, trailing conditionné au retournement une fois l'objectif
-    atteint, et un plafond absolu de PnL (vend sans attendre de confirmation)."""
+async def manage_spot_holdings(user_id: int, prices: dict):
+    """Gère les holdings Spot Accumulation ouverts — Stop Loss simple et inconditionnel (ajouté
+    après expérience réelle, le principe "aucune perte forcée" ne fonctionnant pas bien en
+    pratique sur Hyperliquid), sortie sur objectif (% de l'amplitude du canal à l'achat) puis
+    trailing une fois l'objectif atteint, plus la cassure de support confirmée (repositionnement,
+    prioritaire sur le SL simple s'il se déclenche en premier)."""
     conn = get_db()
     holdings = conn.execute("SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)).fetchall()
-    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct, spot_accum_trailing_max_giveback_pct, spot_accum_hard_cap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct, spot_accum_trailing_max_giveback_pct, spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     lock_ratio = config["spot_accum_trailing_lock_ratio_pct"] if config and "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0
     breakdown_buffer = config["spot_accum_breakdown_buffer_pct"] if config and "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0
     max_giveback = config["spot_accum_trailing_max_giveback_pct"] if config and "spot_accum_trailing_max_giveback_pct" in config.keys() and config["spot_accum_trailing_max_giveback_pct"] is not None else 0.5
-    hard_cap_pct = config["spot_accum_hard_cap_pct"] if config and "spot_accum_hard_cap_pct" in config.keys() and config["spot_accum_hard_cap_pct"] is not None else 20.0
+    spot_max_loss_pct = config["spot_accum_max_loss_pct"] if config and "spot_accum_max_loss_pct" in config.keys() and config["spot_accum_max_loss_pct"] is not None else 1.5
     conn.close()
 
     for h in holdings:
@@ -3294,33 +3287,23 @@ async def manage_spot_holdings(user_id: int, prices: dict, tech_by_coin: dict = 
                      (cur, peak_pct, round(pnl, 4), round(pnl_pct, 4), h["id"]))
 
         close_reason = None
-        # Cassure de support CONFIRMÉE — PAS un Max Loss (la position ne ferme jamais juste
-        # parce qu'elle est dans le rouge), mais un vrai REPOSITIONNEMENT : si le niveau qui
-        # justifiait l'achat cède franchement (au-delà d'une marge de confirmation, pas juste
-        # une mèche), le pari initial est invalidé — on vend pour libérer le capital, qui
-        # pourra racheter sur le NOUVEAU support (plus bas) dès qu'il sera détecté et confirmé,
-        # au prochain cycle de détection normal (mêmes garde-fous qu'à l'achat initial).
-        if h["support_price"]:
+        # Stop Loss SIMPLE et INCONDITIONNEL — vérifié en priorité. Vend dès que la perte
+        # atteint ce seuil, sans confirmation de retournement ni condition technique.
+        if pnl_pct <= -spot_max_loss_pct:
+            close_reason = "SPOT_ACCUM_MAX_LOSS"
+
+        # Cassure de support CONFIRMÉE — repositionnement (pas juste "dans le rouge") : si le
+        # niveau qui justifiait l'achat cède franchement (marge de confirmation), le pari
+        # initial est invalidé — on vend pour libérer le capital, qui pourra racheter sur le
+        # NOUVEAU support (plus bas) dès qu'il sera détecté et confirmé à son tour. Peut se
+        # déclencher avant le SL simple si le support casse à une distance inférieure à celui-ci.
+        if not close_reason and h["support_price"]:
             breakdown_level = h["support_price"] * (1 - breakdown_buffer / 100)
             if cur < breakdown_level:
                 close_reason = "SPOT_ACCUM_BREAKDOWN_REPOSITION"
 
-        # Plafond ABSOLU — vend sans attendre de confirmation de retournement, dès que ce seuil
-        # est atteint. Évite d'attendre indéfiniment une confirmation technique sur un très gros
-        # pic, où un aller-retour coûterait cher même avec un plancher de pullback serré.
-        if not close_reason and pnl_pct >= hard_cap_pct:
-            close_reason = "SPOT_ACCUM_HARD_CAP"
-
-        # Stop loss sur retournement baissier CONFIRMÉ — deuxième déclencheur de sortie en
-        # perte, distinct et indépendant de la cassure de support : si un retournement baissier
-        # se confirme techniquement (RSI+MACD) AVANT même que l'objectif soit atteint, on sort
-        # plutôt que d'attendre une cassure de support qui peut ne jamais arriver. Uniquement
-        # évalué au cycle de scan (tech_by_coin fourni), pas en temps réel.
+        target_pct = h["target_pct"] or 100.0
         trailing_armed = bool(h["trailing_armed"])
-        if not close_reason and not trailing_armed and tech_by_coin and _spot_bearish_reversal_confirmed(h["coin"], tech_by_coin):
-            close_reason = "SPOT_ACCUM_REVERSAL_STOP"
-
-        target_pct = h["target_pct"] or 1.0
         if not close_reason and not trailing_armed and pnl_pct >= target_pct:
             conn.execute("UPDATE spot_holdings SET trailing_armed=1 WHERE id=?", (h["id"],))
             trailing_armed = True
@@ -3335,14 +3318,7 @@ async def manage_spot_holdings(user_id: int, prices: dict, tech_by_coin: dict = 
             floor_giveback = round(peak_pct - effective_giveback, 4)
             floor_pct = max(floor_ratio, floor_giveback)
             if pnl_pct <= floor_pct:
-                # CONDITIONNÉ au retournement : le plancher est franchi, mais on ne vend QUE si
-                # un retournement baissier est aussi confirmé techniquement — si la tendance
-                # continue simplement sa progression normale (un creux temporaire, pas un vrai
-                # retournement), on reste en position même sous le plancher. Sans tech_by_coin
-                # (vérification temps réel), on ne peut pas confirmer — on attend le prochain
-                # cycle de scan plutôt que de vendre à l'aveugle ou de ne jamais vendre.
-                if tech_by_coin and _spot_bearish_reversal_confirmed(h["coin"], tech_by_coin):
-                    close_reason = "SPOT_ACCUM_TARGET_TRAILING"
+                close_reason = "SPOT_ACCUM_TARGET_TRAILING"
 
         conn.commit()
 
@@ -3371,15 +3347,13 @@ async def manage_spot_holdings(user_id: int, prices: dict, tech_by_coin: dict = 
                     conn.execute("UPDATE paper_portfolio SET balance=balance+?+? WHERE user_id=?",
                                  (h["size_usdc"], round(final_pnl, 4), user_id))
                 conn.commit()
-                if close_reason == "SPOT_ACCUM_BREAKDOWN_REPOSITION":
+                if close_reason == "SPOT_ACCUM_MAX_LOSS":
+                    add_bot_log(user_id, f"🛑 {h['coin']}: Spot Accumulation — Stop Loss atteint ({round(final_pnl_pct,2)}% ≤ -{spot_max_loss_pct}%) — vente {round(final_pnl,2)} USDC", "warning")
+                elif close_reason == "SPOT_ACCUM_BREAKDOWN_REPOSITION":
                     add_bot_log(user_id, f"📉 {h['coin']}: Spot Accumulation — support cassé confirmé (${cur:.4g} < ${h['support_price']*(1-breakdown_buffer/100):.4g}) — vente de repositionnement {round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%), rachat possible sur le nouveau support plus bas dès qu'il sera confirmé", "warning")
-                elif close_reason == "SPOT_ACCUM_REVERSAL_STOP":
-                    add_bot_log(user_id, f"📉 {h['coin']}: Spot Accumulation — stop loss sur retournement baissier confirmé (RSI+MACD) avant d'atteindre l'objectif — vente {round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "warning")
-                elif close_reason == "SPOT_ACCUM_HARD_CAP":
-                    add_bot_log(user_id, f"🏁 {h['coin']}: Spot Accumulation — plafond absolu atteint (+{round(pnl_pct,2)}%) — vente immédiate +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%), sans attendre de confirmation de retournement", "success")
                 else:
                     log_giveback = h["max_giveback_pct_override"] if h.get("max_giveback_pct_override") is not None else max_giveback
-                    add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché ET retournement confirmé (pic +{round(peak_pct,2)}%, plancher = max({lock_ratio:.0f}% du pic, pic -{log_giveback}%{' custom' if h.get('max_giveback_pct_override') is not None else ''}) = +{round(max(peak_pct*(lock_ratio/100), peak_pct-log_giveback),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
+                    add_bot_log(user_id, f"🔒 {h['coin']}: Spot Accumulation — trailing touché (pic +{round(peak_pct,2)}%, plancher = max({lock_ratio:.0f}% du pic, pic -{log_giveback}%{' custom' if h.get('max_giveback_pct_override') is not None else ''}) = +{round(max(peak_pct*(lock_ratio/100), peak_pct-log_giveback),2)}%) — vente +{round(final_pnl,2)} USDC ({round(final_pnl_pct,2)}%)", "success")
         conn.close()
 
 async def scan_markets(user_id: int):
@@ -3598,8 +3572,6 @@ async def scan_markets(user_id: int):
         breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
         spot_accum_candidates = []  # rempli pendant la boucle si spot_accum_enabled, traité après
-        tech_by_coin = {}  # rempli pendant la boucle — RSI/MACD/closes par coin, pour le stop
-                            # loss et le trailing conditionnés au retournement de Spot Accumulation
         accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
         accum_short_in_range_count = 0  # idem SHORT
         breakout_scanned_count = 0  # nb de coins avec un range détecté (support+résistance) examinés pour Breakout ce cycle
@@ -3824,16 +3796,6 @@ async def scan_markets(user_id: int):
                 "is_recent_spike": is_recent_spike,
                 "support": support,
                 "resistance": resistance,
-            }
-            # Alimente tech_by_coin pour le stop loss / trailing conditionnés au retournement de
-            # Spot Accumulation — rsi_prev (3 bougies avant) permet de détecter si le RSI
-            # redescend, pas juste son niveau actuel.
-            rsi_prev_tbc = None
-            if len(closes) > 17:
-                rsi_prev_tbc = calc_rsi(closes[:-3], int(rsi_period))
-            tech_by_coin[coin] = {
-                "price": price, "rsi": tech["rsi"], "rsi_prev": round(rsi_prev_tbc, 2) if rsi_prev_tbc is not None else None,
-                "macd_bear": tech["macd_bear"], "closes": closes[-5:],
             }
 
             # Mode Accumulation — détection automatique en plus de la possibilité de
@@ -4574,9 +4536,8 @@ async def scan_markets(user_id: int):
                 cur_price_sp = prices.get(coin)
                 if not cur_price_sp:
                     continue
-                # Armement à un % fixe de PnL, indépendant de l'amplitude du canal (le canal
-                # reste utilisé pour la DÉTECTION à l'achat, plus pour ce seuil de sortie).
-                target_pct_sp = config["spot_accum_trailing_arm_pct"] if "spot_accum_trailing_arm_pct" in config.keys() and config["spot_accum_trailing_arm_pct"] is not None else 1.0
+                target_ratio_sp = config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 85.0
+                target_pct_sp = round(cand["channel_pct"] * (target_ratio_sp / 100), 2)
 
                 if sp_mode == "live":
                     conn_sp2 = get_db()
@@ -4777,7 +4738,7 @@ async def scan_markets(user_id: int):
             conn.close()
 
         # Gestion des holdings Spot Accumulation — AUCUN Max Loss, tient jusqu'à l'objectif/trailing
-        await manage_spot_holdings(user_id, prices, tech_by_coin)
+        await manage_spot_holdings(user_id, prices)
 
         # Update last scan
         conn = get_db()
@@ -5892,14 +5853,13 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_candle_atr_mult: Optional[float] = None
     spot_accum_trading_mode: Optional[str] = None
     spot_accum_breakdown_buffer_pct: Optional[float] = None
+    spot_accum_max_loss_pct: Optional[float] = None
     spot_accum_min_room_pct: Optional[float] = None
     spot_accum_live_fixed_size_usd: Optional[float] = None
     spot_accum_live_max_positions: Optional[int] = None
     spot_accum_rotation_enabled: Optional[bool] = None
     spot_accum_rotation_min_improvement_mult: Optional[float] = None
     spot_accum_trailing_max_giveback_pct: Optional[float] = None
-    spot_accum_trailing_arm_pct: Optional[float] = None
-    spot_accum_hard_cap_pct: Optional[float] = None
     range_trading_trailing_lock_ratio_pct: Optional[float] = None
     range_trading_trading_mode: Optional[str] = None
     accumulation_exit_tolerance_ratio: Optional[float] = None
@@ -6107,14 +6067,13 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_candle_atr_mult": config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0,
         "spot_accum_trading_mode": config["spot_accum_trading_mode"] if "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper",
         "spot_accum_breakdown_buffer_pct": config["spot_accum_breakdown_buffer_pct"] if "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0,
+        "spot_accum_max_loss_pct": config["spot_accum_max_loss_pct"] if "spot_accum_max_loss_pct" in config.keys() and config["spot_accum_max_loss_pct"] is not None else 1.5,
         "spot_accum_min_room_pct": config["spot_accum_min_room_pct"] if "spot_accum_min_room_pct" in config.keys() and config["spot_accum_min_room_pct"] is not None else 1.5,
         "spot_accum_live_fixed_size_usd": config["spot_accum_live_fixed_size_usd"] if "spot_accum_live_fixed_size_usd" in config.keys() and config["spot_accum_live_fixed_size_usd"] is not None else 50.0,
         "spot_accum_live_max_positions": config["spot_accum_live_max_positions"] if "spot_accum_live_max_positions" in config.keys() and config["spot_accum_live_max_positions"] else 2,
         "spot_accum_rotation_enabled": config["spot_accum_rotation_enabled"] if "spot_accum_rotation_enabled" in config.keys() and config["spot_accum_rotation_enabled"] is not None else 0,
         "spot_accum_rotation_min_improvement_mult": config["spot_accum_rotation_min_improvement_mult"] if "spot_accum_rotation_min_improvement_mult" in config.keys() and config["spot_accum_rotation_min_improvement_mult"] is not None else 1.2,
         "spot_accum_trailing_max_giveback_pct": config["spot_accum_trailing_max_giveback_pct"] if "spot_accum_trailing_max_giveback_pct" in config.keys() and config["spot_accum_trailing_max_giveback_pct"] is not None else 0.5,
-        "spot_accum_trailing_arm_pct": config["spot_accum_trailing_arm_pct"] if "spot_accum_trailing_arm_pct" in config.keys() and config["spot_accum_trailing_arm_pct"] is not None else 1.0,
-        "spot_accum_hard_cap_pct": config["spot_accum_hard_cap_pct"] if "spot_accum_hard_cap_pct" in config.keys() and config["spot_accum_hard_cap_pct"] is not None else 20.0,
         "range_trading_trailing_lock_ratio_pct": config["range_trading_trailing_lock_ratio_pct"] if "range_trading_trailing_lock_ratio_pct" in config.keys() and config["range_trading_trailing_lock_ratio_pct"] is not None else 50.0,
         "range_trading_trading_mode": config["range_trading_trading_mode"] if "range_trading_trading_mode" in config.keys() and config["range_trading_trading_mode"] else "paper",
         "accumulation_exit_tolerance_ratio": config["accumulation_exit_tolerance_ratio"] if "accumulation_exit_tolerance_ratio" in config.keys() and config["accumulation_exit_tolerance_ratio"] is not None else 0.3,
@@ -6314,6 +6273,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_trading_mode=? WHERE user_id=?", (req.spot_accum_trading_mode, user_id))
     if req.spot_accum_breakdown_buffer_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_breakdown_buffer_pct=? WHERE user_id=?", (req.spot_accum_breakdown_buffer_pct, user_id))
+    if req.spot_accum_max_loss_pct is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_max_loss_pct=? WHERE user_id=?", (req.spot_accum_max_loss_pct, user_id))
     if req.spot_accum_min_room_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_min_room_pct=? WHERE user_id=?", (req.spot_accum_min_room_pct, user_id))
     if req.spot_accum_live_fixed_size_usd is not None:
@@ -6326,10 +6287,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_rotation_min_improvement_mult=? WHERE user_id=?", (req.spot_accum_rotation_min_improvement_mult, user_id))
     if req.spot_accum_trailing_max_giveback_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_trailing_max_giveback_pct=? WHERE user_id=?", (req.spot_accum_trailing_max_giveback_pct, user_id))
-    if req.spot_accum_trailing_arm_pct is not None:
-        conn.execute("UPDATE bot_config SET spot_accum_trailing_arm_pct=? WHERE user_id=?", (req.spot_accum_trailing_arm_pct, user_id))
-    if req.spot_accum_hard_cap_pct is not None:
-        conn.execute("UPDATE bot_config SET spot_accum_hard_cap_pct=? WHERE user_id=?", (req.spot_accum_hard_cap_pct, user_id))
     if req.range_trading_trailing_lock_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET range_trading_trailing_lock_ratio_pct=? WHERE user_id=?", (req.range_trading_trailing_lock_ratio_pct, user_id))
     if req.range_trading_trading_mode is not None:
@@ -8619,7 +8576,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.26"
+BACKEND_BUILD_VERSION = "2026-08-20.28"
 
 @app.get("/api/version")
 def get_version():
