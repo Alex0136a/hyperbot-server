@@ -751,14 +751,20 @@ def init_db():
         # mais le prix à peine trop loin au moment précis du scan (~3min). Réglable désormais :
         # l'élargir (ex: 2-3%) augmente la fréquence des opportunités détectées, au prix d'une
         # entrée un peu moins précisément collée au niveau.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_pct REAL DEFAULT 2.5")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_pct REAL DEFAULT 1.0")
         conn.commit()
     except: pass
     try:
-        # Relevé de 0.5%/1.0% à 2.5% — beaucoup d'écarts observés en conditions réelles se
-        # situaient entre 2 et 5%, largement au-dessus de l'ancien seuil, expliquant en partie
-        # pourquoi peu de trades Accumulation s'ouvraient malgré des niveaux détectés.
         conn.execute("UPDATE bot_config SET accumulation_proximity_pct=2.5 WHERE accumulation_proximity_pct IN (0.5, 1.0)")
+        conn.commit()
+    except: pass
+    try:
+        # Resserré à nouveau à 1% — devient le critère PRINCIPAL de l'entrée (proximité au
+        # niveau + tendance alignée), la confirmation de rebond (jugée trop tardive) est retirée
+        # comme condition bloquante. La surveillance de retournement côté sortie (MACD 1h)
+        # protège désormais des entrées prématurées plutôt que d'attendre une confirmation qui
+        # arrive après coup.
+        conn.execute("UPDATE bot_config SET accumulation_proximity_pct=1.0 WHERE accumulation_proximity_pct=2.5")
         conn.commit()
     except: pass
     try:
@@ -3978,31 +3984,15 @@ async def scan_markets(user_id: int):
                                 raison_atr = "marché trop calme" if (atr_pct is not None and atr_pct < accum_max_loss_for_atr * accum_atr_min_mult) else "marché trop agité"
                                 add_bot_log(user_id, f"💰🔍 {coin}: support proche mais ATR ({round(atr_pct,3) if atr_pct else '?'}%) hors plage cohérente avec le SL ({raison_atr}) — pas d'achat", "info")
                         else:
-                            # Remplace la couleur de bougie (figée, jusqu'à 15 min de retard) par
-                            # le prix RÉEL en continu — le prix peut bouger de plus de 2% dans
-                            # les deux sens à l'intérieur d'une même bougie avant sa clôture ;
-                            # attendre la couleur finale revient à ignorer un vrai rebond déjà
-                            # en cours. Compare le prix actuel au plus bas récent (3 dernières
-                            # bougies) pour confirmer un rebond réel, sans attendre la clôture.
-                            recent_low = min(closes[-3:]) if len(closes) >= 3 else price
-                            price_bouncing_up = price > recent_low * 1.001  # marge 0.1%, évite le bruit pur au plus bas exact
-                            rsi_recovering = False
-                            if len(closes) > 17:
-                                rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
-                                if rsi_prev is not None and rsi > rsi_prev:
-                                    rsi_recovering = True
-                            macd_bull_confirm = bool(macd and macd["macd"] > macd["signal"])
-                            # MACD désormais OBLIGATOIRE (ET), plus une alternative au RSI (OU) —
-                            # le retournement doit être confirmé par les deux indicateurs à la fois.
-                            reversal_confirmed = price_bouncing_up and rsi_recovering and macd_bull_confirm
                             # Filtre de tendance de fond — même calcul que le bot principal (MACD
-                            # croisé ET du bon côté de zéro). N'exige PAS que la tendance soit
-                            # haussière (Accumulation existe justement pour les marchés SANS
-                            # tendance nette) mais bloque si elle est clairement BAISSIÈRE : un
-                            # "support" dans une tendance baissière soutenue n'en est souvent pas
-                            # un, le rebond de 3 bougies n'étant que du bruit avant la prochaine
-                            # jambe de baisse — observé concrètement sur plusieurs Max Loss à pic
-                            # quasi nul (entrée invalidée quasi immédiatement).
+                            # croisé ET du bon côté de zéro). DEVIENT OBLIGATOIRE (pas juste "pas
+                            # contre") : la proximité au niveau + la tendance alignée sont
+                            # désormais les critères PRINCIPAUX de l'entrée, à la place d'une
+                            # confirmation de rebond jugée trop tardive (le temps qu'elle se
+                            # déclenche, le meilleur prix est souvent déjà passé). La
+                            # surveillance de retournement côté sortie (MACD 1h, voir
+                            # accumulation_reversal_confirmed) protège désormais des entrées
+                            # prématurées, plutôt que d'attendre une confirmation en amont.
                             macd_val_bg = tech.get("macd_value")
                             macd_bull_bg = tech.get("macd_bull")
                             macd_bear_bg = tech.get("macd_bear")
@@ -4012,18 +4002,16 @@ async def scan_markets(user_id: int):
                                     trend_bg = "BULL"
                                 elif macd_bear_bg and macd_val_bg < 0:
                                     trend_bg = "BEAR"
-                            if reversal_confirmed and trend_bg == "BEAR":
+                            trend_aligned = trend_bg == "BULL"
+
+                            if not trend_aligned:
                                 if should_log_diag:
                                     accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} + retournement confirmé, mais tendance de fond clairement baissière — pas d'achat (support jugé peu fiable)", "info")
-                            elif reversal_confirmed and accumulation_coin_recently_closed(user_id, coin, "LONG"):
-                                add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
-                            elif reversal_confirmed:
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais tendance de fond pas haussière ({trend_bg}) — pas d'achat", "info")
+                            elif accumulation_coin_recently_closed(user_id, coin, "LONG"):
+                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance confirmées mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                            else:
                                 accumulation_candidates.append({"coin": coin, "support": support, "resistance": resistance, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
-                            elif should_log_diag:
-                                accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                                raison = "pas encore de rebond confirmé depuis le plus bas récent" if not price_bouncing_up else "RSI ne remonte pas encore et MACD pas haussier"
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais retournement pas confirmé ({raison}) — pas d'achat", "info")
 
             # Miroir SHORT — switch, plafond de positions et levier séparés du LONG. Même
             # logique inversée : RSI haut (surachat) + résistance détectée + retournement
@@ -4085,23 +4073,9 @@ async def scan_markets(user_id: int):
                                 raison_atr_s = "marché trop calme" if (atr_pct_s is not None and atr_pct_s < accum_max_loss_for_atr_s * accum_atr_min_mult_s) else "marché trop agité"
                                 add_bot_log(user_id, f"💰🔍 {coin}: résistance proche mais ATR ({round(atr_pct_s,3) if atr_pct_s else '?'}%) hors plage cohérente avec le SL ({raison_atr_s}) — pas de vente", "info")
                         else:
-                            # Miroir du LONG : compare le prix actuel au plus haut récent (3
-                            # dernières bougies) pour confirmer un rebond baissier réel, sans
-                            # attendre la clôture d'une bougie complète.
-                            recent_high = max(closes[-3:]) if len(closes) >= 3 else price
-                            price_bouncing_down = price < recent_high * 0.999  # marge 0.1%
-                            rsi_falling = False
-                            if len(closes) > 17:
-                                rsi_prev_short = calc_rsi(closes[:-3], int(rsi_period))
-                                if rsi_prev_short is not None and rsi < rsi_prev_short:
-                                    rsi_falling = True
-                            macd_bear_confirm = bool(macd and macd["macd"] < macd["signal"])
-                            # MACD désormais OBLIGATOIRE (ET), plus une alternative (OU).
-                            reversal_confirmed_short = price_bouncing_down and rsi_falling and macd_bear_confirm
-                            # Filtre de tendance de fond — miroir du LONG. Bloque si la tendance
-                            # est clairement HAUSSIÈRE (une "résistance" dans une tendance
-                            # haussière soutenue cède souvent, le repli de 3 bougies n'étant que
-                            # du bruit avant la prochaine jambe de hausse).
+                            # Miroir du LONG : proximité + tendance BAISSIÈRE confirmée
+                            # deviennent les critères principaux, plus de confirmation de rebond
+                            # (jugée trop tardive) comme condition bloquante.
                             macd_val_bg_s = tech.get("macd_value")
                             macd_bull_bg_s = tech.get("macd_bull")
                             macd_bear_bg_s = tech.get("macd_bear")
@@ -4111,18 +4085,16 @@ async def scan_markets(user_id: int):
                                     trend_bg_s = "BULL"
                                 elif macd_bear_bg_s and macd_val_bg_s < 0:
                                     trend_bg_s = "BEAR"
-                            if reversal_confirmed_short and trend_bg_s == "BULL":
+                            trend_aligned_s = trend_bg_s == "BEAR"
+
+                            if not trend_aligned_s:
                                 if should_log_diag_short:
                                     accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} + retournement confirmé, mais tendance de fond clairement haussière — pas de vente (résistance jugée peu fiable)", "info")
-                            elif reversal_confirmed_short and accumulation_coin_recently_closed(user_id, coin, "SHORT"):
-                                add_bot_log(user_id, f"⏳ {coin}: retournement confirmé mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
-                            elif reversal_confirmed_short:
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais tendance de fond pas baissière ({trend_bg_s}) — pas de vente", "info")
+                            elif accumulation_coin_recently_closed(user_id, coin, "SHORT"):
+                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance confirmées mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                            else:
                                 accumulation_candidates.append({"coin": coin, "resistance": resistance, "support": support, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
-                            elif should_log_diag_short:
-                                accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                                raison_short = "pas encore de rebond baissier confirmé depuis le plus haut récent" if not price_bouncing_down else "RSI ne redescend pas encore et MACD pas baissier"
-                                add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais retournement pas confirmé ({raison_short}) — pas de vente", "info")
 
             # ==================== MODE SPOT ACCUMULATION — détection (LONG uniquement) ====================
             # Réutilise le même support/résistance déjà calculé ci-dessus, mais avec un canal
@@ -8700,7 +8672,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.34"
+BACKEND_BUILD_VERSION = "2026-08-20.36"
 
 @app.get("/api/version")
 def get_version():
