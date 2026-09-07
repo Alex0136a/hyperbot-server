@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.27";
+const APP_BUILD_VERSION = "2026-08-20.28";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2338,8 +2338,7 @@ Confirmer ?`
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
                     {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:2.5,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
-                    {key:"accumulation_trailing_arm_pct",label:"Accumulation - palier PRÉCOCE (% PnL, se désactive au palier principal)",def:0.5,step:0.05,min:0.05,max:3},
-                    {key:"accumulation_trailing_main_pct",label:"Accumulation - palier PRINCIPAL (% PnL, prend le relais du précoce)",def:1.0,step:0.05,min:0.1,max:5},
+                    {key:"accumulation_trailing_main_pct",label:"Accumulation - armement du trailing principal (% PnL)",def:1.0,step:0.05,min:0.1,max:5},
                     {key:"accumulation_trailing_gap_pct",label:"Accumulation - écart du palier précoce (% PnL)",def:0.42,step:0.01,min:0.05,max:3},
                     {key:"accumulation_trailing_lock_ratio_pct",label:"Accumulation - % du pic verrouillé une fois armé",def:50,step:5,min:10,max:90},
                     {key:"breakout_max_positions",label:"Breakout - positions simultanées max (LONG+SHORT confondus)",def:5,step:1,min:1,max:20},
@@ -2379,7 +2378,10 @@ Confirmer ?`
                     {key:"accumulation_atr_sl_max_mult",label:"Accumulation - ATR max cohérent avec le SL (× Max Loss)",def:2.5,step:0.1,min:1,max:10},
                     {key:"accumulation_qp_arm_pct",label:"Accumulation - armement du garde-fou RSI/MACD (%)",def:3.0,step:0.1,min:0.5,max:20},
                     {key:"coin_loss_cooldown_minutes",label:"Cooldown après perte — confirmation requise (min, ≈1 bougie, 0=désactivé)",def:15,step:5,min:0,max:360},
-                    {key:"accumulation_max_loss_pct",label:"Accumulation - plafond de perte absolu depuis l'achat (%)",def:0.3,step:0.05,min:0.05,max:10},
+                    {key:"accumulation_max_loss_pct",label:"Accumulation - référence interne (cohérence ATR à l'entrée + calibrage SL exchange)",def:0.3,step:0.05,min:0.05,max:10},
+                    {key:"accumulation_absolute_max_loss_pct",label:"Accumulation - filet ABSOLU, inconditionnel (%)",def:1.5,step:0.1,min:0.3,max:10},
+                    {key:"accumulation_reversal_arm_pct",label:"Accumulation - seuil d'armement avant lequel un retournement confirmé est requis (%)",def:1.0,step:0.05,min:0.1,max:5},
+                    {key:"accumulation_target_ratio_pct",label:"Accumulation - objectif (% de l'amplitude du canal)",def:70,step:5,min:20,max:200},
                     {key:"accumulation_breakdown_buffer_pct",label:"Accumulation - marge de rupture de support (%)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"qp_lock_trigger_usd",label:"Plancher QP haut - seuil d'armement ($)",def:1.5,step:0.1,min:0.1,max:20},
                     {key:"quick_profit_usd",label:"Plancher QP haut - montant garanti ($)",def:1.1,step:0.1,min:0.1,max:20},
@@ -3289,10 +3291,11 @@ Confirmer ?`
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
-              <li>Max Loss fixe (0.5% par défaut) — seule sortie forcée en perte</li>
+              <li><b style={{color:"#f8fafc"}}>Avant l'armement (pic &lt; 1% par défaut)</b> : plus de sortie mécanique sur un simple écart de prix — le trade reste ouvert tant qu'aucun retournement n'est confirmé techniquement (MACD sur bougies 1h, tendance plus fiable que le 15min utilisé à l'entrée), même si le PnL est négatif</li>
+              <li><b style={{color:"#f87171"}}>Filet ABSOLU</b> (1.5% par défaut) : inconditionnel, se déclenche même sans retournement confirmé — dernier recours si aucun retournement n'est jamais détecté à temps</li>
               <li><b style={{color:"#f8fafc"}}>Suivi dynamique du canal</b> : le support/résistance est recalculé pendant le trade (~toutes les 3 min) et le TP manuel suit l'amplitude du canal ACTUELLE, favorable ou non — ce n'est plus figé à l'ouverture</li>
-              <li><b style={{color:"#f8fafc"}}>TP manuel</b> : par défaut = largeur du canal (plafonné à 1.5%), modifiable à tout moment — la dernière valeur définie fait foi. Indépendant du trailing ci-dessous, son propre armement/régression</li>
-              <li><b style={{color:"#f8fafc"}}>Trailing à deux paliers</b> (indépendant du TP manuel) : palier précoce dès 0.5% de PnL (plancher = pic - 0.42%), qui se désactive dès que le pic atteint 1% — le palier principal prend alors seul la main et verrouille 50% du pic. Même architecture que le bot principal</li>
+              <li><b style={{color:"#f8fafc"}}>TP manuel</b> : objectif = 70% de l'amplitude du canal par défaut (réglable), modifiable à tout moment — la dernière valeur définie fait foi. Indépendant du trailing ci-dessous, son propre armement/régression</li>
+              <li><b style={{color:"#f8fafc"}}>Trailing principal</b> : dès que le pic atteint 1% de PnL, verrouille 50% du pic — le plancher précoce intermédiaire a été retiré, remplacé par la sortie sur retournement confirmé ci-dessus</li>
               <li>Cassure confirmée du niveau d'entrée (support/résistance) : clôture même à perte, au-delà de la marge de confirmation</li>
             </ul>
           </div>
