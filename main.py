@@ -2230,10 +2230,35 @@ def hl_spot_buy(account_address: str, coin: str, size_usdc: float, cur_price: fl
 
 def hl_spot_sell(account_address: str, coin: str, qty: float):
     """Vend l'actif RÉEL détenu au comptant (spot) sur Hyperliquid. Retourne fill_price ou
-    lève une exception. Même avertissement que hl_spot_buy sur l'absence de test réel."""
+    lève une exception.
+    BUG CORRIGÉ : vendait la quantité SUIVIE EN INTERNE (qty stockée depuis l'achat), sans
+    l'arrondir au nombre de décimales accepté par Hyperliquid pour ce coin — un léger décalage
+    de précision (ou toute autre dérive entre notre suivi et la réalité du solde) laissait un
+    résidu invendu sur le wallet (observé concrètement : ~0.85$ de HYPE restant après une
+    vente censée être totale). Interroge maintenant le SOLDE RÉEL disponible juste avant de
+    vendre, et vend ce solde exact (plafonné à la quantité demandée, au cas où le solde réel
+    serait STRICTEMENT inférieur pour une autre raison) — élimine toute dérive, quelle qu'en
+    soit la cause exacte."""
     exchange = get_hl_exchange(account_address)
     spot_coin = hl_spot_coin_name(coin)
-    result = _hl_call_with_retry(exchange.market_open, spot_coin, False, qty, slippage=0.01)
+    size_decimals = get_hl_size_decimals(coin)
+
+    real_qty = qty
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        spot_state = info.spot_user_state(account_address)
+        for b in spot_state.get("balances", []):
+            if b.get("coin") == coin:
+                real_qty = float(b.get("total", 0) or 0)
+                break
+    except Exception:
+        pass  # échec de lecture du solde réel — repli sur la quantité suivie en interne
+
+    sell_qty = round(min(qty, real_qty) if real_qty > 0 else qty, size_decimals)
+    if sell_qty <= 0:
+        raise ValueError(f"Quantité de vente calculée nulle ou négative (suivie: {qty}, réelle: {real_qty})")
+
+    result = _hl_call_with_retry(exchange.market_open, spot_coin, False, sell_qty, slippage=0.01)
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec vente spot Hyperliquid: {result}")
     try:
@@ -8675,7 +8700,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.33"
+BACKEND_BUILD_VERSION = "2026-08-20.34"
 
 @app.get("/api/version")
 def get_version():
