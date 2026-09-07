@@ -274,6 +274,28 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # ==================== Refonte de sortie Accumulation — retournement confirmé avant
+        # 1% de PnL, avec un filet ABSOLU plus large en dernier recours ====================
+        # Avant que le pic atteigne accumulation_reversal_arm_pct (1% par défaut), le Max Loss
+        # serré (accumulation_max_loss_pct, 0.3%) ne coupe PLUS mécaniquement — seul un
+        # retournement confirmé (MACD sur bougies 1h, tendance plus fiable que le 15min utilisé
+        # à l'entrée) peut sortir avant ce seuil. Le filet ABSOLU ci-dessous reste le dernier
+        # recours, inconditionnel, même sans retournement confirmé.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_absolute_max_loss_pct REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_reversal_arm_pct REAL DEFAULT 1.0")
+        conn.commit()
+    except: pass
+    try:
+        # Objectif = ce % de l'amplitude du canal détecté à l'achat — remplace le TP manuel
+        # par défaut (largeur du canal plafonnée à 1.5%) par un ratio direct, cohérent avec
+        # Spot Accumulation.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_target_ratio_pct REAL DEFAULT 70.0")
+        conn.commit()
+    except: pass
+    try:
         # Harmonisé à 1% comme le bot principal et Breakout — corrige au passage une incohérence
         # entre le défaut de colonne (0.7%) et le défaut réellement utilisé dans le code (0.5%).
         conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=1.0 WHERE accumulation_max_loss_pct IN (0.5, 0.7)")
@@ -2547,12 +2569,10 @@ ACCUMULATION_DYNAMIC_TP_COOLDOWN_MINUTES = 3  # même fréquence que le cycle de
 
 async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
     """Recalcule le support/résistance ACTUEL pour le coin du trade et réajuste le TP manuel
-    (custom_take_profit_pct) sur l'amplitude du canal correspondante (plafonnée à 1.5%) — SUIT
-    le canal quelle que soit l'évolution (favorable ou défavorable), à la demande explicite de
-    l'utilisateur : plutôt qu'un trailing/toucher-de-cible séparés, le TP manuel lui-même (qui
-    s'arme en montée et clôture sur régression, logique déjà partagée) devient l'unique
-    protection de gain, combiné au Max Loss. Throttlé (toutes les ~3 min par trade) pour éviter
-    de spammer l'endpoint candles à chaque vérification de prix."""
+    (custom_take_profit_pct) sur ce % de l'amplitude du canal correspondante
+    (accumulation_target_ratio_pct, 70% par défaut — cohérent avec Spot Accumulation) — SUIT
+    le canal quelle que soit l'évolution (favorable ou défavorable). Throttlé (toutes les
+    ~3 min par trade) pour éviter de spammer l'endpoint candles à chaque vérification de prix."""
     last = accumulation_dynamic_tp_cache.get(trade["id"])
     if last and (datetime.utcnow() - last).total_seconds() < ACCUMULATION_DYNAMIC_TP_COOLDOWN_MINUTES * 60:
         return
@@ -2567,7 +2587,9 @@ async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
         if not support or not resistance or support <= 0:
             return
         new_channel_pct = (resistance - support) / support * 100
-        new_tp = min(round(new_channel_pct, 2), 1.5)
+        cfg_ratio = conn.execute("SELECT accumulation_target_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        target_ratio = cfg_ratio["accumulation_target_ratio_pct"] if cfg_ratio and "accumulation_target_ratio_pct" in cfg_ratio.keys() and cfg_ratio["accumulation_target_ratio_pct"] is not None else 70.0
+        new_tp = round(new_channel_pct * (target_ratio / 100), 2)
         old_tp = trade.get("custom_take_profit_pct")
         conn.execute("""UPDATE paper_trades SET custom_take_profit_pct=?, accumulation_channel_pct=?,
             accumulation_support_price=?, accumulation_resistance_price=? WHERE id=?""",
@@ -2584,7 +2606,30 @@ async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
     except Exception as e:
         print(f"⚠️ refresh_accumulation_dynamic_tp error pour {trade.get('coin')}: {e}")
 
-async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
+async def accumulation_reversal_confirmed(coin: str, action: str) -> bool:
+    """Retournement confirmé sur bougies 1h — tendance plus fiable que le 15min utilisé à
+    l'entrée (le slow EMA à 26 périodes du MACD couvre alors ~26h d'historique). Pour LONG,
+    retournement BAISSIER (MACD 1h bascule sous sa ligne de signal) ; pour SHORT, retournement
+    HAUSSIER (MACD 1h bascule au-dessus). Utilisé pour la sortie Accumulation avant que le pic
+    atteigne le seuil d'armement — en cas d'échec réseau, retourne False (ne sort jamais sur
+    une donnée incertaine, le filet absolu reste le dernier recours dans ce cas)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            candles_raw = await fetch_candles(client, coin, interval="1h", count=60)
+        if not candles_raw or len(candles_raw) < 35:
+            return False
+        closes = [float(c["c"]) for c in candles_raw]
+        macd = calc_macd(closes, 12, 26, 9)
+        if not macd:
+            return False
+        if action == "LONG":
+            return macd["macd"] < macd["signal"]
+        else:
+            return macd["macd"] > macd["signal"]
+    except Exception:
+        return False
+
+async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_reversal_confirmed: bool = None):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
     C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement.
@@ -2633,39 +2678,42 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 accum_close_reason = "TAKE_PROFIT_MANUEL"
                 accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
-        # Trailing à DEUX PALIERS — INDÉPENDANT du TP manuel ci-dessus, exactement la même
-        # architecture que le bot principal : un premier palier précoce (0.5% par défaut)
-        # protège tôt, mais se DÉSACTIVE dès que le pic atteint le palier principal (1% par
-        # défaut), qui prend alors seul la main. Pas de max() entre les deux (bascule nette),
-        # pour la même raison que sur le bot principal : un palier précoce à écart fixe resterait
-        # sinon systématiquement plus serré que le principal une fois celui-ci élargi.
+        # Trailing PRINCIPAL uniquement (à partir de 1% de pic) — le plancher précoce mécanique
+        # (0.5%-1%) est retiré, remplacé ci-dessous par une sortie conditionnée au retournement
+        # confirmé avant ce seuil, plutôt qu'un simple écart de prix.
         if not accum_close_reason:
-            cfg_trail2 = conn.execute("SELECT accumulation_trailing_arm_pct, accumulation_trailing_main_pct, accumulation_trailing_lock_ratio_pct, accumulation_trailing_gap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-            accum_early_arm = cfg_trail2["accumulation_trailing_arm_pct"] if cfg_trail2 and "accumulation_trailing_arm_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_arm_pct"] is not None else 0.5
+            cfg_trail2 = conn.execute("SELECT accumulation_trailing_main_pct, accumulation_trailing_lock_ratio_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
             accum_main_arm = cfg_trail2["accumulation_trailing_main_pct"] if cfg_trail2 and "accumulation_trailing_main_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_main_pct"] is not None else 1.0
             accum_lock_ratio = cfg_trail2["accumulation_trailing_lock_ratio_pct"] if cfg_trail2 and "accumulation_trailing_lock_ratio_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
-            accum_trail_gap = cfg_trail2["accumulation_trailing_gap_pct"] if cfg_trail2 and "accumulation_trailing_gap_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_gap_pct"] is not None else 0.42
 
             if accum_peak_pct >= accum_main_arm:
                 accum_trail_floor = round(accum_peak_pct * (accum_lock_ratio / 100), 4)
                 if pnl_pct_live <= accum_trail_floor:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
                     accum_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(accum_peak_pct,2)}%, plancher {accum_lock_ratio:.0f}% du pic = {round(accum_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
-            elif accum_peak_pct >= accum_early_arm:
-                accum_early_floor = round(accum_peak_pct - accum_trail_gap, 4)
-                if pnl_pct_live <= accum_early_floor:
-                    accum_close_reason = "ACCUMULATION_EARLY_FLOOR"
-                    accum_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(accum_peak_pct,2)}%, plancher = {round(accum_early_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
-        # Plafond de perte ABSOLU depuis le prix d'achat/vente — vérifié en priorité, avant
-        # tout le reste. Protège même si la rupture de niveau (mesurée depuis le support/la
-        # résistance, pas l'entrée) n'a pas encore techniquement déclenché.
-        cfg_accum_maxloss = conn.execute(
-            "SELECT accumulation_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-        accum_max_loss_pct = cfg_accum_maxloss["accumulation_max_loss_pct"] if cfg_accum_maxloss and "accumulation_max_loss_pct" in cfg_accum_maxloss.keys() and cfg_accum_maxloss["accumulation_max_loss_pct"] else 0.3
-        if not accum_close_reason and pnl_pct_live <= -accum_max_loss_pct:
-            accum_close_reason = "ACCUMULATION_MAX_LOSS"
-            accum_log_msg = f"🛑 {trade['coin']}: Plafond de perte Accumulation atteint ({round(pnl_pct_live,2)}% ≤ -{accum_max_loss_pct}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
+        # ==================== Refonte : retournement confirmé avant 1% de pic ====================
+        # Avant que le pic atteigne le seuil d'armement (accumulation_reversal_arm_pct, 1% par
+        # défaut), plus de sortie mécanique sur un simple écart de prix — on reste dans le trade
+        # TANT QU'AUCUN retournement n'est confirmé techniquement (MACD sur bougies 1h, voir
+        # accumulation_reversal_confirmed), même si le PnL est négatif. Seul le filet ABSOLU
+        # ci-dessous (plus large, inconditionnel) protège dans ce cas. accum_reversal_confirmed
+        # est fourni par le cycle de scan (nécessite un appel réseau pour les bougies 1h) — sur
+        # les vérifications temps réel (WebSocket/filet 5s) où cette donnée n'est pas
+        # disponible, ce check est simplement ignoré ce tick-ci (retenté au prochain cycle),
+        # le filet absolu restant actif entre-temps.
+        if not accum_close_reason and accum_peak_pct < accum_main_arm and accum_reversal_confirmed:
+            accum_close_reason = "ACCUMULATION_REVERSAL_STOP"
+            accum_log_msg = f"📉 {trade['coin']}: retournement confirmé (MACD 1h) avant d'atteindre l'armement ({round(pnl_pct_live,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+
+        # Filet ABSOLU — plus large, INCONDITIONNEL (même sans retournement confirmé). Dernier
+        # recours si aucun retournement n'est jamais détecté à temps.
+        cfg_abs_maxloss = conn.execute(
+            "SELECT accumulation_absolute_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+        accum_abs_max_loss_pct = cfg_abs_maxloss["accumulation_absolute_max_loss_pct"] if cfg_abs_maxloss and "accumulation_absolute_max_loss_pct" in cfg_abs_maxloss.keys() and cfg_abs_maxloss["accumulation_absolute_max_loss_pct"] is not None else 1.5
+        if not accum_close_reason and pnl_pct_live <= -accum_abs_max_loss_pct:
+            accum_close_reason = "ACCUMULATION_ABSOLUTE_MAX_LOSS"
+            accum_log_msg = f"🛑 {trade['coin']}: Filet ABSOLU atteint ({round(pnl_pct_live,2)}% ≤ -{accum_abs_max_loss_pct}%, sans retournement confirmé) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC pour limiter la perte"
 
         if not accum_close_reason and is_short_accum and trade.get("accumulation_resistance_price"):
             # Miroir SHORT : rupture de RÉSISTANCE confirmée (le prix est reparti au-delà,
@@ -2691,7 +2739,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn):
                 accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP", "ACCUMULATION_EARLY_FLOOR") else "warning")
+            add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
             if is_live_accum:
@@ -4752,8 +4800,14 @@ async def scan_markets(user_id: int):
                 if not price_row: continue
                 cur = price_row["price"]
                 trade_dict = dict(trade)
+                # Confirmation de retournement (MACD 1h) — uniquement pour les trades
+                # Accumulation, uniquement au cycle de scan (nécessite un appel réseau pour les
+                # bougies 1h, pas fait sur les vérifications temps réel WebSocket/filet 5s).
+                accum_reversal = None
+                if trade_dict.get("is_accumulation"):
+                    accum_reversal = await accumulation_reversal_confirmed(trade_dict["coin"], trade_dict["action"])
                 # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
-                result = await manage_open_trade(user_id, trade_dict, cur, conn)
+                result = await manage_open_trade(user_id, trade_dict, cur, conn, accum_reversal)
                 if result:
                     await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn, result.get("close_reason"))
             conn.commit()
@@ -5840,7 +5894,6 @@ class UpdateConfigRequest(BaseModel):
     accumulation_short_leverage: Optional[int] = None
     accumulation_long_leverage: Optional[int] = None
     accumulation_top_leverage: Optional[int] = None
-    accumulation_trailing_arm_pct: Optional[float] = None
     accumulation_trailing_main_pct: Optional[float] = None
     accumulation_trailing_gap_pct: Optional[float] = None
     accumulation_trailing_lock_ratio_pct: Optional[float] = None
@@ -5894,6 +5947,9 @@ class UpdateConfigRequest(BaseModel):
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_max_loss_pct: Optional[float] = None
+    accumulation_absolute_max_loss_pct: Optional[float] = None
+    accumulation_reversal_arm_pct: Optional[float] = None
+    accumulation_target_ratio_pct: Optional[float] = None
     accumulation_qp_arm_pct: Optional[float] = None
     accumulation_qp_floor_pct: Optional[float] = None
     accumulation_trailing_gap_pct: Optional[float] = None
@@ -6054,7 +6110,6 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_short_leverage": config["accumulation_short_leverage"] if "accumulation_short_leverage" in config.keys() and config["accumulation_short_leverage"] else 2,
         "accumulation_long_leverage": config["accumulation_long_leverage"] if "accumulation_long_leverage" in config.keys() and config["accumulation_long_leverage"] else 2,
         "accumulation_top_leverage": config["accumulation_top_leverage"] if "accumulation_top_leverage" in config.keys() and config["accumulation_top_leverage"] else 3,
-        "accumulation_trailing_arm_pct": config["accumulation_trailing_arm_pct"] if "accumulation_trailing_arm_pct" in config.keys() and config["accumulation_trailing_arm_pct"] is not None else 0.5,
         "accumulation_trailing_main_pct": config["accumulation_trailing_main_pct"] if "accumulation_trailing_main_pct" in config.keys() and config["accumulation_trailing_main_pct"] is not None else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] is not None else 0.42,
         "accumulation_trailing_lock_ratio_pct": config["accumulation_trailing_lock_ratio_pct"] if "accumulation_trailing_lock_ratio_pct" in config.keys() and config["accumulation_trailing_lock_ratio_pct"] is not None else 50.0,
@@ -6108,6 +6163,9 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
+        "accumulation_absolute_max_loss_pct": config["accumulation_absolute_max_loss_pct"] if "accumulation_absolute_max_loss_pct" in config.keys() and config["accumulation_absolute_max_loss_pct"] is not None else 1.5,
+        "accumulation_reversal_arm_pct": config["accumulation_reversal_arm_pct"] if "accumulation_reversal_arm_pct" in config.keys() and config["accumulation_reversal_arm_pct"] is not None else 1.0,
+        "accumulation_target_ratio_pct": config["accumulation_target_ratio_pct"] if "accumulation_target_ratio_pct" in config.keys() and config["accumulation_target_ratio_pct"] is not None else 70.0,
         "accumulation_qp_arm_pct": config["accumulation_qp_arm_pct"] if "accumulation_qp_arm_pct" in config.keys() and config["accumulation_qp_arm_pct"] else 3.0,
         "accumulation_qp_floor_pct": config["accumulation_qp_floor_pct"] if "accumulation_qp_floor_pct" in config.keys() and config["accumulation_qp_floor_pct"] else 1.0,
         "accumulation_trailing_gap_pct": config["accumulation_trailing_gap_pct"] if "accumulation_trailing_gap_pct" in config.keys() and config["accumulation_trailing_gap_pct"] else 0.5,
@@ -6225,8 +6283,6 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_long_leverage=? WHERE user_id=?", (req.accumulation_long_leverage, user_id))
     if req.accumulation_top_leverage is not None:
         conn.execute("UPDATE bot_config SET accumulation_top_leverage=? WHERE user_id=?", (req.accumulation_top_leverage, user_id))
-    if req.accumulation_trailing_arm_pct is not None:
-        conn.execute("UPDATE bot_config SET accumulation_trailing_arm_pct=? WHERE user_id=?", (req.accumulation_trailing_arm_pct, user_id))
     if req.accumulation_trailing_main_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_trailing_main_pct=? WHERE user_id=?", (req.accumulation_trailing_main_pct, user_id))
     if req.accumulation_trailing_gap_pct is not None:
@@ -6333,6 +6389,12 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_breakdown_buffer_pct=? WHERE user_id=?", (req.accumulation_breakdown_buffer_pct, user_id))
     if req.accumulation_max_loss_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_max_loss_pct=? WHERE user_id=?", (req.accumulation_max_loss_pct, user_id))
+    if req.accumulation_absolute_max_loss_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_absolute_max_loss_pct=? WHERE user_id=?", (req.accumulation_absolute_max_loss_pct, user_id))
+    if req.accumulation_reversal_arm_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_reversal_arm_pct=? WHERE user_id=?", (req.accumulation_reversal_arm_pct, user_id))
+    if req.accumulation_target_ratio_pct is not None:
+        conn.execute("UPDATE bot_config SET accumulation_target_ratio_pct=? WHERE user_id=?", (req.accumulation_target_ratio_pct, user_id))
     if req.accumulation_qp_arm_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_qp_arm_pct=? WHERE user_id=?", (req.accumulation_qp_arm_pct, user_id))
     if req.accumulation_qp_floor_pct is not None:
@@ -8613,7 +8675,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.30"
+BACKEND_BUILD_VERSION = "2026-08-20.33"
 
 @app.get("/api/version")
 def get_version():
