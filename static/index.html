@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.26";
+const APP_BUILD_VERSION = "2026-08-20.27";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -724,10 +724,14 @@ function App() {
     if (mode === config?.spot_accum_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Spot Accumulation en LIVE (argent réel) ?\n\n⚠️ CE MODE N'A PAS DE MAX LOSS — une position perdante est tenue indéfiniment, jamais vendue à perte. Nécessite un solde USDC dans votre compte SPOT Hyperliquid (distinct de la marge des perpétuels). Testez d'abord en Paper.\n\nConfirmer ?`
+      ? `Basculer Spot Accumulation en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les holdings LIVE ne sont jamais affectés). Nécessite un solde USDC dans votre compte SPOT Hyperliquid (distinct de la marge des perpétuels).\n\nConfirmer ?`
       : `Repasser Spot Accumulation en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
+      if (mode === "live") {
+        const r = await apiCall("/api/spot-accum/clear-paper-on-live-switch","POST",null,token);
+        addLog(`Spot Accumulation: ${r.closed} position(s) paper fermée(s), ${r.history_erased} trade(s) d'historique effacés`, "system");
+      }
       await apiCall("/api/config","PUT",{spot_accum_trading_mode:mode},token);
       loadData();
       addLog(`Mode Spot Accumulation: ${modeLabel}`, "system");
