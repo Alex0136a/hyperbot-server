@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.28";
+const APP_BUILD_VERSION = "2026-08-20.29";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2336,7 +2336,7 @@ Confirmer ?`
                     {key:"accumulation_long_leverage",label:"Accumulation LONG - levier minimum",def:2,step:1,min:1,max:10},
                     {key:"accumulation_top_leverage",label:"Accumulation - levier boosté sur les meilleurs actifs (top-10)",def:3,step:1,min:1,max:10},
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
-                    {key:"accumulation_proximity_pct",label:"Accumulation - tolérance de proximité au support/résistance (%, plus haut = plus d'occasions détectées)",def:2.5,step:0.1,min:0.1,max:10},
+                    {key:"accumulation_proximity_pct",label:"Accumulation - proximité au support/résistance (%, critère principal de l'entrée)",def:1.0,step:0.1,min:0.1,max:10},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
                     {key:"accumulation_trailing_main_pct",label:"Accumulation - armement du trailing principal (% PnL)",def:1.0,step:0.05,min:0.1,max:5},
                     {key:"accumulation_trailing_gap_pct",label:"Accumulation - écart du palier précoce (% PnL)",def:0.42,step:0.01,min:0.05,max:3},
@@ -3277,13 +3277,12 @@ Confirmer ?`
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
-              <li><b style={{color:"#f8fafc"}}>Zone RSI retirée</b> — plus une fourchette obligatoire, désormais utilisé uniquement comme composante du retournement (pente, pas niveau)</li>
-              <li>Support (LONG) ou résistance (SHORT) détecté à proximité du prix (tolérance réglable, 1% par défaut)</li>
+              <li><b style={{color:"#f8fafc"}}>Proximité au support/résistance</b> (1% par défaut) — critère PRINCIPAL de l'entrée, se positionne près du niveau plutôt que d'attendre un rebond déjà en cours (jugé trop tardif)</li>
+              <li><b style={{color:"#f8fafc"}}>Tendance alignée OBLIGATOIRE</b> : LONG exige une tendance de fond HAUSSIÈRE confirmée (MACD croisé et du bon côté de zéro), SHORT exige une tendance BAISSIÈRE confirmée — pas juste "pas contraire" comme avant. La garantie d'entrer dans le sens du mouvement remplace la confirmation de rebond</li>
               <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
               <li><b style={{color:"#f8fafc"}}>Momentum cohérent</b> : le prix ne doit pas être déjà passé franchement au-delà du niveau (évite de "rattraper un couteau qui tombe"), et la dernière bougie ne doit pas être anormalement large vs l'ATR (mouvement violent/instable)</li>
               <li><b style={{color:"#f8fafc"}}>Cohérence ATR/SL</b> : l'ATR (en % du prix) doit se situer entre 50% et 250% du Max Loss configuré — ni marché trop calme (bruit pur avant que le SL coupe), ni trop agité (le SL coupe sur une bougie normale)</li>
-              <li><b style={{color:"#f8fafc"}}>Retournement confirmé obligatoire</b> : une bougie qui rebondit depuis le plus bas/haut récent, <i>et</i> RSI qui remonte/redescend <i>ET</i> MACD qui bascule dans le bon sens (les deux désormais obligatoires, plus une alternative)</li>
-              <li><b style={{color:"#f8fafc"}}>Filtre de tendance de fond</b> : LONG bloqué si la tendance (MACD) est clairement baissière, SHORT bloqué si clairement haussière — pas besoin d'être favorable (Accumulation vise les marchés sans tendance nette), juste pas franchement contre. Évite les "supports"/"résistances" qui cèdent dans une tendance soutenue</li>
+              <li>RSI n'est plus un filtre obligatoire (ni zone, ni pente) — la proximité et la tendance suffisent</li>
               <li>Levier dédié, séparé LONG/SHORT (x2 minimum par défaut chacun) — <b style={{color:"#f8fafc"}}>boosté à x3</b> sur les actifs déjà identifiés comme meilleurs performers (même classement que la priorité de détection, net positif sur l'historique récent)</li>
               <li>Taille = 50% du capital ÷ positions Accumulation simultanées max</li>
               <li>Aucune restriction de corrélation appliquée (indépendant du bot principal)</li>
