@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.25";
+const APP_BUILD_VERSION = "2026-08-20.26";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2356,11 +2356,12 @@ Confirmer ?`
                     {key:"spot_accum_max_positions",label:"Spot Accumulation - positions simultanées max",def:5,step:1,min:1,max:20},
                     {key:"spot_accum_min_channel_pct",label:"Spot Accumulation - largeur minimale du canal (%)",def:2.5,step:0.1,min:0.5,max:10},
                     {key:"spot_accum_proximity_pct",label:"Spot Accumulation - tolérance de proximité au support (%)",def:1.0,step:0.1,min:0.1,max:5},
-                    {key:"spot_accum_target_ratio_pct",label:"Spot Accumulation - objectif par défaut (% de l'amplitude du canal)",def:85,step:5,min:20,max:200},
+                    {key:"spot_accum_target_ratio_pct",label:"Spot Accumulation - objectif par défaut (% de l'amplitude du canal)",def:70,step:5,min:20,max:200},
                     {key:"spot_accum_trailing_lock_ratio_pct",label:"Spot Accumulation - % du pic verrouillé une fois l'objectif atteint",def:50,step:5,min:10,max:90},
                     {key:"spot_accum_momentum_margin_pct",label:"Spot Accumulation - marge momentum avant de bloquer (%)",def:0.3,step:0.05,min:0.05,max:2},
                     {key:"spot_accum_candle_atr_mult",label:"Spot Accumulation - bougie max autorisée (× ATR)",def:2.0,step:0.1,min:1,max:5},
                     {key:"spot_accum_breakdown_buffer_pct",label:"Spot Accumulation - marge de cassure du support avant repositionnement (%)",def:1.0,step:0.1,min:0.2,max:5},
+                    {key:"spot_accum_max_loss_pct",label:"Spot Accumulation - Stop Loss simple et inconditionnel (%)",def:1.5,step:0.1,min:0.3,max:10},
                     {key:"spot_accum_min_room_pct",label:"Spot Accumulation - marge minimale jusqu'à la résistance (%)",def:1.5,step:0.1,min:0.2,max:10},
                     {key:"spot_accum_live_fixed_size_usd",label:"Spot Accumulation LIVE - taille fixe par trade ($)",def:50,step:5,min:10,max:1000},
                     {key:"spot_accum_live_max_positions",label:"Spot Accumulation LIVE - positions simultanées max",def:2,step:1,min:1,max:10},
@@ -3358,10 +3359,10 @@ Confirmer ?`
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:0,paddingLeft:18,lineHeight:1.7}}>
-              <li><b style={{color:"#f87171"}}>Pas de Max Loss</b> — un holding en perte reste tenu indéfiniment</li>
-              <li>Objectif = % de l'amplitude du canal à l'achat (85% par défaut) — une fois atteint, un trailing s'arme et verrouille le PLUS STRICT entre 50% du pic et un plafond absolu de pullback depuis le pic (0.5 point de % par défaut) — évite de reperdre trop sur un gros pic (ex: 50% d'un pic à 10% donnerait 5 points de % perdus sans ce plafond). Modifiable par holding individuellement une fois le trailing armé (bouton dédié), en plus du réglage global</li>
+              <li><b style={{color:"#f8fafc"}}>Stop Loss simple et inconditionnel</b> (1.5% par défaut, modifiable) : vend dès que la perte atteint ce seuil, sans confirmation ni condition — ajouté après expérience réelle, le principe initial "aucune perte forcée" ne fonctionnant pas bien en pratique sur Hyperliquid</li>
+              <li>Objectif = % de l'amplitude du canal à l'achat (70% par défaut) — une fois atteint, un trailing s'arme et verrouille le PLUS STRICT entre 50% du pic et un plafond absolu de pullback depuis le pic (0.5 point de % par défaut) — évite de reperdre trop sur un gros pic (ex: 50% d'un pic à 10% donnerait 5 points de % perdus sans ce plafond). Modifiable par holding individuellement une fois le trailing armé (bouton dédié), en plus du réglage global</li>
               <li>Tant que l'objectif n'est pas atteint, rien ne se passe — c'est voulu, "attendre le bon moment"</li>
-              <li><b style={{color:"#f8fafc"}}>Repositionnement sur cassure confirmée</b> (pas un Max Loss) : si le support qui justifiait l'achat cède franchement (marge de confirmation, 1% par défaut), le pari est jugé invalidé — vente immédiate pour libérer le capital, qui pourra racheter sur le nouveau support (plus bas) une fois détecté et confirmé à son tour, avec les mêmes garde-fous qu'à l'achat initial</li>
+              <li><b style={{color:"#f8fafc"}}>Repositionnement sur cassure confirmée</b> : si le support qui justifiait l'achat cède franchement (marge de confirmation, 1% par défaut, plafonnée à 5%), le pari est jugé invalidé — vente immédiate pour libérer le capital, qui pourra racheter sur le nouveau support (plus bas) une fois détecté et confirmé à son tour, avec les mêmes garde-fous qu'à l'achat initial. Peut se déclencher avant le Stop Loss simple si le support casse à une distance inférieure</li>
               <li>Fermeture manuelle disponible à tout moment (bouton "Fermer" sur chaque holding, onglet Paper Trading)</li>
               <li><b style={{color:"#f8fafc"}}>Marge minimale jusqu'à la résistance</b> (1.5% par défaut) : bloque l'achat si le prix a dérivé trop près de la résistance, même si le support est proche — garantit qu'il reste vraiment de la place pour monter</li>
               <li><b style={{color:"#f8fafc"}}>Live : taille et positions distinctes du Paper</b> — 50$ fixes par trade, 2 positions max par défaut (au lieu de la formule 50%/positions max), volontairement plus prudent tant que le mode n'a pas fait ses preuves en argent réel</li>
