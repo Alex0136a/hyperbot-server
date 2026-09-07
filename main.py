@@ -6759,6 +6759,21 @@ def ensure_portfolio(user_id: int, conn):
         conn.execute("INSERT INTO paper_portfolio (user_id) VALUES (?)", (user_id,))
         conn.commit()
 
+@app.post("/api/spot-accum/clear-paper-on-live-switch")
+def clear_spot_accum_paper_on_live_switch(user_id: int = Depends(get_current_user)):
+    """Appelé UNIQUEMENT au moment de basculer Spot Accumulation de Paper vers Live — ferme
+    tous les holdings PAPER encore ouverts (au prix actuel, sans impact sur le solde papier
+    puisque tout est effacé juste après) et efface tout l'historique paper (ouvert + fermé).
+    N'affecte JAMAIS les holdings LIVE (is_live=1), qui restent intacts."""
+    conn = get_db()
+    paper_open = conn.execute("SELECT id, coin FROM spot_holdings WHERE user_id=? AND is_live=0 AND status='OPEN'", (user_id,)).fetchall()
+    paper_closed_count = conn.execute("SELECT COUNT(*) FROM spot_holdings WHERE user_id=? AND is_live=0 AND status='CLOSED'", (user_id,)).fetchone()[0]
+    conn.execute("DELETE FROM spot_holdings WHERE user_id=? AND is_live=0", (user_id,))
+    conn.commit()
+    conn.close()
+    add_bot_log(user_id, f"🧹🪙 Spot Accumulation: passage en LIVE — {len(paper_open)} position(s) paper ouverte(s) fermée(s) et {paper_closed_count} trade(s) paper de l'historique effacés (les holdings LIVE ne sont pas affectés)", "info")
+    return {"success": True, "closed": len(paper_open), "history_erased": paper_closed_count}
+
 @app.get("/api/spot-holdings")
 def get_spot_holdings(user_id: int = Depends(get_current_user)):
     conn = get_db()
@@ -8576,7 +8591,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.28"
+BACKEND_BUILD_VERSION = "2026-08-20.29"
 
 @app.get("/api/version")
 def get_version():
