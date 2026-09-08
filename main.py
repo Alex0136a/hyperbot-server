@@ -5066,6 +5066,7 @@ async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
 
 # Cache des prix en temps réel via WebSocket
 ws_prices = {}
+_last_prices_db_sync = {"ts": None}  # throttle de l'écriture temps réel vers la table `prices`
 ws_connected = False
 
 # Cache des données de marché structurées (indicateurs pré-calculés)
@@ -5506,7 +5507,28 @@ async def connect_hyperliquid_ws():
                     if data.get("channel") == "allMids" and "data" in data:
                         mids = data["data"].get("mids", {})
                         ws_prices.update({k: float(v) for k, v in mids.items()})
-                        
+
+                        # BUG CORRIGÉ : la table `prices` (celle que l'interface affiche via
+                        # /api/prices) n'était mise à jour qu'une fois par cycle de scan
+                        # (~3 minutes), alors que ce flux WebSocket reçoit des prix quasi en
+                        # temps réel — le trading interne utilisait déjà ws_prices directement
+                        # (donc les décisions de trading n'étaient PAS affectées), mais
+                        # l'affichage côté utilisateur pouvait être stale de plusieurs minutes.
+                        # Écriture throttlée à 2s (pas à chaque tick, pour ne pas saturer la DB
+                        # sur un flux qui peut arriver plusieurs fois par seconde).
+                        now_sync = datetime.utcnow()
+                        if not _last_prices_db_sync["ts"] or (now_sync - _last_prices_db_sync["ts"]).total_seconds() >= 2:
+                            _last_prices_db_sync["ts"] = now_sync
+                            try:
+                                conn_px = get_db()
+                                for coin, price_val in ws_prices.items():
+                                    conn_px.execute("INSERT OR REPLACE INTO prices (coin, price, updated_at) VALUES (?,?,?)",
+                                                     (coin, price_val, now_sync.isoformat()))
+                                conn_px.commit()
+                                conn_px.close()
+                            except Exception as e:
+                                print(f"⚠️ Échec sync prices temps réel: {e}")
+
                         # Traiter les trades ouverts pour chaque coin mis à jour
                         conn = get_db()
                         try:
@@ -8672,7 +8694,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.36"
+BACKEND_BUILD_VERSION = "2026-08-20.37"
 
 @app.get("/api/version")
 def get_version():
