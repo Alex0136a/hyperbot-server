@@ -1917,10 +1917,28 @@ def get_hl_account_value_verbose(account_address: str):
         spot_total = 0.0
         try:
             spot_state = info.spot_user_state(account_address)
-            spot_total = sum(
-                float(b.get("total", 0) or 0) for b in spot_state.get("balances", [])
-                if b.get("coin") in ("USDC", "USD")
-            )
+            # BUG CORRIGÉ : ne comptait que le solde USDC/USD, ignorant complètement la VALEUR
+            # de tout autre actif détenu (ex: HYPE acheté par Spot Accumulation) — le capital
+            # apparaissait sous-évalué dès qu'une partie était investie en actifs réels, faussant
+            # le dimensionnement de TOUS les trades live (pas seulement Spot Accumulation, cette
+            # fonction est utilisée partout). Convertit maintenant chaque actif détenu en valeur
+            # USD au prix actuel (table `prices`, tenue à jour en quasi temps réel par le flux
+            # WebSocket) avant de sommer.
+            conn_px_val = get_db()
+            price_rows = conn_px_val.execute("SELECT coin, price FROM prices").fetchall()
+            conn_px_val.close()
+            price_map = {r["coin"]: r["price"] for r in price_rows}
+            for b in spot_state.get("balances", []):
+                bal_coin = b.get("coin")
+                bal_qty = float(b.get("total", 0) or 0)
+                if bal_qty <= 0:
+                    continue
+                if bal_coin in ("USDC", "USD"):
+                    spot_total += bal_qty
+                elif bal_coin in price_map and price_map[bal_coin]:
+                    spot_total += bal_qty * price_map[bal_coin]
+                # Actif détenu mais prix introuvable (pas dans active_coins/prices) : ignoré
+                # plutôt que de planter — sa valeur ne sera pas comptée, repli sûr.
         except Exception:
             pass  # solde spot non lisible — repli sur le perp seul plutôt que planter
         # Solde spot préféré dès qu'il est non nul (compte unifié — voir get_hl_balance_breakdown
@@ -1957,10 +1975,23 @@ def get_hl_balance_breakdown(account_address: str):
         spot_balance = 0.0
         try:
             spot_state = info.spot_user_state(account_address)
-            spot_balance = sum(
-                float(b.get("total", 0) or 0) for b in spot_state.get("balances", [])
-                if b.get("coin") in ("USDC", "USD")
-            )
+            # BUG CORRIGÉ (3e itération) : même défaut que get_hl_account_value_verbose — ne
+            # comptait que l'USDC, ignorant la valeur de tout actif réellement détenu (ex: HYPE
+            # acheté par Spot Accumulation), faisant apparaître le Bilan en dessous du capital
+            # réel dès qu'une partie est investie en actifs.
+            conn_px_bal = get_db()
+            price_rows_bal = conn_px_bal.execute("SELECT coin, price FROM prices").fetchall()
+            conn_px_bal.close()
+            price_map_bal = {r["coin"]: r["price"] for r in price_rows_bal}
+            for b in spot_state.get("balances", []):
+                bal_coin = b.get("coin")
+                bal_qty = float(b.get("total", 0) or 0)
+                if bal_qty <= 0:
+                    continue
+                if bal_coin in ("USDC", "USD"):
+                    spot_balance += bal_qty
+                elif bal_coin in price_map_bal and price_map_bal[bal_coin]:
+                    spot_balance += bal_qty * price_map_bal[bal_coin]
         except Exception:
             pass  # solde spot non lisible — repli sur le perp seul plutôt que planter
         if spot_balance > 0:
@@ -2208,7 +2239,12 @@ def hl_spot_buy(account_address: str, coin: str, size_usdc: float, cur_price: fl
     if qty <= 0:
         raise ValueError("Quantité spot calculée nulle ou négative")
 
-    result = _hl_call_with_retry(exchange.market_open, spot_coin, True, qty, slippage=0.01)
+    # Glissement relevé à 2% (au lieu de 1%) — observé concrètement : les achats spot
+    # échouaient silencieusement (statut "resting", jamais rempli) sur des altcoins moins
+    # liquides qu'HYPE, dont le carnet spot est probablement bien plus profond (jeton natif
+    # de l'exchange). Coût maximum ~2% du notionnel dans le pire cas, acceptable pour
+    # réellement ouvrir la position plutôt que d'échouer systématiquement.
+    result = _hl_call_with_retry(exchange.market_open, spot_coin, True, qty, slippage=0.02)
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec achat spot Hyperliquid: {result}")
     try:
@@ -2264,7 +2300,7 @@ def hl_spot_sell(account_address: str, coin: str, qty: float):
     if sell_qty <= 0:
         raise ValueError(f"Quantité de vente calculée nulle ou négative (suivie: {qty}, réelle: {real_qty})")
 
-    result = _hl_call_with_retry(exchange.market_open, spot_coin, False, sell_qty, slippage=0.01)
+    result = _hl_call_with_retry(exchange.market_open, spot_coin, False, sell_qty, slippage=0.02)
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec vente spot Hyperliquid: {result}")
     try:
@@ -8694,7 +8730,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.37"
+BACKEND_BUILD_VERSION = "2026-08-20.39"
 
 @app.get("/api/version")
 def get_version():
