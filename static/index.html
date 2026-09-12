@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.29";
+const APP_BUILD_VERSION = "2026-08-20.32";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2322,6 +2322,7 @@ Confirmer ?`
                     {key:"rsi_overbought",label:"RSI surachat (>)",def:65,step:1,min:55,max:95},
                     {key:"volume_spike_mult",label:"Multiplicateur pic volume (×)",def:1.5,step:0.1,min:1,max:5},
                     {key:"btc_trend_threshold",label:"Seuil tendance BTC (%, confirmé 4h ET 8h)",def:2.0,step:0.1,min:0.5,max:10},
+                    {key:"anti_wick_delay_minutes",label:"🕯️ Anti-mèche GLOBAL (tous modes, tous déclencheurs) - délai minimum + couleur de bougie confirmée (minutes)",def:1.0,step:0.5,min:0,max:60},
                     {key:"trailing_activation_mult",label:"Activation trailing (× QP)",def:1.0,step:0.1,min:1,max:5},
                     {key:"trailing_gap_pct",label:"Écart trailing (% prix)",def:0.42,step:0.01,min:0.02,max:5},
                     {key:"early_floor_arm_pct",label:"Plancher précoce - pic minimum pour armer (% PnL)",def:0.5,step:0.05,min:0.1,max:2},
@@ -3234,6 +3235,13 @@ Confirmer ?`
           <div style={{fontSize:20,color:"#475569",textAlign:"center",marginBottom:14,background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:8,padding:10}}>
             💡 Cette page documente le fonctionnement réel du bot — tenue à jour à chaque modification de la logique.
             <br/>Dernière mise à jour de ce contenu : <b style={{color:"#93c5fd"}}>20 août 2026 (soir)</b>
+          </div>
+
+          {/* ANTI-MÈCHE */}
+          <div style={{background:"#0a1628",border:"1px solid #3d3a0a",borderRadius:12,padding:16,marginBottom:12}}>
+            <div style={{fontSize:26,fontWeight:700,color:"#facc15",marginBottom:10}}>🕯️ Anti-mèche (tous modes, tous déclencheurs)</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Dès qu'un déclencheur de sortie se produit (Max Loss, trailing, plafond absolu, cassure de niveau — sans exception, sur les 5 modes), la fermeture n'est PAS exécutée immédiatement. Deux conditions doivent être réunies : <b style={{color:"#f8fafc"}}>la bougie en cours doit confirmer la couleur défavorable</b> à la position (RED pour un LONG, GREEN pour un SHORT) <b style={{color:"#f8fafc"}}>ET</b> le motif doit persister depuis au moins le délai configuré (1 minute par défaut). Si le prix revient avant que les deux conditions soient réunies, l'état en attente est effacé et la position continue d'être tenue normalement — évite de sortir prématurément sur une simple mèche de prix qui se corrige quelques instants plus tard.</div>
+            <div style={{fontSize:18,color:"#64748b"}}>La couleur de bougie est calculée en <b style={{color:"#f8fafc"}}>temps réel</b> — les frontières de bougie (toutes les 15 min pile) sont calculées mathématiquement, sans dépendre du cycle de scan : dès qu'une frontière est franchie, le prix WebSocket exact à cet instant devient l'ouverture de la nouvelle bougie, capturée immédiatement. Le prix actuel est ensuite comparé en continu à cette ouverture pour déterminer la couleur. Le cycle de scan ne sert plus que de filet de secours (amorçage initial, ou après une coupure WebSocket).</div>
           </div>
 
           {/* BOT PRINCIPAL */}
