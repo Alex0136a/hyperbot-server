@@ -1650,6 +1650,16 @@ def init_db():
     except Exception:
         pass
     try:
+        # Indicateur GÉNÉRIQUE "armé" — vrai dès qu'AU MOINS un mécanisme de trailing/QP a
+        # atteint son seuil d'armement pour ce trade (trailing principal, plancher précoce, QP
+        # bas/haut, retournement Accumulation), peu importe le mode. Affiché dans l'interface
+        # ("🔒 armé") en plus du badge déjà existant pour le TP manuel (custom_tp_armed),
+        # mécanisme séparé et indépendant.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN trailing_armed INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN pending_close_since TEXT")
         conn.commit()
     except Exception:
@@ -2879,6 +2889,8 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             accum_main_arm = cfg_trail2["accumulation_trailing_main_pct"] if cfg_trail2 and "accumulation_trailing_main_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_main_pct"] is not None else 1.0
             accum_lock_ratio = cfg_trail2["accumulation_trailing_lock_ratio_pct"] if cfg_trail2 and "accumulation_trailing_lock_ratio_pct" in cfg_trail2.keys() and cfg_trail2["accumulation_trailing_lock_ratio_pct"] is not None else 50.0
 
+            if accum_peak_pct >= accum_main_arm and not trade.get("trailing_armed"):
+                conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
             if accum_peak_pct >= accum_main_arm:
                 accum_trail_floor = round(accum_peak_pct * (accum_lock_ratio / 100), 4)
                 if pnl_pct_live <= accum_trail_floor:
@@ -2993,6 +3005,8 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
 
         # Trailing à DEUX PALIERS — bascule nette (pas de max()) entre le palier précoce (0.5%
         # par défaut) et le palier principal (1%), exactement comme le bot principal/Accumulation.
+        if bo_peak_pct >= bo_early_arm and not trade.get("trailing_armed"):
+            conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not bo_close_reason and bo_peak_pct >= bo_main_arm:
             bo_floor = round(bo_peak_pct * (bo_lock_ratio / 100), 4)
             if pnl_pct_live <= bo_floor:
@@ -3062,6 +3076,8 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET peak_price_pct=? WHERE id=?", (rt_peak_pct, trade["id"]))
 
         # Trailing à DEUX PALIERS — même architecture que les 3 autres modes.
+        if rt_peak_pct >= rt_early_arm and not trade.get("trailing_armed"):
+            conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not rt_close_reason and rt_peak_pct >= rt_main_arm:
             rt_floor = round(rt_peak_pct * (rt_lock_ratio / 100), 4)
             if pnl_pct_live <= rt_floor:
@@ -3280,6 +3296,9 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
         # jamais laisser courir les gros mouvements comme il est censé le faire.
         if early_floor_arm_pct <= peak_pct < trail_trigger_pct:
             candidate_stops.append(("EARLY_FLOOR", peak_pct - trail_gap_pct))
+
+        if candidate_stops and not trade.get("trailing_armed"):
+            conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
 
         if candidate_stops:
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
@@ -8973,7 +8992,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.50"
+BACKEND_BUILD_VERSION = "2026-08-20.51"
 
 @app.get("/api/version")
 def get_version():
