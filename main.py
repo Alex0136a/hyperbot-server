@@ -1639,6 +1639,40 @@ def init_db():
     except Exception:
         pass
     try:
+        # Anti-mèche — TOUS modes confondus : dès qu'un déclencheur de sortie se produit, on
+        # note l'instant plutôt que de fermer immédiatement. La fermeture réelle n'a lieu que
+        # si la condition persiste encore anti_wick_delay_minutes plus tard (10 min par défaut,
+        # réglable) — si le prix revient avant, l'état en attente est effacé et la position
+        # continue d'être tenue normalement. Colonnes sur les deux tables (paper_trades pour
+        # bot principal/Accumulation/Breakout/Range Trading, spot_holdings pour Spot Accum).
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN pending_close_reason TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN pending_close_since TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE spot_holdings ADD COLUMN pending_close_reason TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE spot_holdings ADD COLUMN pending_close_since TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        # Délai de confirmation anti-mèche, en minutes — combiné à la couleur de bougie
+        # (celle-ci apporte déjà la confirmation principale, le délai n'est qu'un minimum
+        # de sécurité en plus). 1 min par défaut.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN anti_wick_delay_minutes REAL DEFAULT 1.0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
         # Liste de blocage d'actifs SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici ne sera
         # jamais candidat pour ce mode, même s'il reste actif pour tous les autres modes
         # (bot principal, Accumulation, Breakout, Range Trading). Permet d'exclure un actif aux
@@ -2673,6 +2707,51 @@ async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
     except Exception as e:
         print(f"⚠️ refresh_accumulation_dynamic_tp error pour {trade.get('coin')}: {e}")
 
+def anti_wick_check(conn, table: str, row_id: int, current_reason: str, existing_pending_reason, existing_pending_since, delay_minutes: float, trade_action: str = None, candle_color: str = None):
+    """Confirmation anti-mèche GÉNÉRIQUE, réutilisée par tous les mécanismes de sortie, tous
+    modes confondus (paper_trades ET spot_holdings) — à la demande explicite de l'utilisateur,
+    pour éviter de sortir prématurément sur une mèche de prix qui se corrige quelques minutes
+    plus tard.
+
+    Logique à DEUX conditions, les DEUX requises AU MOMENT de la décision finale : (1) le motif
+    doit persister depuis au moins delay_minutes (chronomètre démarré dès la première apparition
+    du motif, indépendamment de la couleur) ET (2) la bougie en cours doit confirmer la couleur
+    DÉFAVORABLE à la position — RED pour un LONG (prix qui redescend), GREEN pour un SHORT (prix
+    qui remonte) — au moment précis où le délai est écoulé. Sans donnée de couleur disponible
+    (candle_color=None, cas des vérifications temps réel WebSocket/filet 5s où les bougies ne
+    sont pas refetchées), la couleur n'est PAS exigée — seul le délai s'applique, pour ne jamais
+    bloquer indéfiniment une fermeture légitime faute de donnée momentanément indisponible.
+
+    Retourne True si la fermeture doit VRAIMENT avoir lieu maintenant, False sinon (état
+    en attente mis à jour en base dans les deux cas)."""
+    if not current_reason:
+        # Plus de motif de sortie ce tick — efface tout état en attente si présent.
+        if existing_pending_reason:
+            conn.execute(f"UPDATE {table} SET pending_close_reason=NULL, pending_close_since=NULL WHERE id=?", (row_id,))
+        return False
+
+    now = datetime.utcnow()
+    if existing_pending_reason != current_reason or not existing_pending_since:
+        # Nouveau motif (différent du précédent, ou premier déclenchement) — démarre le délai.
+        conn.execute(f"UPDATE {table} SET pending_close_reason=?, pending_close_since=? WHERE id=?",
+                     (current_reason, now.isoformat(), row_id))
+        return False
+
+    try:
+        since = datetime.fromisoformat(existing_pending_since)
+    except Exception:
+        since = now
+    if (now - since).total_seconds() < delay_minutes * 60:
+        return False  # encore en attente, pas assez de temps écoulé
+
+    # Délai écoulé — la couleur de bougie défavorable est-elle confirmée MAINTENANT ?
+    if candle_color is not None and trade_action is not None:
+        needed_color = "RED" if trade_action == "LONG" else "GREEN"
+        if candle_color != needed_color:
+            return False  # délai écoulé mais couleur pas encore confirmée — on attend encore, l'état en attente reste tel quel (le délai ne redémarre pas, seule la couleur manque)
+
+    return True
+
 async def accumulation_reversal_confirmed(coin: str, action: str) -> bool:
     """Retournement confirmé sur bougies 1h — tendance plus fiable que le 15min utilisé à
     l'entrée (le slow EMA à 26 périodes du MACD couvre alors ~26h d'historique). Pour LONG,
@@ -2696,7 +2775,7 @@ async def accumulation_reversal_confirmed(coin: str, action: str) -> bool:
     except Exception:
         return False
 
-async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_reversal_confirmed: bool = None):
+async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_reversal_confirmed: bool = None, candle_color: str = None):
     """Évalue un trade ouvert et le ferme si Trailing Profit ou Max Loss est déclenché.
     Retourne un dict {"pnl":..., "close_reason":...} si fermé, sinon None.
     C'est la SEULE fonction autorisée à fermer un paper_trade automatiquement.
@@ -2706,7 +2785,17 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
     déclencher des clôtures prématurées. Le plancher Quick Profit (son seuil d'armement
     ET le montant garanti), lui, est exprimé en $ FIXES et reconverti dynamiquement en %
     selon la taille × levier réels de CE trade — pour garantir toujours le même montant
-    en dollars, peu importe le levier utilisé."""
+    en dollars, peu importe le levier utilisé.
+
+    ANTI-MÈCHE (tous modes, tous déclencheurs) : dès qu'un motif de fermeture est détecté,
+    la fermeture réelle est différée tant que (1) le délai minimum n'est pas écoulé et/ou
+    (2) la bougie en cours ne confirme pas la couleur défavorable (RED pour LONG, GREEN pour
+    SHORT) — voir anti_wick_check. candle_color est calculé en TEMPS RÉEL (comparaison du prix
+    WebSocket actuel au prix d'ouverture de la bougie en cours, mis en cache au dernier scan —
+    voir current_candle_open), pas seulement au cycle de scan — se met à jour à chaque tick."""
+    anti_wick_cfg = conn.execute("SELECT anti_wick_delay_minutes FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    anti_wick_delay = anti_wick_cfg["anti_wick_delay_minutes"] if anti_wick_cfg and "anti_wick_delay_minutes" in anti_wick_cfg.keys() and anti_wick_cfg["anti_wick_delay_minutes"] is not None else 1.0
+
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
@@ -2806,6 +2895,11 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
+            if not anti_wick_check(conn, "paper_trades", trade["id"], accum_close_reason,
+                                    trade.get("pending_close_reason"), trade.get("pending_close_since"),
+                                    anti_wick_delay, trade["action"], candle_color):
+                conn.commit()
+                return None  # anti-mèche : pas encore confirmé (couleur et/ou délai), on attend
             add_bot_log(user_id, accum_log_msg, "success" if accum_close_reason in ("TAKE_PROFIT_MANUEL", "ACCUMULATION_TRAILING_TP") else "warning")
             is_live_accum = bool(trade.get("is_live"))
             close_confirmed = True
@@ -2874,6 +2968,11 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 bo_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(bo_peak_pct,2)}%, plancher = {round(bo_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if bo_close_reason:
+            if not anti_wick_check(conn, "paper_trades", trade["id"], bo_close_reason,
+                                    trade.get("pending_close_reason"), trade.get("pending_close_since"),
+                                    anti_wick_delay, trade["action"], candle_color):
+                conn.commit()
+                return None
             add_bot_log(user_id, bo_log_msg, "success" if bo_close_reason in ("BREAKOUT_TRAILING_TP", "BREAKOUT_EARLY_FLOOR") else "warning")
             is_live_bo = bool(trade.get("is_live"))
             close_confirmed = True
@@ -2938,6 +3037,11 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 rt_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(rt_peak_pct,2)}%, plancher = {round(rt_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if rt_close_reason:
+            if not anti_wick_check(conn, "paper_trades", trade["id"], rt_close_reason,
+                                    trade.get("pending_close_reason"), trade.get("pending_close_since"),
+                                    anti_wick_delay, trade["action"], candle_color):
+                conn.commit()
+                return None
             add_bot_log(user_id, rt_log_msg, "success" if rt_close_reason in ("RANGE_TRADE_TRAILING_TP", "RANGE_TRADE_EARLY_FLOOR") else "warning")
             is_live_rt = bool(trade.get("is_live"))
             close_confirmed = True
@@ -3149,6 +3253,14 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                     (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
         conn.commit()
         return None
+
+    if not anti_wick_check(conn, "paper_trades", trade["id"], close_reason,
+                            trade.get("pending_close_reason"), trade.get("pending_close_since"),
+                            anti_wick_delay, trade["action"], candle_color):
+        conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
+                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+        conn.commit()
+        return None  # anti-mèche : pas encore confirmé, on attend
 
     is_live = bool(trade.get("is_live"))
     close_confirmed = True
@@ -3395,19 +3507,23 @@ async def finalize_closed_trade(user_id: int, trade: dict, pnl: float, conn, clo
     if not trade.get("is_manual") and close_reason in ("TRAILING_PROFIT", "QP_FLOOR", "EARLY_FLOOR"):
         await try_rapid_reentry(user_id, trade, conn)
 
-async def manage_spot_holdings(user_id: int, prices: dict):
+async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin: dict = None):
     """Gère les holdings Spot Accumulation ouverts — Stop Loss simple et inconditionnel (ajouté
     après expérience réelle, le principe "aucune perte forcée" ne fonctionnant pas bien en
     pratique sur Hyperliquid), sortie sur objectif (% de l'amplitude du canal à l'achat) puis
     trailing une fois l'objectif atteint, plus la cassure de support confirmée (repositionnement,
-    prioritaire sur le SL simple s'il se déclenche en premier)."""
+    prioritaire sur le SL simple s'il se déclenche en premier).
+
+    ANTI-MÈCHE (tous déclencheurs) : même mécanisme que manage_open_trade — voir
+    anti_wick_check. candle_color_by_coin n'est fourni qu'au cycle de scan."""
     conn = get_db()
     holdings = conn.execute("SELECT * FROM spot_holdings WHERE user_id=? AND status='OPEN'", (user_id,)).fetchall()
-    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct, spot_accum_trailing_max_giveback_pct, spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    config = conn.execute("SELECT spot_accum_trailing_lock_ratio_pct, spot_accum_breakdown_buffer_pct, spot_accum_trailing_max_giveback_pct, spot_accum_max_loss_pct, anti_wick_delay_minutes FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     lock_ratio = config["spot_accum_trailing_lock_ratio_pct"] if config and "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0
     breakdown_buffer = config["spot_accum_breakdown_buffer_pct"] if config and "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0
     max_giveback = config["spot_accum_trailing_max_giveback_pct"] if config and "spot_accum_trailing_max_giveback_pct" in config.keys() and config["spot_accum_trailing_max_giveback_pct"] is not None else 0.5
     spot_max_loss_pct = config["spot_accum_max_loss_pct"] if config and "spot_accum_max_loss_pct" in config.keys() and config["spot_accum_max_loss_pct"] is not None else 1.5
+    anti_wick_delay = config["anti_wick_delay_minutes"] if config and "anti_wick_delay_minutes" in config.keys() and config["anti_wick_delay_minutes"] is not None else 1.0
     conn.close()
 
     for h in holdings:
@@ -3460,6 +3576,13 @@ async def manage_spot_holdings(user_id: int, prices: dict):
         conn.commit()
 
         if close_reason:
+            candle_color_h = candle_color_by_coin.get(h["coin"]) if candle_color_by_coin else None
+            if not anti_wick_check(conn, "spot_holdings", h["id"], close_reason,
+                                    h.get("pending_close_reason"), h.get("pending_close_since"),
+                                    anti_wick_delay, "LONG", candle_color_h):
+                conn.commit()
+                conn.close()
+                continue  # anti-mèche : pas encore confirmé, on garde le holding ouvert
             is_live_h = bool(h["is_live"])
             close_confirmed = True
             fill_price_sell = cur
@@ -3709,6 +3832,7 @@ async def scan_markets(user_id: int):
         breakout_candidates = []  # rempli pendant la boucle, traité après (voir plus bas)
         range_trade_candidates = []  # rempli pendant la boucle si range_trading_enabled, traité après
         spot_accum_candidates = []  # rempli pendant la boucle si spot_accum_enabled, traité après
+        candle_color_by_coin = {}  # rempli pendant la boucle — anti-mèche, tous modes confondus
         accum_long_in_range_count = 0   # nb de coins avec RSI dans la fourchette LONG ce cycle (résumé périodique, voir fin de boucle)
         accum_short_in_range_count = 0  # idem SHORT
         breakout_scanned_count = 0  # nb de coins avec un range détecté (support+résistance) examinés pour Breakout ce cycle
@@ -3727,9 +3851,14 @@ async def scan_markets(user_id: int):
             if not candles_raw or len(candles_raw) < 50:
                 continue
 
-            candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"])} for cd in candles_raw]
+            candles = [{"h":float(cd["h"]),"l":float(cd["l"]),"c":float(cd["c"]),"v":float(cd["v"]),"o":float(cd.get("o",cd["c"]))} for cd in candles_raw]
             closes = [cd["c"] for cd in candles]
             vols = [cd["v"] for cd in candles]
+            # Anti-mèche — couleur de la DERNIÈRE bougie (en cours ou tout juste close) pour ce
+            # coin, calculée une fois par cycle et réutilisée pour tous les trades ouverts sur
+            # ce coin (peu importe le mode). "GREEN" si clôture > ouverture, "RED" sinon.
+            candle_color_by_coin[coin] = "GREEN" if candles[-1]["c"] >= candles[-1]["o"] else "RED"
+            current_candle_open[coin] = candles[-1]["o"]
             coin_recent_closes[coin] = closes[-CORRELATION_LOOKBACK:]  # cache pour anti-corrélation, avant tout 'continue'
 
             e20 = calc_ema(closes, 20)
@@ -4040,12 +4169,28 @@ async def scan_markets(user_id: int):
                                     trend_bg = "BEAR"
                             trend_aligned = trend_bg == "BULL"
 
+                            # NOUVEAU : détection de "début de mouvement" — s'ajoute à la
+                            # proximité + tendance globale (macro, change rarement). Capte le
+                            # moment où le mouvement démarre VRAIMENT, plutôt que d'entrer sur un
+                            # prix simplement proche du niveau mais encore plat/sans dynamique.
+                            # Réutilise crossBull déjà calculé par calc_macd (croisement tout
+                            # FRAIS, entre l'avant-dernière et la dernière valeur) + accélération
+                            # de prix soudaine (dernière bougie ≥ 1x ATR, même logique que le
+                            # garde-fou momentum existant).
+                            fresh_cross_up = bool(macd and macd.get("crossBull"))
+                            price_accel = bool(atr and len(closes) >= 2 and abs(price - closes[-2]) >= atr)
+                            movement_starting = fresh_cross_up and price_accel
+
                             if not trend_aligned:
                                 if should_log_diag:
                                     accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                                     add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais tendance de fond pas haussière ({trend_bg}) — pas d'achat", "info")
+                            elif not movement_starting:
+                                if should_log_diag:
+                                    accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} + tendance haussière, mais pas de début de mouvement détecté (croisement MACD frais: {fresh_cross_up}, accélération: {price_accel}) — pas d'achat", "info")
                             elif accumulation_coin_recently_closed(user_id, coin, "LONG"):
-                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance confirmées mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance + début de mouvement confirmés mais une position Accumulation LONG vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             else:
                                 accumulation_candidates.append({"coin": coin, "support": support, "resistance": resistance, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
 
@@ -4123,12 +4268,21 @@ async def scan_markets(user_id: int):
                                     trend_bg_s = "BEAR"
                             trend_aligned_s = trend_bg_s == "BEAR"
 
+                            # Miroir du LONG : réutilise crossBear déjà calculé + accélération.
+                            fresh_cross_down = bool(macd and macd.get("crossBear"))
+                            price_accel_s = bool(atr and len(closes) >= 2 and abs(price - closes[-2]) >= atr)
+                            movement_starting_s = fresh_cross_down and price_accel_s
+
                             if not trend_aligned_s:
                                 if should_log_diag_short:
                                     accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                                     add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais tendance de fond pas baissière ({trend_bg_s}) — pas de vente", "info")
+                            elif not movement_starting_s:
+                                if should_log_diag_short:
+                                    accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} + tendance baissière, mais pas de début de mouvement détecté (croisement MACD frais: {fresh_cross_down}, accélération: {price_accel_s}) — pas de vente", "info")
                             elif accumulation_coin_recently_closed(user_id, coin, "SHORT"):
-                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance confirmées mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
+                                add_bot_log(user_id, f"⏳ {coin}: proximité + tendance + début de mouvement confirmés mais une position Accumulation SHORT vient d'être fermée sur ce coin — cooldown, pas de rachat immédiat", "info")
                             else:
                                 accumulation_candidates.append({"coin": coin, "resistance": resistance, "support": support, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
 
@@ -4839,15 +4993,18 @@ async def scan_markets(user_id: int):
                 accum_reversal = None
                 if trade_dict.get("is_accumulation"):
                     accum_reversal = await accumulation_reversal_confirmed(trade_dict["coin"], trade_dict["action"])
+                # Anti-mèche : couleur de bougie disponible uniquement ici (cycle de scan, où
+                # les bougies viennent d'être refetchées pour tous les coins actifs).
+                candle_color_for_trade = candle_color_by_coin.get(trade_dict["coin"])
                 # Seul point de fermeture : Trailing Profit + Max Loss (voir manage_open_trade)
-                result = await manage_open_trade(user_id, trade_dict, cur, conn, accum_reversal)
+                result = await manage_open_trade(user_id, trade_dict, cur, conn, accum_reversal, candle_color_for_trade)
                 if result:
                     await finalize_closed_trade(user_id, trade_dict, result["pnl"], conn, result.get("close_reason"))
             conn.commit()
             conn.close()
 
-        # Gestion des holdings Spot Accumulation — AUCUN Max Loss, tient jusqu'à l'objectif/trailing
-        await manage_spot_holdings(user_id, prices)
+        # Gestion des holdings Spot Accumulation — Stop Loss + objectif/trailing + anti-mèche
+        await manage_spot_holdings(user_id, prices, candle_color_by_coin)
 
         # Update last scan
         conn = get_db()
@@ -5102,6 +5259,14 @@ async def check_macro_calendar(user_id: int, finnhub_key: str) -> dict:
 
 # Cache des prix en temps réel via WebSocket
 ws_prices = {}
+current_candle_open = {}  # prix d'ouverture de la bougie EN COURS par coin — capturé au
+                          # franchissement de frontière (voir _last_candle_boundary ci-dessous),
+                          # PAS au cycle de scan (qui avait jusqu'à ~3min de retard possible sur
+                          # une vraie frontière de bougie de 15 min) ; le scan garde un rôle de
+                          # filet de secours/amorçage initial uniquement (avant le premier
+                          # franchissement WebSocket, ou si le WS a été coupé un moment).
+_last_candle_boundary = {"ts": None}  # dernière frontière de 15min déjà traitée (timestamp)
+CANDLE_INTERVAL_SECONDS = 900  # 15 minutes — même intervalle que fetch_candles par défaut
 _last_prices_db_sync = {"ts": None}  # throttle de l'écriture temps réel vers la table `prices`
 ws_connected = False
 
@@ -5155,9 +5320,17 @@ ACCUMULATION_DIAGNOSTIC_COOLDOWN_HOURS = 2
 async def process_trade_on_price(user_id: int, trade: dict, cur: float, conn):
     """Traite un trade ouvert avec le nouveau prix - appelé par le WebSocket.
     Simple relais vers manage_open_trade : AUCUNE logique de fermeture ici,
-    pour éviter toute divergence avec la boucle de polling."""
+    pour éviter toute divergence avec la boucle de polling.
+
+    Couleur de bougie anti-mèche calculée en TEMPS RÉEL ici (pas seulement au cycle de scan,
+    ~3min) : compare le prix WebSocket actuel au prix d'ouverture de la bougie en cours
+    (mis en cache au dernier scan, voir current_candle_open) — se met à jour à chaque tick."""
+    live_candle_color = None
+    open_ref = current_candle_open.get(trade["coin"])
+    if open_ref:
+        live_candle_color = "GREEN" if cur >= open_ref else "RED"
     try:
-        result = await manage_open_trade(user_id, trade, cur, conn)
+        result = await manage_open_trade(user_id, trade, cur, conn, candle_color=live_candle_color)
         if result:
             await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
             return True
@@ -5544,6 +5717,17 @@ async def connect_hyperliquid_ws():
                         mids = data["data"].get("mids", {})
                         ws_prices.update({k: float(v) for k, v in mids.items()})
 
+                        # Frontière de bougie calculée MATHÉMATIQUEMENT (toutes les 15 min pile,
+                        # UTC) plutôt que de dépendre du cycle de scan — élimine le décalage de
+                        # jusqu'à ~3 min entre une vraie nouvelle bougie sur Hyperliquid et sa
+                        # prise en compte par le bot. Dès qu'on franchit une frontière, le prix
+                        # WebSocket ACTUEL de chaque coin devient l'ouverture de la nouvelle
+                        # bougie — capturé à l'instant exact, pas approximé.
+                        boundary_now = int(time.time()) // CANDLE_INTERVAL_SECONDS * CANDLE_INTERVAL_SECONDS
+                        if _last_candle_boundary["ts"] != boundary_now:
+                            _last_candle_boundary["ts"] = boundary_now
+                            current_candle_open.update(ws_prices)
+
                         # BUG CORRIGÉ : la table `prices` (celle que l'interface affiche via
                         # /api/prices) n'était mise à jour qu'une fois par cycle de scan
                         # (~3 minutes), alors que ce flux WebSocket reçoit des prix quasi en
@@ -5594,8 +5778,15 @@ async def connect_hyperliquid_ws():
                                 "SELECT DISTINCT user_id FROM spot_holdings WHERE status='OPEN'"
                             ).fetchall()
                             ws_prices_float = {k: float(v) for k, v in mids.items()}
+                            # Couleur de bougie anti-mèche en temps réel — même logique que
+                            # process_trade_on_price, appliquée ici aux holdings Spot Accum.
+                            live_colors_ws_spot = {}
+                            for coin_ws, price_ws in ws_prices_float.items():
+                                open_ref_ws = current_candle_open.get(coin_ws)
+                                if open_ref_ws:
+                                    live_colors_ws_spot[coin_ws] = "GREEN" if price_ws >= open_ref_ws else "RED"
                             for row in open_holdings_ws:
-                                await manage_spot_holdings(row["user_id"], ws_prices_float)
+                                await manage_spot_holdings(row["user_id"], ws_prices_float, live_colors_ws_spot)
 
                             # Ordres programmés à condition de PRIX — vérifiés à chaque tick temps
                             # réel (pas seulement au cycle de scan ~3min), indépendamment de
@@ -5720,18 +5911,29 @@ async def update_open_positions(user_id: int):
         async with httpx.AsyncClient() as client:
             prices = await fetch_all_metas(client)
     if spot_holdings_open:
-        await manage_spot_holdings(user_id, prices)
+        live_colors_spot = {}
+        for h_coin in set(h["coin"] for h in spot_holdings_open):
+            open_ref_h = current_candle_open.get(h_coin)
+            cur_h = prices.get(h_coin)
+            if open_ref_h and cur_h:
+                live_colors_spot[h_coin] = "GREEN" if cur_h >= open_ref_h else "RED"
+        await manage_spot_holdings(user_id, prices, live_colors_spot)
     for trade in paper_trades:
         trade = dict(trade)
         cur = prices.get(trade["coin"])
         if not cur:
             continue
+        # Couleur de bougie anti-mèche en temps réel — même logique que process_trade_on_price.
+        live_candle_color_5s = None
+        open_ref_5s = current_candle_open.get(trade["coin"])
+        if open_ref_5s:
+            live_candle_color_5s = "GREEN" if cur >= open_ref_5s else "RED"
         # BUG CORRIGÉ : sans isolation par trade, une exception sur UN trade (ex: INJ) aurait pu
         # interrompre la vérification de TOUS les autres trades du même lot — dans le pire cas,
         # une position dangereusement exposée pendant que d'autres, saines, restaient bloquées
         # derrière elle dans la boucle.
         try:
-            result = await manage_open_trade(user_id, trade, cur, conn)
+            result = await manage_open_trade(user_id, trade, cur, conn, candle_color=live_candle_color_5s)
             if result:
                 await finalize_closed_trade(user_id, trade, result["pnl"], conn, result.get("close_reason"))
         except Exception as e:
@@ -5984,6 +6186,7 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_trading_mode: Optional[str] = None
     spot_accum_breakdown_buffer_pct: Optional[float] = None
     spot_accum_max_loss_pct: Optional[float] = None
+    anti_wick_delay_minutes: Optional[float] = None
     spot_accum_min_room_pct: Optional[float] = None
     spot_accum_live_fixed_size_usd: Optional[float] = None
     spot_accum_live_max_positions: Optional[int] = None
@@ -6200,6 +6403,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_trading_mode": config["spot_accum_trading_mode"] if "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper",
         "spot_accum_breakdown_buffer_pct": config["spot_accum_breakdown_buffer_pct"] if "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0,
         "spot_accum_max_loss_pct": config["spot_accum_max_loss_pct"] if "spot_accum_max_loss_pct" in config.keys() and config["spot_accum_max_loss_pct"] is not None else 1.5,
+        "anti_wick_delay_minutes": config["anti_wick_delay_minutes"] if "anti_wick_delay_minutes" in config.keys() and config["anti_wick_delay_minutes"] is not None else 1.0,
         "spot_accum_min_room_pct": config["spot_accum_min_room_pct"] if "spot_accum_min_room_pct" in config.keys() and config["spot_accum_min_room_pct"] is not None else 1.5,
         "spot_accum_live_fixed_size_usd": config["spot_accum_live_fixed_size_usd"] if "spot_accum_live_fixed_size_usd" in config.keys() and config["spot_accum_live_fixed_size_usd"] is not None else 50.0,
         "spot_accum_live_max_positions": config["spot_accum_live_max_positions"] if "spot_accum_live_max_positions" in config.keys() and config["spot_accum_live_max_positions"] else 2,
@@ -6408,6 +6612,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_breakdown_buffer_pct=? WHERE user_id=?", (req.spot_accum_breakdown_buffer_pct, user_id))
     if req.spot_accum_max_loss_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_max_loss_pct=? WHERE user_id=?", (req.spot_accum_max_loss_pct, user_id))
+    if req.anti_wick_delay_minutes is not None:
+        conn.execute("UPDATE bot_config SET anti_wick_delay_minutes=? WHERE user_id=?", (req.anti_wick_delay_minutes, user_id))
     if req.spot_accum_min_room_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_min_room_pct=? WHERE user_id=?", (req.spot_accum_min_room_pct, user_id))
     if req.spot_accum_live_fixed_size_usd is not None:
@@ -8730,7 +8936,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.39"
+BACKEND_BUILD_VERSION = "2026-08-20.45"
 
 @app.get("/api/version")
 def get_version():
