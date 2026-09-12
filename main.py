@@ -1683,6 +1683,22 @@ def init_db():
     except Exception:
         pass
     try:
+        # Plafond de pullback GLOBAL (4 modes de paper_trades — bot principal, Accumulation,
+        # Breakout, Range Trading) : dès qu'un trade atteint ce seuil de pic (3% par défaut),
+        # aucun mécanisme de trailing ne doit laisser reperdre plus que ce plafond (0.5 point de
+        # % par défaut) — le plancher retenu est le PLUS STRICT entre celui déjà calculé par
+        # chaque mode et ce plafond, même principe déjà en place pour Spot Accumulation
+        # (spot_accum_trailing_max_giveback_pct), généralisé ici.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN ttp_giveback_cap_after_pct REAL DEFAULT 3.0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE bot_config ADD COLUMN ttp_giveback_cap_pct REAL DEFAULT 0.5")
+        conn.commit()
+    except Exception:
+        pass
+    try:
         # Liste de blocage d'actifs SPÉCIFIQUE à Spot Accumulation — un coin bloqué ici ne sera
         # jamais candidat pour ce mode, même s'il reste actif pour tous les autres modes
         # (bot principal, Accumulation, Breakout, Range Trading). Permet d'exclure un actif aux
@@ -2871,6 +2887,17 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
     voir current_candle_open), pas seulement au cycle de scan — se met à jour à chaque tick."""
     anti_wick_cfg = conn.execute("SELECT anti_wick_delay_minutes FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     anti_wick_delay = anti_wick_cfg["anti_wick_delay_minutes"] if anti_wick_cfg and "anti_wick_delay_minutes" in anti_wick_cfg.keys() and anti_wick_cfg["anti_wick_delay_minutes"] is not None else 1.0
+    giveback_cap_cfg = conn.execute("SELECT ttp_giveback_cap_after_pct, ttp_giveback_cap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    giveback_cap_after = giveback_cap_cfg["ttp_giveback_cap_after_pct"] if giveback_cap_cfg and "ttp_giveback_cap_after_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_after_pct"] is not None else 3.0
+    giveback_cap_pct = giveback_cap_cfg["ttp_giveback_cap_pct"] if giveback_cap_cfg and "ttp_giveback_cap_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_pct"] is not None else 0.5
+
+    def _apply_giveback_cap(peak, floor):
+        """Plafond de pullback GLOBAL (4 modes) — voir migration ttp_giveback_cap_after_pct
+        pour le principe complet. Retourne le plancher le plus STRICT entre celui déjà calculé
+        par le mode et ce plafond, uniquement si le pic a atteint le seuil."""
+        if peak >= giveback_cap_after:
+            return max(floor, peak - giveback_cap_pct)
+        return floor
 
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
@@ -2939,9 +2966,10 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
             if accum_peak_pct >= accum_main_arm:
                 accum_trail_floor = round(accum_peak_pct * (accum_lock_ratio / 100), 4)
+                accum_trail_floor = _apply_giveback_cap(accum_peak_pct, accum_trail_floor)
                 if pnl_pct_live <= accum_trail_floor:
                     accum_close_reason = "ACCUMULATION_TRAILING_TP"
-                    accum_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(accum_peak_pct,2)}%, plancher {accum_lock_ratio:.0f}% du pic = {round(accum_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
+                    accum_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(accum_peak_pct,2)}%, plancher {round(accum_trail_floor,2)}%) — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
         # ==================== Refonte : retournement confirmé avant 1% de pic ====================
         # Avant que le pic atteigne le seuil d'armement (accumulation_reversal_arm_pct, 1% par
@@ -3056,9 +3084,10 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not bo_close_reason and bo_peak_pct >= bo_main_arm:
             bo_floor = round(bo_peak_pct * (bo_lock_ratio / 100), 4)
+            bo_floor = _apply_giveback_cap(bo_peak_pct, bo_floor)
             if pnl_pct_live <= bo_floor:
                 bo_close_reason = "BREAKOUT_TRAILING_TP"
-                bo_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(bo_peak_pct,2)}%, plancher {bo_lock_ratio:.0f}% du pic = {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                bo_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(bo_peak_pct,2)}%, plancher {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
         elif not bo_close_reason and bo_peak_pct >= bo_early_arm:
             bo_early_floor = round(bo_peak_pct - bo_trail_gap, 4)
             if pnl_pct_live <= bo_early_floor:
@@ -3128,9 +3157,10 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not rt_close_reason and rt_peak_pct >= rt_main_arm:
             rt_floor = round(rt_peak_pct * (rt_lock_ratio / 100), 4)
+            rt_floor = _apply_giveback_cap(rt_peak_pct, rt_floor)
             if pnl_pct_live <= rt_floor:
                 rt_close_reason = "RANGE_TRADE_TRAILING_TP"
-                rt_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(rt_peak_pct,2)}%, plancher {rt_lock_ratio:.0f}% du pic = {round(rt_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
+                rt_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(rt_peak_pct,2)}%, plancher {round(rt_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
         elif not rt_close_reason and rt_peak_pct >= rt_early_arm:
             rt_early_floor = round(rt_peak_pct - rt_trail_gap, 4)
             if pnl_pct_live <= rt_early_floor:
@@ -3351,6 +3381,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
 
         if candidate_stops:
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
+            stop_level_pct = _apply_giveback_cap(peak_pct, stop_level_pct)
             if pnl_pct_live <= stop_level_pct:
                 close_reason = reason
                 close_stop_level_pct = stop_level_pct
@@ -6275,6 +6306,8 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_breakdown_buffer_pct: Optional[float] = None
     spot_accum_max_loss_pct: Optional[float] = None
     anti_wick_delay_minutes: Optional[float] = None
+    ttp_giveback_cap_after_pct: Optional[float] = None
+    ttp_giveback_cap_pct: Optional[float] = None
     spot_accum_min_room_pct: Optional[float] = None
     spot_accum_live_fixed_size_usd: Optional[float] = None
     spot_accum_live_max_positions: Optional[int] = None
@@ -6492,6 +6525,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_breakdown_buffer_pct": config["spot_accum_breakdown_buffer_pct"] if "spot_accum_breakdown_buffer_pct" in config.keys() and config["spot_accum_breakdown_buffer_pct"] is not None else 1.0,
         "spot_accum_max_loss_pct": config["spot_accum_max_loss_pct"] if "spot_accum_max_loss_pct" in config.keys() and config["spot_accum_max_loss_pct"] is not None else 1.5,
         "anti_wick_delay_minutes": config["anti_wick_delay_minutes"] if "anti_wick_delay_minutes" in config.keys() and config["anti_wick_delay_minutes"] is not None else 1.0,
+        "ttp_giveback_cap_after_pct": config["ttp_giveback_cap_after_pct"] if "ttp_giveback_cap_after_pct" in config.keys() and config["ttp_giveback_cap_after_pct"] is not None else 3.0,
+        "ttp_giveback_cap_pct": config["ttp_giveback_cap_pct"] if "ttp_giveback_cap_pct" in config.keys() and config["ttp_giveback_cap_pct"] is not None else 0.5,
         "spot_accum_min_room_pct": config["spot_accum_min_room_pct"] if "spot_accum_min_room_pct" in config.keys() and config["spot_accum_min_room_pct"] is not None else 1.5,
         "spot_accum_live_fixed_size_usd": config["spot_accum_live_fixed_size_usd"] if "spot_accum_live_fixed_size_usd" in config.keys() and config["spot_accum_live_fixed_size_usd"] is not None else 50.0,
         "spot_accum_live_max_positions": config["spot_accum_live_max_positions"] if "spot_accum_live_max_positions" in config.keys() and config["spot_accum_live_max_positions"] else 2,
@@ -6702,6 +6737,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_max_loss_pct=? WHERE user_id=?", (req.spot_accum_max_loss_pct, user_id))
     if req.anti_wick_delay_minutes is not None:
         conn.execute("UPDATE bot_config SET anti_wick_delay_minutes=? WHERE user_id=?", (req.anti_wick_delay_minutes, user_id))
+    if req.ttp_giveback_cap_after_pct is not None:
+        conn.execute("UPDATE bot_config SET ttp_giveback_cap_after_pct=? WHERE user_id=?", (req.ttp_giveback_cap_after_pct, user_id))
+    if req.ttp_giveback_cap_pct is not None:
+        conn.execute("UPDATE bot_config SET ttp_giveback_cap_pct=? WHERE user_id=?", (req.ttp_giveback_cap_pct, user_id))
     if req.spot_accum_min_room_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_min_room_pct=? WHERE user_id=?", (req.spot_accum_min_room_pct, user_id))
     if req.spot_accum_live_fixed_size_usd is not None:
@@ -9047,7 +9086,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.52"
+BACKEND_BUILD_VERSION = "2026-08-20.54"
 
 @app.get("/api/version")
 def get_version():
