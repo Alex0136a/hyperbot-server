@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.32";
+const APP_BUILD_VERSION = "2026-08-20.33";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -668,10 +668,14 @@ function App() {
     if (mode === config?.manual_accum_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Trading Manuel + Accumulation en LIVE (argent réel) ?\n\nLe bot automatique principal reste inchangé (actuellement ${config?.trading_mode==="live"?"LIVE":"Paper"}), et vos positions/historique actuels sont conservés.\n\nConfirmer ?`
-      : `Repasser Trading Manuel + Accumulation en Paper (simulation) ?`;
+      ? `Basculer Trading Manuel + Accumulation LONG en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les trades LIVE ne sont jamais affectés). Le bot automatique principal reste inchangé (actuellement ${config?.trading_mode==="live"?"LIVE":"Paper"}).\n\nConfirmer ?`
+      : `Repasser Trading Manuel + Accumulation LONG en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
+      if (mode === "live") {
+        const r = await apiCall("/api/mode-clear-paper-on-live-switch/accumulation_long","POST",null,token);
+        addLog(`Accumulation LONG: ${r.closed} position(s) paper fermée(s), ${r.history_erased} trade(s) d'historique effacés`, "system");
+      }
       await apiCall("/api/config","PUT",{manual_accum_trading_mode:mode},token);
       loadData();
       addLog(`Mode Manuel+Accumulation: ${modeLabel}`, "system");
@@ -682,10 +686,14 @@ function App() {
     if (mode === config?.accumulation_short_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Accumulation SHORT en LIVE (argent réel) ?\n\nManuel + Accumulation LONG reste inchangé (actuellement ${config?.manual_accum_trading_mode==="live"?"LIVE":"Paper"}), et vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      ? `Basculer Accumulation SHORT en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les trades LIVE ne sont jamais affectés). Manuel + Accumulation LONG reste inchangé (actuellement ${config?.manual_accum_trading_mode==="live"?"LIVE":"Paper"}).\n\nConfirmer ?`
       : `Repasser Accumulation SHORT en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
+      if (mode === "live") {
+        const r = await apiCall("/api/mode-clear-paper-on-live-switch/accumulation_short","POST",null,token);
+        addLog(`Accumulation SHORT: ${r.closed} position(s) paper fermée(s), ${r.history_erased} trade(s) d'historique effacés`, "system");
+      }
       await apiCall("/api/config","PUT",{accumulation_short_trading_mode:mode},token);
       loadData();
       addLog(`Mode Accumulation SHORT: ${modeLabel}`, "system");
@@ -696,10 +704,14 @@ function App() {
     if (mode === config?.breakout_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Breakout (LONG+SHORT) en LIVE (argent réel) ?\n\nIndépendant des autres modes — vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      ? `Basculer Breakout (LONG+SHORT) en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les trades LIVE ne sont jamais affectés). Indépendant des autres modes.\n\nConfirmer ?`
       : `Repasser Breakout en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
+      if (mode === "live") {
+        const r = await apiCall("/api/mode-clear-paper-on-live-switch/breakout","POST",null,token);
+        addLog(`Breakout: ${r.closed} position(s) paper fermée(s), ${r.history_erased} trade(s) d'historique effacés`, "system");
+      }
       await apiCall("/api/config","PUT",{breakout_trading_mode:mode},token);
       loadData();
       addLog(`Mode Breakout: ${modeLabel}`, "system");
@@ -710,10 +722,14 @@ function App() {
     if (mode === config?.range_trading_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Range Trading en LIVE (argent réel) ?\n\nMode expérimental — indépendant des autres modes, vos positions/historique actuels sont conservés.\n\nConfirmer ?`
+      ? `Basculer Range Trading en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les trades LIVE ne sont jamais affectés). Mode expérimental, indépendant des autres modes.\n\nConfirmer ?`
       : `Repasser Range Trading en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
+      if (mode === "live") {
+        const r = await apiCall("/api/mode-clear-paper-on-live-switch/range","POST",null,token);
+        addLog(`Range Trading: ${r.closed} position(s) paper fermée(s), ${r.history_erased} trade(s) d'historique effacés`, "system");
+      }
       await apiCall("/api/config","PUT",{range_trading_trading_mode:mode},token);
       loadData();
       addLog(`Mode Range Trading: ${modeLabel}`, "system");
