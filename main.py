@@ -2864,6 +2864,10 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
                 add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — plancher armé, le trade continue de courir au-delà", "info")
             elif tp_armed and pnl_pct_live < custom_tp_pct:
+                # NOTE ANTI-MÈCHE : ce close_reason traverse anti_wick_check juste après (voir
+                # "if accum_close_reason:" plus bas), comme les autres motifs de fermeture
+                # Accumulation. Fermeture réelle seulement si couleur de bougie confirmée ET
+                # délai minimum écoulé.
                 accum_close_reason = "TAKE_PROFIT_MANUEL"
                 accum_log_msg = f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {'rachat' if is_short_accum else 'revente'} {round(pnl,2)} USDC"
 
@@ -3217,6 +3221,10 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET custom_tp_armed=1 WHERE id=?", (trade["id"],))
             add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel ({custom_tp_pct}%) atteint pour la première fois à {round(pnl_pct_live,2)}% — mémorisé comme plancher, le trade continue de courir", "info")
         elif tp_armed and pnl_pct_live < custom_tp_pct:
+            # NOTE ANTI-MÈCHE : ce close_reason n'entraîne PAS une fermeture immédiate — il
+            # traverse anti_wick_check plus loin (juste avant le return final de la fonction),
+            # comme TOUS les autres motifs de fermeture. La fermeture réelle n'aura lieu que si
+            # la couleur de bougie confirme ET que le délai minimum est écoulé.
             close_reason = "TAKE_PROFIT_MANUEL"
             add_bot_log(user_id, f"🎯 {trade['coin']}: TP manuel — retour sous le plancher ({custom_tp_pct}%) après l'avoir dépassé, PnL actuel {round(pnl_pct_live,2)}% — {round(pnl,2)} USDC", "success")
     # Max Loss vérifié ensuite : sans ça, une fois le plancher armé, une chute brutale
@@ -8965,7 +8973,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.49"
+BACKEND_BUILD_VERSION = "2026-08-20.50"
 
 @app.get("/api/version")
 def get_version():
