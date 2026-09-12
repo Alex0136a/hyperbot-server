@@ -1,3 +1,4 @@
+
 """
 HyperBot AI — Backend Python FastAPI
 Serveur principal avec authentification, API et moteur de scan
@@ -3924,56 +3925,29 @@ async def scan_markets(user_id: int):
                 short_invalidation = resistance * 1.005
                 channel_pct = (resistance - support) / support * 100
 
-                # Biais directionnel : position dans le canal (0=support, 1=résistance) +
-                # RSI + MACD, chacun votant pour LONG ou SHORT avec un poids donné.
+                # REFONTE (même principe qu'Accumulation, SANS l'exigence de tendance alignée
+                # — Range Trading cible justement les marchés SANS tendance nette, l'exiger
+                # irait à l'encontre du mode) : proximité au niveau détermine LONG/SHORT,
+                # début de mouvement (croisement MACD frais + accélération de prix) confirme
+                # le timing d'entrée. Remplace l'ancien système de score RSI/MACD + attente
+                # d'un rebond déjà en cours (jugé trop tardif).
                 position_in_range = (price - support) / (resistance - support) if resistance > support else 0.5
-                score_long, score_short, raisons_long, raisons_short = 0, 0, [], []
-                if position_in_range <= 0.35:
-                    score_long += 15; raisons_long.append(f"proche du support ({position_in_range*100:.0f}% du canal)")
-                elif position_in_range >= 0.65:
-                    score_short += 15; raisons_short.append(f"proche de la résistance ({position_in_range*100:.0f}% du canal)")
-                if rsi is not None:
-                    if rsi < 40:
-                        score_long += 10; raisons_long.append(f"RSI {rsi:.1f} (survente)")
-                    elif rsi > 60:
-                        score_short += 10; raisons_short.append(f"RSI {rsi:.1f} (surachat)")
+                biais_direction, biais_confiance, biais_raisons = None, 50, []
+                near_support_r = position_in_range <= 0.15
+                near_resistance_r = position_in_range >= 0.85
+
                 macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
-                if macd_bias:
-                    if macd_bias["macd"] > macd_bias["signal"]:
-                        score_long += 10; raisons_long.append("MACD haussier")
-                    elif macd_bias["macd"] < macd_bias["signal"]:
-                        score_short += 10; raisons_short.append("MACD baissier")
+                atr_r = tech.get("atr")
+                fresh_cross_up_r = bool(macd_bias and macd_bias.get("crossBull"))
+                fresh_cross_down_r = bool(macd_bias and macd_bias.get("crossBear"))
+                price_accel_r = bool(atr_r and len(closes) >= 2 and abs(price - closes[-2]) >= atr_r)
 
-                if score_long > score_short:
-                    biais_direction, biais_confiance, biais_raisons = "LONG", min(50 + score_long, 85), raisons_long
-                elif score_short > score_long:
-                    biais_direction, biais_confiance, biais_raisons = "SHORT", min(50 + score_short, 85), raisons_short
-                else:
-                    biais_direction, biais_confiance, biais_raisons = None, 50, []
-
-                # Vérification de RETOURNEMENT CONFIRMÉ — même logique que l'Accumulation (voir
-                # plus bas dans la boucle) : un biais directionnel basé sur position/RSI/MACD ne
-                # suffit pas seul, il faut aussi qu'un vrai rebond soit EN TRAIN de se produire,
-                # pas juste que le prix soit "dans la bonne zone". Sans ça, la suggestion peut
-                # pointer vers un sens alors que le prix continue de dériver dans l'autre.
-                # Compare au prix RÉEL en continu (pas à la couleur de bougie, figée jusqu'à
-                # 15 min de retard) sur les 3 dernières bougies.
-                if biais_direction is not None:
-                    recent_low_r = min(closes[-3:]) if len(closes) >= 3 else price
-                    recent_high_r = max(closes[-3:]) if len(closes) >= 3 else price
-                    rsi_prev_r = calc_rsi(closes[:-3], int(rsi_period)) if len(closes) > 17 else None
-                    macd_bull_r = bool(macd_bias and macd_bias["macd"] > macd_bias["signal"])
-                    macd_bear_r = bool(macd_bias and macd_bias["macd"] < macd_bias["signal"])
-                    if biais_direction == "LONG":
-                        bouncing = price > recent_low_r * 1.001
-                        rsi_recov = bool(rsi_prev_r is not None and rsi is not None and rsi > rsi_prev_r)
-                        reversal_ok = bouncing and (rsi_recov or macd_bull_r)
-                    else:
-                        bouncing = price < recent_high_r * 0.999
-                        rsi_recov = bool(rsi_prev_r is not None and rsi is not None and rsi < rsi_prev_r)
-                        reversal_ok = bouncing and (rsi_recov or macd_bear_r)
-                    if not reversal_ok:
-                        biais_direction, biais_confiance, biais_raisons = None, 50, []
+                if near_support_r and fresh_cross_up_r and price_accel_r:
+                    biais_direction, biais_confiance = "LONG", 75
+                    biais_raisons = [f"proche du support ({position_in_range*100:.0f}% du canal)", "début de mouvement haussier (croisement MACD frais + accélération)"]
+                elif near_resistance_r and fresh_cross_down_r and price_accel_r:
+                    biais_direction, biais_confiance = "SHORT", 75
+                    biais_raisons = [f"proche de la résistance ({position_in_range*100:.0f}% du canal)", "début de mouvement baissier (croisement MACD frais + accélération)"]
 
                 qualifies = biais_direction is not None and biais_confiance >= 70
 
@@ -8985,7 +8959,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.47"
+BACKEND_BUILD_VERSION = "2026-08-20.48"
 
 @app.get("/api/version")
 def get_version():
