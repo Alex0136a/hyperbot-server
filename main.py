@@ -1,4 +1,3 @@
-
 """
 HyperBot AI — Backend Python FastAPI
 Serveur principal avec authentification, API et moteur de scan
@@ -2200,11 +2199,17 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
 
     # Prix de fill réel (si l'exchange le renvoie) — plus fiable qu'une estimation locale
     # potentiellement périmée. Fallback sur cur_price si la structure est inattendue.
+    # oid_reel = identifiant d'ordre RÉEL renvoyé par Hyperliquid — exposé dans le log de
+    # succès pour permettre une vérification sans ambiguïté a posteriori (chercher cet ID
+    # précis dans l'historique Hyperliquid confirme ou infirme définitivement qu'un ordre
+    # réel a bien été exécuté, plutôt que de devoir déduire indirectement).
     fill_price = cur_price
+    oid_reel = None
     try:
         statuses = result["response"]["data"]["statuses"]
         if statuses and "filled" in statuses[0]:
             fill_price = float(statuses[0]["filled"]["avgPx"])
+            oid_reel = statuses[0]["filled"].get("oid")
     except Exception:
         pass
 
@@ -2246,7 +2251,7 @@ def hl_open_position(account_address: str, coin: str, action: str, size_usdc: fl
     except Exception as e:
         sl_echec_raison = str(e)
 
-    return coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_usdc
+    return coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_usdc, oid_reel
 
 def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = None):
     """Ferme une position réelle sur Hyperliquid (market order) et annule le SL de sécurité associé.
@@ -4949,7 +4954,7 @@ async def scan_markets(user_id: int):
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 1.0
                             safety_mult = cfg_ml["hl_safety_sl_multiplier"] if cfg_ml and "hl_safety_sl_multiplier" in cfg_ml.keys() and cfg_ml["hl_safety_sl_multiplier"] else 5.0
                             leverage = ai.get("leverage") or 1
-                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val, safety_mult)
+                            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective, oid_reel = hl_open_position(account_address, coin, ai["action"], size, leverage, price, max_loss_pct_val, safety_mult)
                             if repli_raison:
                                 add_bot_log(user_id, f"⚠️ {coin}: levier x{leverage} refusé par Hyperliquid ({repli_raison}) — repli automatique sur x{levier_reel}, taille recalculée en conséquence", "warning")
                             if taille_ajustee_min_raison:
@@ -7633,7 +7638,7 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         safety_mult = accum_max_loss_cfg["hl_safety_sl_multiplier"] if accum_max_loss_cfg and "hl_safety_sl_multiplier" in accum_max_loss_cfg.keys() and accum_max_loss_cfg["hl_safety_sl_multiplier"] else 5.0
         max_loss_for_sl = accum_max_loss_for_sl if is_accumulation else (breakout_max_loss_for_sl if is_breakout else (range_max_loss_for_sl if is_range_trade else (c["custom_max_loss_pct"] if c["custom_max_loss_pct"] is not None else 1.0)))
         try:
-            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
+            coin_size, sl_oid, fill_price, levier_reel, repli_raison, sl_echec_raison, taille_ajustee_min_raison, size_effective, oid_reel = hl_open_position(account_address, coin, action, size_usdc, leverage, price, max_loss_for_sl, safety_mult)
         except Exception as e:
             conn.close()
             raise ValueError(f"Échec ouverture live: {e}")
@@ -7665,7 +7670,8 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
         # engagée, après ajustement) — le trade réel était correct, seul le log induisait en
         # erreur sur la taille observée (source probable de confusion sur plusieurs
         # investigations de taille passées).
-        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_effective} USDC (x{levier_reel})", "success")
+        oid_display = f" [oid Hyperliquid: {oid_reel}]" if oid_reel else " [⚠️ oid absent de la réponse — vérification impossible]"
+        add_bot_log(user_id, f"{label}: {action} {coin} @ ${fill_price} | {size_effective} USDC (x{levier_reel}){oid_display}", "success")
         return f"{'Achat Accumulation' if is_accumulation else 'Trade manuel'} LIVE {action} {coin} ouvert à ${fill_price}", fill_price
 
     portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
@@ -8959,7 +8965,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.48"
+BACKEND_BUILD_VERSION = "2026-08-20.49"
 
 @app.get("/api/version")
 def get_version():
