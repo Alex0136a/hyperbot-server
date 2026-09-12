@@ -328,7 +328,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.33";
+const APP_BUILD_VERSION = "2026-08-20.34";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -1202,6 +1202,9 @@ Confirmer ?`
                     {!!matchedTrade?.is_range_trade && (
                       <span style={{background:"#2e1a3d",color:"#a78bfa",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Range Trading (expérimental) — issu de la suggestion RANGE, sortie par Max Loss + trailing">📊 RANGE</span>
                     )}
+                    {!!matchedTrade?.trailing_armed && (
+                      <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Un mécanisme de trailing/QP a atteint son seuil d'armement — le trade continue de courir, protégé par un plancher qui suit le pic">🔒 armé</span>
+                    )}
                   </div>
                   <span style={{fontSize:15,fontWeight:700,color:pnl>=0?"#34d399":"#f87171"}}>{pnl>=0?"+":""}{pnl.toFixed(2)} USDC</span>
                 </div>
@@ -1976,6 +1979,9 @@ Confirmer ?`
                         )}
                         {!!trade.is_range_trade && (
                           <span style={{background:"#2e1a3d",color:"#a78bfa",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Range Trading (expérimental) — issu de la suggestion RANGE, sortie par Max Loss + trailing">📊 RANGE</span>
+                        )}
+                        {!!trade.trailing_armed && (
+                          <span style={{background:"#052e16",color:"#34d399",padding:"1px 6px",borderRadius:3,fontSize:9,fontWeight:700}} title="Un mécanisme de trailing/QP a atteint son seuil d'armement — le trade continue de courir, protégé par un plancher qui suit le pic">🔒 armé</span>
                         )}
                       </div>
                       <div style={{display:"flex",gap:12,alignItems:"center"}}>
