@@ -7336,9 +7336,31 @@ def unblock_all_mode_coins(mode: str, user_id: int = Depends(get_current_user)):
 MODE_SQL_FILTER = {
     "main": "(is_accumulation IS NULL OR is_accumulation=0) AND (is_breakout IS NULL OR is_breakout=0) AND (is_range_trade IS NULL OR is_range_trade=0)",
     "accumulation": "is_accumulation=1",
+    "accumulation_long": "is_accumulation=1 AND action='LONG'",
+    "accumulation_short": "is_accumulation=1 AND action='SHORT'",
     "breakout": "is_breakout=1",
     "range": "is_range_trade=1",
 }
+
+@app.post("/api/mode-clear-paper-on-live-switch/{mode}")
+def clear_mode_paper_on_live_switch(mode: str, user_id: int = Depends(get_current_user)):
+    """Appelé UNIQUEMENT au moment de basculer un mode de Paper vers Live — supprime tous les
+    paper_trades PAPER (is_live=0) correspondant à ce mode (ouverts + historique), sans jamais
+    toucher aux trades LIVE (is_live=1). Même principe que
+    /api/spot-accum/clear-paper-on-live-switch, généralisé aux 4 autres modes (bot principal,
+    Accumulation LONG, Accumulation SHORT, Breakout, Range Trading)."""
+    if mode not in ("main", "accumulation_long", "accumulation_short", "breakout", "range"):
+        raise HTTPException(status_code=404, detail=f"Mode inconnu: {mode}")
+    mode_filter = MODE_SQL_FILTER[mode]
+    conn = get_db()
+    open_count = conn.execute(f"SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND is_live=0 AND status='OPEN' AND {mode_filter}", (user_id,)).fetchone()[0]
+    closed_count = conn.execute(f"SELECT COUNT(*) FROM paper_trades WHERE user_id=? AND is_live=0 AND status='CLOSED' AND {mode_filter}", (user_id,)).fetchone()[0]
+    conn.execute(f"DELETE FROM paper_trades WHERE user_id=? AND is_live=0 AND {mode_filter}", (user_id,))
+    conn.commit()
+    conn.close()
+    label = {"main": "Bot principal", "accumulation_long": "Accumulation LONG", "accumulation_short": "Accumulation SHORT", "breakout": "Breakout", "range": "Range Trading"}[mode]
+    add_bot_log(user_id, f"🧹 {label}: passage en LIVE — {open_count} position(s) paper ouverte(s) fermée(s) et {closed_count} trade(s) paper de l'historique effacés (les trades LIVE ne sont pas affectés)", "info")
+    return {"success": True, "closed": open_count, "history_erased": closed_count}
 
 @app.get("/api/mode-performance/{mode}")
 def get_mode_performance(mode: str, user_id: int = Depends(get_current_user)):
@@ -8963,7 +8985,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.46"
+BACKEND_BUILD_VERSION = "2026-08-20.47"
 
 @app.get("/api/version")
 def get_version():
