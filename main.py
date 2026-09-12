@@ -1946,6 +1946,39 @@ _account_value_cache = {}  # {account_address: (timestamp, (value, error))} — 
                           # la vente, etc.), pas uniquement celui-ci mais il y contribue.
 ACCOUNT_VALUE_CACHE_TTL_SECONDS = 8
 
+_live_pnl_cache = {}  # {account_address: (timestamp, {coin: real_unrealized_pnl})}
+LIVE_PNL_CACHE_TTL_SECONDS = 5
+
+def get_hl_live_unrealized_pnl(account_address: str) -> dict:
+    """Récupère le VRAI PnL non réalisé de chaque position ouverte, directement depuis
+    Hyperliquid (inclut funding + frais automatiquement, contrairement à notre calcul interne
+    purement basé sur le mouvement de prix) — pour l'AFFICHAGE des trades Live uniquement, la
+    logique de sortie (Max Loss/trailing) continue d'utiliser le calcul interne basé sur le %
+    de mouvement de prix, inchangé. Cache court (5s) + retry, pour limiter la charge réseau
+    (observé : 429 de la part d'Hyperliquid plus tôt aujourd'hui avec un volume d'appels élevé).
+    Retourne un dict vide en cas d'échec — l'appelant doit alors garder l'ancienne valeur
+    affichée plutôt que d'effacer/planter."""
+    if not account_address or not HL_SDK_AVAILABLE:
+        return {}
+    cached = _live_pnl_cache.get(account_address)
+    if cached and (time.time() - cached[0]) < LIVE_PNL_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = {}
+    try:
+        info = HLInfo(hl_base_url(), skip_ws=True)
+        state = _hl_call_with_retry(info.user_state, account_address)
+        for p in state.get("assetPositions", []):
+            pos = p.get("position", {})
+            coin = pos.get("coin")
+            upnl = pos.get("unrealizedPnl")
+            if coin and upnl is not None:
+                result[coin] = float(upnl)
+    except Exception as e:
+        print(f"⚠️ Échec lecture PnL réel Hyperliquid: {e}")
+        return {}
+    _live_pnl_cache[account_address] = (time.time(), result)
+    return result
+
 def get_hl_account_value_verbose(account_address: str):
     """Wrapper de cache court (8s) autour de _get_hl_account_value_verbose_uncached — voir
     cette dernière pour la logique complète et l'historique des correctifs. Le cache réduit le
@@ -2843,6 +2876,19 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
     price_move_pct = (cur - trade["entry_price"]) / trade["entry_price"] * direction * 100
 
+    def _display_pnl(internal_pnl):
+        """Override d'AFFICHAGE uniquement pour les trades Live — vrai PnL Hyperliquid (funding
+        + frais inclus), sans jamais toucher au calcul interne utilisé pour la logique de
+        sortie (Max Loss/trailing, basée sur le % de mouvement de prix, inchangée)."""
+        if trade.get("is_live"):
+            wallet_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+            wallet_addr = wallet_row["hl_wallet"] if wallet_row else None
+            real_pnls = get_hl_live_unrealized_pnl(wallet_addr) if wallet_addr else {}
+            if trade["coin"] in real_pnls:
+                real_pnl = real_pnls[trade["coin"]]
+                return real_pnl, round(real_pnl / trade["size_usdc"] * 100, 2)
+        return internal_pnl, round(internal_pnl / trade["size_usdc"] * 100, 2)
+
     # Mode ACCUMULATION : court-circuite tout le reste (Max Loss, QP, TTP, plafond absolu).
     # Aucune sortie forcée en perte — on garde tant que nécessaire, patience en cas de repli.
     # Seule sortie possible : le % de gain visé (figé par trade à l'achat) est atteint.
@@ -2974,8 +3020,9 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             # et sera réévalué (et une nouvelle tentative de fermeture faite) au prochain cycle.
             conn.commit()
             return None
+        _dp, _dpp = _display_pnl(pnl)
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                    (cur, round(_dp,2), _dpp, trade["id"]))
         conn.commit()
         return None
 
@@ -3047,8 +3094,9 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 return {"pnl": pnl, "close_reason": bo_close_reason}
             conn.commit()
             return None
+        _dp, _dpp = _display_pnl(pnl)
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                    (cur, round(_dp,2), _dpp, trade["id"]))
         conn.commit()
         return None
 
@@ -3118,8 +3166,9 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 return {"pnl": pnl, "close_reason": rt_close_reason}
             conn.commit()
             return None
+        _dp, _dpp = _display_pnl(pnl)
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                    (cur, round(_dp,2), _dpp, trade["id"]))
         conn.commit()
         return None
 
@@ -3308,17 +3357,23 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 label = "Plancher QP" if reason == "QP_FLOOR" else ("Trailing Profit" if reason == "TRAILING_PROFIT" else "Plancher précoce")
                 add_bot_log(user_id, f"🎯 {trade['coin']}: {label} +{round(pnl,2)} USDC (pic PnL: +{round(peak_pct,3)}%, seuil: {round(stop_level_pct,3)}%, armé QP: {round(active_arm_pct,3) if active_arm_pct else 'N/A'}%) !", "success")
 
+    # Override d'AFFICHAGE uniquement pour les trades Live — récupère le vrai PnL Hyperliquid
+    # (funding + frais inclus automatiquement), sans toucher pnl/pnl_pct_live utilisés
+    # ci-dessus pour la logique de sortie (Max Loss/trailing), qui reste basée sur le % de
+    # mouvement de prix, inchangée.
     if not close_reason:
+        _dp, _dpp = _display_pnl(pnl)
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                    (cur, round(_dp,2), _dpp, trade["id"]))
         conn.commit()
         return None
 
     if not anti_wick_check(conn, "paper_trades", trade["id"], close_reason,
                             trade.get("pending_close_reason"), trade.get("pending_close_since"),
                             anti_wick_delay, trade["action"], candle_color):
+        _dp, _dpp = _display_pnl(pnl)
         conn.execute("UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?",
-                    (cur, round(pnl,2), round(pnl/trade["size_usdc"]*100,2), trade["id"]))
+                    (cur, round(_dp,2), _dpp, trade["id"]))
         conn.commit()
         return None  # anti-mèche : pas encore confirmé, on attend
 
@@ -8992,7 +9047,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.51"
+BACKEND_BUILD_VERSION = "2026-08-20.52"
 
 @app.get("/api/version")
 def get_version():
