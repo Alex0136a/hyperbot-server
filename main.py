@@ -1926,7 +1926,34 @@ def get_hl_account_value(account_address: str) -> float:
         print(f"HL account_value error: {error}")
     return value
 
+_account_value_cache = {}  # {account_address: (timestamp, (value, error))} — cache court pour
+                          # réduire le VOLUME d'appels réseau, pas seulement mieux gérer leurs
+                          # échecs : plusieurs candidats/modes peuvent vérifier le capital dans
+                          # le même cycle de scan, chacun déclenchant sinon 2 appels Hyperliquid
+                          # (perp + spot) — observé concrètement : 429 (limite de débit) sur
+                          # Spot Accumulation, plausiblement dû au volume cumulé de tous les
+                          # appels réseau ajoutés cette session (retournement 1h, solde réel à
+                          # la vente, etc.), pas uniquement celui-ci mais il y contribue.
+ACCOUNT_VALUE_CACHE_TTL_SECONDS = 8
+
 def get_hl_account_value_verbose(account_address: str):
+    """Wrapper de cache court (8s) autour de _get_hl_account_value_verbose_uncached — voir
+    cette dernière pour la logique complète et l'historique des correctifs. Le cache réduit le
+    VOLUME d'appels réseau (pas seulement la gestion de leurs échecs) : plusieurs
+    candidats/modes peuvent vérifier le capital dans le même cycle de scan, chacun déclenchant
+    sinon 2 appels Hyperliquid (perp + spot) — observé concrètement : 429 (limite de débit) sur
+    Spot Accumulation, plausiblement dû au volume cumulé de tous les appels réseau ajoutés
+    cette session, pas uniquement celui-ci mais il y contribue."""
+    if not account_address:
+        return 0.0, "Aucune adresse wallet Hyperliquid configurée"
+    cached = _account_value_cache.get(account_address)
+    if cached and (time.time() - cached[0]) < ACCOUNT_VALUE_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = _get_hl_account_value_verbose_uncached(account_address)
+    _account_value_cache[account_address] = (time.time(), result)
+    return result
+
+def _get_hl_account_value_verbose_uncached(account_address: str):
     """Identique à get_hl_account_value mais renvoie aussi le message d'erreur réel (ou None si
     succès) — pour pouvoir le journaliser côté utilisateur (add_bot_log) au lieu de seulement
     l'imprimer côté serveur, invisible depuis l'interface.
@@ -1945,12 +1972,12 @@ def get_hl_account_value_verbose(account_address: str):
         return 0.0, "Aucune adresse wallet Hyperliquid configurée"
     try:
         info = HLInfo(hl_base_url(), skip_ws=True)
-        state = info.user_state(account_address)
+        state = _hl_call_with_retry(info.user_state, account_address)
         account_value = float(state.get("marginSummary", {}).get("accountValue", 0) or 0)
         withdrawable = float(state.get("withdrawable", 0) or 0)
         spot_total = 0.0
         try:
-            spot_state = info.spot_user_state(account_address)
+            spot_state = _hl_call_with_retry(info.spot_user_state, account_address)
             # BUG CORRIGÉ : ne comptait que le solde USDC/USD, ignorant complètement la VALEUR
             # de tout autre actif détenu (ex: HYPE acheté par Spot Accumulation) — le capital
             # apparaissait sous-évalué dès qu'une partie était investie en actifs réels, faussant
@@ -2003,12 +2030,12 @@ def get_hl_balance_breakdown(account_address: str):
         return None, None, "Wallet ou SDK non configuré"
     try:
         info = HLInfo(hl_base_url(), skip_ws=True)
-        state = info.user_state(account_address)
+        state = _hl_call_with_retry(info.user_state, account_address)
         perp_account_value = float(state.get("marginSummary", {}).get("accountValue", 0) or 0)
         perp_withdrawable = float(state.get("withdrawable", 0) or 0)
         spot_balance = 0.0
         try:
-            spot_state = info.spot_user_state(account_address)
+            spot_state = _hl_call_with_retry(info.spot_user_state, account_address)
             # BUG CORRIGÉ (3e itération) : même défaut que get_hl_account_value_verbose — ne
             # comptait que l'USDC, ignorant la valeur de tout actif réellement détenu (ex: HYPE
             # acheté par Spot Accumulation), faisant apparaître le Bilan en dessous du capital
@@ -8936,7 +8963,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.45"
+BACKEND_BUILD_VERSION = "2026-08-20.46"
 
 @app.get("/api/version")
 def get_version():
