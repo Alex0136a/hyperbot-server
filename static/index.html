@@ -31,6 +31,19 @@ async function apiCall(path, method="GET", body=null, token=null) {
     method, headers, body: body ? JSON.stringify(body) : null
   });
   const data = await r.json();
+  if (r.status === 401) {
+    // Session expirée — sans ce correctif, chaque appel périodique (loadData toutes les 5s)
+    // relançait la même erreur en boucle indéfiniment, sans jamais inviter l'utilisateur à se
+    // reconnecter. Efface le token et force un retour propre à l'écran de connexion.
+    localStorage.removeItem("hb_token");
+    localStorage.removeItem("hb_email");
+    if (!window.__sessionExpiredHandled) {
+      window.__sessionExpiredHandled = true;
+      alert("Votre session a expiré — veuillez vous reconnecter.");
+      window.location.reload();
+    }
+    throw new Error("Session expirée, veuillez vous reconnecter");
+  }
   if (!r.ok) throw new Error(data.detail || "Erreur serveur");
   return data;
 }
@@ -328,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.35";
+const APP_BUILD_VERSION = "2026-08-20.36";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
