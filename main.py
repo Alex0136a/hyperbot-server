@@ -1675,6 +1675,14 @@ def init_db():
     except Exception:
         pass
     try:
+        # Nécessaire depuis le passage de Spot Accumulation à une exécution perpétuelle (x1,
+        # sans levier) plutôt qu'un achat spot réel — Hyperliquid n'ayant qu'un seul actif
+        # disponible en spot (HYPE), ce mode ne pouvait pas fonctionner sur les autres coins.
+        conn.execute("ALTER TABLE spot_holdings ADD COLUMN hl_sl_oid INTEGER")
+        conn.commit()
+    except Exception:
+        pass
+    try:
         # Délai de confirmation anti-mèche, en minutes — combiné à la couleur de bougie
         # (celle-ci apporte déjà la confirmation principale, le délai n'est qu'un minimum
         # de sécurité en plus). 1 min par défaut.
@@ -2342,7 +2350,12 @@ def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = N
         if inner_statuses and "resting" in inner_statuses[0]:
             raise RuntimeError(f"Fermeture acceptée mais PAS confirmée (ordre en attente sur le carnet, 'resting') — la position pourrait rester réellement ouverte, nouvelle tentative au prochain cycle: {result}")
         raise RuntimeError(f"Statut de fermeture inattendu/non confirmé par Hyperliquid: {result}")
-    return result
+    fill_price_close = None
+    try:
+        fill_price_close = float(inner_statuses[0]["filled"]["avgPx"])
+    except Exception:
+        pass
+    return fill_price_close
 
 def hl_spot_coin_name(coin: str) -> str:
     """Convertit un symbole de coin (ex: 'PURR') au format attendu par l'endpoint spot
@@ -3736,12 +3749,12 @@ async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin:
                 user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                 hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
                 try:
-                    sold_price = hl_spot_sell(hl_wallet, h["coin"], h["qty"])
+                    sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
                     if sold_price:
                         fill_price_sell = sold_price
-                    add_bot_log(user_id, f"🔴 {h['coin']}: vente spot réelle confirmée sur Hyperliquid ({close_reason})", "success")
+                    add_bot_log(user_id, f"🔴 {h['coin']}: fermeture perpétuelle réelle confirmée sur Hyperliquid ({close_reason})", "success")
                 except Exception as e:
-                    add_bot_log(user_id, f"⛔ {h['coin']}: ÉCHEC de vente spot réelle — {e} — holding gardé OUVERT, nouvelle tentative au prochain cycle", "error")
+                    add_bot_log(user_id, f"⛔ {h['coin']}: ÉCHEC de fermeture réelle — {e} — holding gardé OUVERT, nouvelle tentative au prochain cycle", "error")
                     close_confirmed = False
             if close_confirmed:
                 final_pnl_pct = (fill_price_sell - h["entry_price"]) / h["entry_price"] * 100
@@ -4887,11 +4900,11 @@ async def scan_markets(user_id: int):
                                     user_row_rot = conn_sp.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                                     hl_wallet_rot = user_row_rot["hl_wallet"] if user_row_rot and "hl_wallet" in user_row_rot.keys() else None
                                     try:
-                                        sold_price = hl_spot_sell(hl_wallet_rot, armed_holding["coin"], armed_holding["qty"])
+                                        sold_price = hl_close_position(hl_wallet_rot, armed_holding["coin"], armed_holding.get("hl_sl_oid"))
                                         if sold_price:
                                             fill_price_rot = sold_price
                                     except Exception as e:
-                                        add_bot_log(user_id, f"⛔ {armed_holding['coin']}: échec de rotation (vente réelle) — {e} — holding gardé ouvert", "error")
+                                        add_bot_log(user_id, f"⛔ {armed_holding['coin']}: échec de rotation (fermeture réelle) — {e} — holding gardé ouvert", "error")
                                         rotate_ok = False
                                 if rotate_ok:
                                     rot_pnl_pct = (fill_price_rot - armed_holding["entry_price"]) / armed_holding["entry_price"] * 100
@@ -4930,25 +4943,30 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — capital insuffisant ({round(capital_sp,2)}$ < {size_sp}$ requis) — achat annulé", "warning")
                         continue
                     try:
-                        # AVERTISSEMENT : nécessite un solde USDC dans le compte SPOT Hyperliquid
-                        # spécifiquement (distinct de la marge des perpétuels) — le capital
-                        # utilisé pour le calcul de taille ci-dessus est l'équité globale du
-                        # compte, pas le solde spot disponible précisément. Si l'ordre échoue
-                        # pour solde spot insuffisant, un transfert perp→spot est nécessaire
-                        # côté utilisateur (l'app ne le fait pas automatiquement).
-                        qty_sp, fill_price_sp = hl_spot_buy(hl_wallet_sp, coin, size_sp, cur_price_sp)
+                        # CHANGEMENT : exécution via PERPÉTUEL (x1, sans levier) plutôt qu'un
+                        # achat spot réel — Hyperliquid n'a qu'un seul actif disponible en spot
+                        # (HYPE), ce mode ne pouvait donc pas fonctionner sur les autres coins.
+                        # Même exposition économique (x1 = aucun levier), mais couvre désormais
+                        # tous les coins actifs comme les autres modes. Bonus : pose aussi un
+                        # SL de sécurité réel sur l'exchange, impossible en spot pur.
+                        cfg_sl_sp = conn.execute("SELECT hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                        safety_mult_sp = cfg_sl_sp["hl_safety_sl_multiplier"] if cfg_sl_sp and "hl_safety_sl_multiplier" in cfg_sl_sp.keys() and cfg_sl_sp["hl_safety_sl_multiplier"] else 5.0
+                        cfg_maxloss_sp = conn.execute("SELECT spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                        max_loss_sp = cfg_maxloss_sp["spot_accum_max_loss_pct"] if cfg_maxloss_sp and "spot_accum_max_loss_pct" in cfg_maxloss_sp.keys() and cfg_maxloss_sp["spot_accum_max_loss_pct"] is not None else 1.5
+                        qty_sp, sl_oid_sp, fill_price_sp, _, _, _, _, _, _ = hl_open_position(
+                            hl_wallet_sp, coin, "LONG", size_sp, 1, cur_price_sp, max_loss_sp, safety_mult_sp)
                         conn_ins = get_db()
                         conn_ins.execute("""INSERT INTO spot_holdings
                             (user_id, coin, status, entry_price, current_price, qty, size_usdc,
                              support_price, resistance_price, channel_pct, target_pct, is_live,
-                             opened_at, session_date)
-                            VALUES (?,?,'OPEN',?,?,?,?,?,?,?,?,1,?,?)""",
+                             hl_sl_oid, opened_at, session_date)
+                            VALUES (?,?,'OPEN',?,?,?,?,?,?,?,?,1,?,?,?)""",
                             (user_id, coin, fill_price_sp, fill_price_sp, qty_sp, size_sp,
                              cand["support"], cand["resistance"], cand["channel_pct"], target_pct_sp,
-                             datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
+                             sl_oid_sp, datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
                         conn_ins.commit()
                         conn_ins.close()
-                        add_bot_log(user_id, f"🤖🪙 Spot Accumulation LIVE: achat {qty_sp} {coin} @ ${fill_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
+                        add_bot_log(user_id, f"🤖🪙 Spot Accumulation LIVE (perpétuel x1): achat {qty_sp} {coin} @ ${fill_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
                     except Exception as e:
                         add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — achat échoué ({e}) — nouvelle tentative au prochain cycle", "warning")
                 else:
@@ -7576,11 +7594,11 @@ def close_spot_holding_manual(req: CloseSpotHoldingRequest, user_id: int = Depen
         user_row_conn.close()
         hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         try:
-            sold_price = hl_spot_sell(hl_wallet, h["coin"], h["qty"])
+            sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
             if sold_price:
                 fill_price = sold_price
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Échec de la vente spot réelle sur Hyperliquid: {e}")
+            raise HTTPException(status_code=500, detail=f"Échec de la fermeture réelle sur Hyperliquid: {e}")
 
     final_pnl_pct = (fill_price - h["entry_price"]) / h["entry_price"] * 100
     final_pnl = h["size_usdc"] * (final_pnl_pct / 100)
@@ -7613,12 +7631,12 @@ def close_spot_holding_manual(req: CloseSpotHoldingRequest, user_id: int = Depen
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
         hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         try:
-            sold_price = hl_spot_sell(hl_wallet, h["coin"], h["qty"])
+            sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
             if sold_price:
                 fill_price = sold_price
         except Exception as e:
             conn.close()
-            raise HTTPException(status_code=500, detail=f"Échec de vente réelle sur Hyperliquid — vérifiez manuellement sur l'exchange ! ({e})")
+            raise HTTPException(status_code=500, detail=f"Échec de fermeture réelle sur Hyperliquid — vérifiez manuellement sur l'exchange ! ({e})")
     final_pnl_pct = (fill_price - h["entry_price"]) / h["entry_price"] * 100
     final_pnl = h["size_usdc"] * (final_pnl_pct / 100)
     conn.execute("""UPDATE spot_holdings SET status='CLOSED', current_price=?, pnl=?, pnl_pct=?,
@@ -9086,7 +9104,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.54"
+BACKEND_BUILD_VERSION = "2026-08-20.56"
 
 @app.get("/api/version")
 def get_version():
