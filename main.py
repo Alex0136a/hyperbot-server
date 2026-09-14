@@ -4068,7 +4068,7 @@ async def scan_markets(user_id: int):
                 near_resistance_r = position_in_range >= 0.85
 
                 macd_bias = calc_macd(closes, int(macd_fast), int(macd_slow), int(macd_sig))
-                atr_r = tech.get("atr")
+                atr_r = atr
                 fresh_cross_up_r = bool(macd_bias and macd_bias.get("crossBull"))
                 fresh_cross_down_r = bool(macd_bias and macd_bias.get("crossBear"))
                 price_accel_r = bool(atr_r and len(closes) >= 2 and abs(price - closes[-2]) >= atr_r)
@@ -9104,7 +9104,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.56"
+BACKEND_BUILD_VERSION = "2026-08-20.57"
 
 @app.get("/api/version")
 def get_version():
