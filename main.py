@@ -4949,10 +4949,16 @@ async def scan_markets(user_id: int):
                         # Même exposition économique (x1 = aucun levier), mais couvre désormais
                         # tous les coins actifs comme les autres modes. Bonus : pose aussi un
                         # SL de sécurité réel sur l'exchange, impossible en spot pur.
-                        cfg_sl_sp = conn.execute("SELECT hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                        # BUG CORRIGÉ : utilisait la connexion englobante `conn`, déjà fermée à
+                        # ce stade du cycle de scan (fermée juste après la boucle principale par
+                        # coin, avant le traitement des candidats Spot Accum) — chaque tentative
+                        # échouait avec "Cannot operate on a closed database".
+                        conn_cfg_sp = get_db()
+                        cfg_sl_sp = conn_cfg_sp.execute("SELECT hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                         safety_mult_sp = cfg_sl_sp["hl_safety_sl_multiplier"] if cfg_sl_sp and "hl_safety_sl_multiplier" in cfg_sl_sp.keys() and cfg_sl_sp["hl_safety_sl_multiplier"] else 5.0
-                        cfg_maxloss_sp = conn.execute("SELECT spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+                        cfg_maxloss_sp = conn_cfg_sp.execute("SELECT spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                         max_loss_sp = cfg_maxloss_sp["spot_accum_max_loss_pct"] if cfg_maxloss_sp and "spot_accum_max_loss_pct" in cfg_maxloss_sp.keys() and cfg_maxloss_sp["spot_accum_max_loss_pct"] is not None else 1.5
+                        conn_cfg_sp.close()
                         qty_sp, sl_oid_sp, fill_price_sp, _, _, _, _, _, _ = hl_open_position(
                             hl_wallet_sp, coin, "LONG", size_sp, 1, cur_price_sp, max_loss_sp, safety_mult_sp)
                         conn_ins = get_db()
@@ -9104,7 +9110,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.57"
+BACKEND_BUILD_VERSION = "2026-08-20.58"
 
 @app.get("/api/version")
 def get_version():
