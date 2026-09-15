@@ -1,3 +1,4 @@
+
 """
 HyperBot AI — Backend Python FastAPI
 Serveur principal avec authentification, API et moteur de scan
@@ -1740,6 +1741,23 @@ def init_db():
         conn.commit()
     except Exception as e:
         print(f"⚠️ Échec création mode_blocked_coins: {e}")
+    try:
+        # Tendance à ÉTAT PERSISTANT, par coin (GLOBALE — pas par utilisateur, une tendance de
+        # marché n'appartient à personne en particulier) : établie à un point de départ
+        # (retournement confirmé sur MACD 1h) puis reste figée dans cette direction jusqu'au
+        # PROCHAIN retournement confirmé — pas recalculée à froid à chaque cycle de scan sur
+        # un MACD qui varierait sans arrêt. Remplace l'ancien calcul qui réutilisait le même
+        # MACD 15min que la détection de "début de mouvement", rendant les deux confirmations
+        # redondantes plutôt qu'indépendantes.
+        conn.execute("""CREATE TABLE IF NOT EXISTS coin_trend_state (
+            coin TEXT PRIMARY KEY,
+            direction TEXT NOT NULL,
+            established_at TEXT NOT NULL,
+            established_price REAL
+        )""")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ Échec création coin_trend_state: {e}")
     conn.close()
 
 # ── AUTHENTIFICATION ─────────────────────────────────────────
@@ -2960,6 +2978,55 @@ def anti_wick_check(conn, table: str, row_id: int, current_reason: str, existing
             return False  # délai écoulé mais couleur pas encore confirmée — on attend encore, l'état en attente reste tel quel (le délai ne redémarre pas, seule la couleur manque)
 
     return True
+
+_coin_trend_cache_ts = {}  # {coin: dernier timestamp de refetch} — throttle le fetch des
+                          # bougies 1h (inutile de le refaire à chaque cycle de 3min pour une
+                          # tendance censée varier très peu)
+COIN_TREND_REFETCH_SECONDS = 600  # 10 min
+
+async def get_coin_trend_state(coin: str) -> str:
+    """Tendance à ÉTAT PERSISTANT pour ce coin (BULL/BEAR/NEUTRAL) — voir coin_trend_state pour
+    le principe complet. Fetch les bougies 1h (throttlé à 10min, pas à chaque cycle de 3min),
+    calcule le MACD dessus, et met à jour l'état stocké UNIQUEMENT si un retournement FRAIS est
+    détecté (crossBull/crossBear) — sinon garde l'état précédent tel quel, même si le MACD a
+    depuis dérivé sans franc croisement. C'est précisément le but : rester stable jusqu'au
+    prochain vrai retournement confirmé, pas recalculer à froid à chaque vérification."""
+    conn = get_db()
+    try:
+        last_fetch = _coin_trend_cache_ts.get(coin)
+        existing = conn.execute("SELECT direction FROM coin_trend_state WHERE coin=?", (coin,)).fetchone()
+        existing_direction = existing["direction"] if existing else None
+
+        if last_fetch and (time.time() - last_fetch) < COIN_TREND_REFETCH_SECONDS:
+            return existing_direction or "NEUTRAL"  # throttle — garde l'état sans refetch
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            candles_raw = await fetch_candles(client, coin, interval="1h", count=60)
+        _coin_trend_cache_ts[coin] = time.time()
+        if not candles_raw or len(candles_raw) < 35:
+            return existing_direction or "NEUTRAL"
+        closes = [float(c["c"]) for c in candles_raw]
+        macd = calc_macd(closes, 12, 26, 9)
+        if not macd:
+            return existing_direction or "NEUTRAL"
+
+        new_direction = None
+        if macd.get("crossBull"):
+            new_direction = "BULL"
+        elif macd.get("crossBear"):
+            new_direction = "BEAR"
+
+        if new_direction and new_direction != existing_direction:
+            conn.execute("INSERT OR REPLACE INTO coin_trend_state (coin, direction, established_at, established_price) VALUES (?,?,?,?)",
+                         (coin, new_direction, datetime.utcnow().isoformat(), closes[-1]))
+            conn.commit()
+            return new_direction
+
+        return existing_direction or "NEUTRAL"
+    except Exception:
+        return "NEUTRAL"
+    finally:
+        conn.close()
 
 async def accumulation_reversal_confirmed(coin: str, action: str) -> bool:
     """Retournement confirmé sur bougies 1h — tendance plus fiable que le 15min utilisé à
@@ -4414,15 +4481,14 @@ async def scan_markets(user_id: int):
                             # surveillance de retournement côté sortie (MACD 1h, voir
                             # accumulation_reversal_confirmed) protège désormais des entrées
                             # prématurées, plutôt que d'attendre une confirmation en amont.
-                            macd_val_bg = tech.get("macd_value")
-                            macd_bull_bg = tech.get("macd_bull")
-                            macd_bear_bg = tech.get("macd_bear")
-                            trend_bg = "NEUTRAL"
-                            if macd_val_bg is not None and macd_bull_bg is not None:
-                                if macd_bull_bg and macd_val_bg > 0:
-                                    trend_bg = "BULL"
-                                elif macd_bear_bg and macd_val_bg < 0:
-                                    trend_bg = "BEAR"
+                            # CORRIGÉ : utilisait le même MACD 15min que la détection de "début
+                            # de mouvement" ci-dessous, rendant les deux confirmations redondantes
+                            # plutôt qu'indépendantes — remplacé par une tendance à ÉTAT
+                            # PERSISTANT sur MACD 1h (voir get_coin_trend_state), qui reste
+                            # figée depuis son dernier retournement confirmé plutôt que d'être
+                            # recalculée à froid à chaque cycle sur un indicateur qui varie sans
+                            # arrêt.
+                            trend_bg = await get_coin_trend_state(coin)
                             trend_aligned = trend_bg == "BULL"
 
                             # NOUVEAU : détection de "début de mouvement" — s'ajoute à la
@@ -4512,16 +4578,9 @@ async def scan_markets(user_id: int):
                         else:
                             # Miroir du LONG : proximité + tendance BAISSIÈRE confirmée
                             # deviennent les critères principaux, plus de confirmation de rebond
-                            # (jugée trop tardive) comme condition bloquante.
-                            macd_val_bg_s = tech.get("macd_value")
-                            macd_bull_bg_s = tech.get("macd_bull")
-                            macd_bear_bg_s = tech.get("macd_bear")
-                            trend_bg_s = "NEUTRAL"
-                            if macd_val_bg_s is not None and macd_bull_bg_s is not None:
-                                if macd_bull_bg_s and macd_val_bg_s > 0:
-                                    trend_bg_s = "BULL"
-                                elif macd_bear_bg_s and macd_val_bg_s < 0:
-                                    trend_bg_s = "BEAR"
+                            # (jugée trop tardive) comme condition bloquante. Réutilise le même
+                            # état persistant par coin que le LONG (voir get_coin_trend_state).
+                            trend_bg_s = await get_coin_trend_state(coin)
                             trend_aligned_s = trend_bg_s == "BEAR"
 
                             # Miroir du LONG : réutilise crossBear déjà calculé + accélération.
@@ -4573,13 +4632,13 @@ async def scan_markets(user_id: int):
                                     spot_rsi_recovering = True
                             spot_macd_bull = bool(macd and macd["macd"] > macd["signal"])
                             spot_reversal_confirmed = spot_bouncing_up and spot_rsi_recovering and spot_macd_bull
-                            spot_trend = "NEUTRAL"
-                            macd_val_spot = tech.get("macd_value")
-                            if macd_val_spot is not None and tech.get("macd_bull") is not None:
-                                if tech.get("macd_bull") and macd_val_spot > 0:
-                                    spot_trend = "BULL"
-                                elif tech.get("macd_bear") and macd_val_spot < 0:
-                                    spot_trend = "BEAR"
+                            # CORRIGÉ : utilisait le même MACD 15min que la confirmation de
+                            # rebond ci-dessus, rendant les deux redondantes plutôt
+                            # qu'indépendantes — remplacé par la tendance à ÉTAT PERSISTANT sur
+                            # MACD 1h (même état partagé que Accumulation, voir
+                            # get_coin_trend_state), qui reste figée depuis son dernier
+                            # retournement confirmé.
+                            spot_trend = await get_coin_trend_state(coin)
                             # Marge minimale jusqu'à la résistance — vérifie qu'il reste
                             # VRAIMENT de la place pour monter avant d'acheter, pas seulement
                             # que le prix est proche du support. Sans ce garde-fou, un prix qui
@@ -9296,7 +9355,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.63"
+BACKEND_BUILD_VERSION = "2026-08-20.65"
 
 @app.get("/api/version")
 def get_version():
