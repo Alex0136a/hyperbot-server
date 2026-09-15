@@ -3718,9 +3718,29 @@ async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin:
         pnl = h["size_usdc"] * (pnl_pct / 100)
         peak_pct = max(h["peak_pct"] or 0, pnl_pct)
 
+        # Override d'AFFICHAGE uniquement pour les holdings Live — même principe que
+        # manage_open_trade (voir _display_pnl) : le vrai PnL Hyperliquid (funding + frais
+        # inclus, pertinent depuis le passage de ce mode à l'exécution perpétuelle) remplace le
+        # calcul interne pour l'AFFICHAGE seulement — la logique de sortie (Stop Loss/trailing,
+        # basée sur pnl_pct ci-dessus) reste inchangée, purement basée sur le % de prix.
+        display_pnl_sp, display_pnl_pct_sp = pnl, round(pnl_pct, 4)
+        if h.get("is_live"):
+            wallet_row_sp = None
+            try:
+                conn_w = get_db()
+                wallet_row_sp = conn_w.execute("SELECT hl_wallet FROM users WHERE id=?", (h["user_id"],)).fetchone()
+                conn_w.close()
+            except Exception:
+                pass
+            wallet_addr_sp = wallet_row_sp["hl_wallet"] if wallet_row_sp else None
+            real_pnls_sp = get_hl_live_unrealized_pnl(wallet_addr_sp) if wallet_addr_sp else {}
+            if h["coin"] in real_pnls_sp:
+                display_pnl_sp = real_pnls_sp[h["coin"]]
+                display_pnl_pct_sp = round(display_pnl_sp / h["size_usdc"] * 100, 4)
+
         conn = get_db()
         conn.execute("UPDATE spot_holdings SET current_price=?, peak_pct=?, pnl=?, pnl_pct=? WHERE id=?",
-                     (cur, peak_pct, round(pnl, 4), round(pnl_pct, 4), h["id"]))
+                     (cur, peak_pct, round(display_pnl_sp, 4), display_pnl_pct_sp, h["id"]))
 
         close_reason = None
         # Stop Loss SIMPLE et INCONDITIONNEL — vérifié en priorité. Vend dès que la perte
@@ -9184,7 +9204,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.60"
+BACKEND_BUILD_VERSION = "2026-08-20.61"
 
 @app.get("/api/version")
 def get_version():
