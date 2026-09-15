@@ -8163,6 +8163,55 @@ def reconcile_live_positions():
     finally:
         conn.close()
 
+def reconcile_spot_holdings():
+    """Équivalent de reconcile_live_positions, pour spot_holdings — jamais construit jusqu'ici,
+    alors que ce mode a le même besoin depuis toujours : un holding fermé côté exchange (ou,
+    depuis le passage à l'exécution perpétuelle, un holding legacy qui n'a jamais eu de
+    contrepartie réelle du tout — observé concrètement sur GMX, ni position perp ni solde spot,
+    retentant indéfiniment sans cette vérification) reste affiché comme "ouvert" pour toujours.
+    Vérifie BOTH perp (nouveaux holdings) ET solde spot réel (holdings legacy) avant de
+    conclure à une fermeture externe — un holding peut légitimement être de l'un ou l'autre
+    type selon sa date d'ouverture."""
+    conn = get_db()
+    try:
+        live_holdings = conn.execute(
+            "SELECT sh.*, u.hl_wallet FROM spot_holdings sh JOIN users u ON sh.user_id = u.id "
+            "WHERE sh.status='OPEN' AND sh.is_live=1"
+        ).fetchall()
+        par_wallet = {}
+        for h in live_holdings:
+            h = dict(h)
+            par_wallet.setdefault(h["hl_wallet"], []).append(h)
+        for wallet, holdings in par_wallet.items():
+            if not wallet:
+                continue
+            open_perp_coins = get_hl_open_coins(wallet)
+            if open_perp_coins is None:
+                continue  # échec de lecture — ne rien conclure plutôt que fermer à tort
+            spot_coins_held = set()
+            try:
+                info = HLInfo(hl_base_url(), skip_ws=True)
+                spot_state = _hl_call_with_retry(info.spot_user_state, wallet)
+                for b in spot_state.get("balances", []):
+                    if float(b.get("total", 0) or 0) > 0:
+                        spot_coins_held.add(b.get("coin"))
+            except Exception:
+                pass  # échec de lecture spot — se rabat sur la vérification perp seule
+            for h in holdings:
+                if h["coin"] not in open_perp_coins and h["coin"] not in spot_coins_held:
+                    pnl_pct = (h["current_price"] - h["entry_price"]) / h["entry_price"] * 100
+                    pnl = h["size_usdc"] * (pnl_pct / 100)
+                    conn.execute(
+                        "UPDATE spot_holdings SET status='CLOSED', close_reason='CLOSED_ON_EXCHANGE', closed_at=?, pnl=?, pnl_pct=? WHERE id=?",
+                        (datetime.utcnow().isoformat(), round(pnl, 4), round(pnl_pct, 4), h["id"])
+                    )
+                    conn.commit()
+                    add_bot_log(h["user_id"], f"⚠️ {h['coin']}: aucune position perp NI solde spot trouvé sur Hyperliquid — synchronisé, marqué fermé (PnL estimé au dernier prix connu: {round(pnl,2)} USDC)", "warning")
+    except Exception as e:
+        print(f"⚠️ reconcile_spot_holdings error: {e}")
+    finally:
+        conn.close()
+
 async def reconcile_live_positions_loop():
     """Boucle dédiée, intervalle plus large (60s) que les ordres programmés — un appel
     Hyperliquid par compte à chaque passage, pas besoin d'une fréquence aussi élevée que le
@@ -8170,6 +8219,7 @@ async def reconcile_live_positions_loop():
     while True:
         try:
             reconcile_live_positions()
+            reconcile_spot_holdings()
         except Exception as e:
             print(f"⚠️ reconcile_live_positions_loop error: {e}")
         await asyncio.sleep(60)
@@ -9134,7 +9184,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.59"
+BACKEND_BUILD_VERSION = "2026-08-20.60"
 
 @app.get("/api/version")
 def get_version():
