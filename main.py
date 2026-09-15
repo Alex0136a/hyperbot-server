@@ -2334,6 +2334,13 @@ def hl_close_position(account_address: str, coin: str, sl_oid: Optional[int] = N
         except Exception as e:
             print(f"⚠️ Annulation SL Hyperliquid échouée pour {coin} (oid={sl_oid}): {e}")
     result = _hl_call_with_retry(exchange.market_close, coin)
+    if result is None:
+        # market_close renvoie None quand il n'y a AUCUNE position perpétuelle ouverte pour ce
+        # coin sur Hyperliquid — typiquement un holding LEGACY ouvert via l'ancien mécanisme
+        # d'achat spot réel (avant le passage à l'exécution perpétuelle x1), qui n'a donc pas de
+        # position perp correspondante à fermer ici. Voir _close_spot_holding_real, qui route
+        # vers hl_spot_sell pour ces holdings legacy plutôt que d'appeler cette fonction.
+        raise RuntimeError(f"Aucune position perpétuelle ouverte pour {coin} sur Hyperliquid — probablement un holding legacy (achat spot réel, avant le passage au perpétuel), pas de position perp correspondante à fermer")
     if result.get("status") != "ok":
         raise RuntimeError(f"Échec fermeture position Hyperliquid: {result}")
     try:
@@ -2463,6 +2470,23 @@ def hl_spot_sell(account_address: str, coin: str, qty: float):
     except Exception:
         pass
     return fill_price
+
+def close_spot_holding_real(account_address: str, coin: str, qty: float, hl_sl_oid=None):
+    """Ferme un holding Spot Accumulation réel, en routant vers la bonne fonction selon son
+    type — nécessaire depuis le passage de ce mode à l'exécution perpétuelle (x1) : les
+    holdings ouverts AVANT ce changement sont de vrais achats spot, sans position perpétuelle
+    correspondante à fermer (hl_close_position échouerait — observé concrètement sur GMX).
+    Teste d'abord la fermeture perpétuelle (cas normal, holdings ouverts après le changement) ;
+    bascule sur la vente spot UNIQUEMENT si l'échec confirme précisément l'absence de position
+    perp — pas seulement parce que hl_sl_oid est NULL (peut aussi arriver sur un holding
+    perpétuel récent si la pose du SL de sécurité a simplement échoué, sans rapport avec le
+    type de holding)."""
+    try:
+        return hl_close_position(account_address, coin, hl_sl_oid)
+    except RuntimeError as e:
+        if "Aucune position perpétuelle ouverte" in str(e):
+            return hl_spot_sell(account_address, coin, qty)
+        raise
 
 
 def cache_market_data(coin: str, tech: dict, price: float):
@@ -3749,7 +3773,7 @@ async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin:
                 user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                 hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
                 try:
-                    sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
+                    sold_price = close_spot_holding_real(hl_wallet, h["coin"], h["qty"], h.get("hl_sl_oid"))
                     if sold_price:
                         fill_price_sell = sold_price
                     add_bot_log(user_id, f"🔴 {h['coin']}: fermeture perpétuelle réelle confirmée sur Hyperliquid ({close_reason})", "success")
@@ -4900,7 +4924,7 @@ async def scan_markets(user_id: int):
                                     user_row_rot = conn_sp.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                                     hl_wallet_rot = user_row_rot["hl_wallet"] if user_row_rot and "hl_wallet" in user_row_rot.keys() else None
                                     try:
-                                        sold_price = hl_close_position(hl_wallet_rot, armed_holding["coin"], armed_holding.get("hl_sl_oid"))
+                                        sold_price = close_spot_holding_real(hl_wallet_rot, armed_holding["coin"], armed_holding["qty"], armed_holding.get("hl_sl_oid"))
                                         if sold_price:
                                             fill_price_rot = sold_price
                                     except Exception as e:
@@ -7600,7 +7624,7 @@ def close_spot_holding_manual(req: CloseSpotHoldingRequest, user_id: int = Depen
         user_row_conn.close()
         hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         try:
-            sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
+            sold_price = close_spot_holding_real(hl_wallet, h["coin"], h["qty"], h.get("hl_sl_oid"))
             if sold_price:
                 fill_price = sold_price
         except Exception as e:
@@ -7637,7 +7661,7 @@ def close_spot_holding_manual(req: CloseSpotHoldingRequest, user_id: int = Depen
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
         hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         try:
-            sold_price = hl_close_position(hl_wallet, h["coin"], h.get("hl_sl_oid"))
+            sold_price = close_spot_holding_real(hl_wallet, h["coin"], h["qty"], h.get("hl_sl_oid"))
             if sold_price:
                 fill_price = sold_price
         except Exception as e:
@@ -9110,7 +9134,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.58"
+BACKEND_BUILD_VERSION = "2026-08-20.59"
 
 @app.get("/api/version")
 def get_version():
