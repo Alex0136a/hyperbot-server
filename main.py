@@ -2836,6 +2836,86 @@ async def refresh_accumulation_dynamic_tp(user_id: int, trade: dict, conn):
     except Exception as e:
         print(f"⚠️ refresh_accumulation_dynamic_tp error pour {trade.get('coin')}: {e}")
 
+def is_coin_live_elsewhere(user_id: int, coin: str) -> bool:
+    """Vérifie si CE coin a déjà une position LIVE réelle ouverte, sur N'IMPORTE QUEL mode
+    (paper_trades ou spot_holdings). Sur Hyperliquid, le levier et la position sont réglés PAR
+    COIN, pas par "mode" (notion purement interne à notre bot) — si deux modes ouvraient le
+    même coin en Live simultanément, Hyperliquid ne créerait PAS deux positions séparées, il
+    les FUSIONNERAIT/COMPENSERAIT en une seule (le levier du dernier réglage s'appliquant à
+    tout le montant, et une position opposée pourrait même inverser le sens net) — voir
+    resolve_coin_live_conflict, qui ferme la position existante plutôt que de bloquer la
+    nouvelle. Les modes restent volontairement indépendants en PAPER (aucun risque réel)."""
+    conn = get_db()
+    in_paper = conn.execute(
+        "SELECT id FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_live=1",
+        (user_id, coin)
+    ).fetchone()
+    in_spot = conn.execute(
+        "SELECT id FROM spot_holdings WHERE user_id=? AND coin=? AND status='OPEN' AND is_live=1",
+        (user_id, coin)
+    ).fetchone()
+    conn.close()
+    return bool(in_paper or in_spot)
+
+def resolve_coin_live_conflict(user_id: int, coin: str) -> None:
+    """Résout un conflit multi-mode sur un coin en LIVE — ferme RÉELLEMENT toute position déjà
+    ouverte sur un autre mode (paper_trades ou spot_holdings), plutôt que de bloquer la
+    nouvelle ouverture. Le nouveau signal est par construction déjà confirmé au moment où ce
+    code s'exécute (toutes les conditions d'entrée du mode qui l'a détecté ont déjà validé) —
+    mieux vaut donc laisser la place à ce signal confirmé que de le rejeter simplement parce
+    qu'un autre mode occupait déjà ce coin. Voir is_coin_live_elsewhere pour l'explication du
+    risque de fusion/netting sur Hyperliquid que ce mécanisme évite."""
+    conn = get_db()
+    try:
+        wallet_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+        wallet_addr = wallet_row["hl_wallet"] if wallet_row else None
+        if not wallet_addr:
+            return  # pas de wallet configuré, rien à fermer réellement — cas normal en amorçage
+
+        conflicting_trade = conn.execute(
+            "SELECT * FROM paper_trades WHERE user_id=? AND coin=? AND status='OPEN' AND is_live=1",
+            (user_id, coin)
+        ).fetchone()
+        if conflicting_trade:
+            t = dict(conflicting_trade)
+            try:
+                fill_price_close = hl_close_position(wallet_addr, t["coin"], t.get("hl_sl_oid"))
+            except Exception:
+                fill_price_close = None
+            close_price = fill_price_close or t["current_price"] or t["entry_price"]
+            direction = 1 if t["action"] == "LONG" else -1
+            pnl_close = (close_price - t["entry_price"]) / t["entry_price"] * t["size_usdc"] * t["leverage"] * direction
+            conn.execute(
+                "UPDATE paper_trades SET status='CLOSED', close_reason='CLOSED_FOR_MODE_CONFLICT', closed_at=?, pnl=?, current_price=? WHERE id=?",
+                (datetime.utcnow().isoformat(), round(pnl_close, 2), close_price, t["id"])
+            )
+            conn.commit()
+            add_bot_log(user_id, f"🔀 {coin}: position fermée automatiquement (conflit multi-mode — un nouveau signal confirmé sur un autre mode prend le relais) — {round(pnl_close,2)} USDC", "warning")
+
+        conflicting_holding = conn.execute(
+            "SELECT * FROM spot_holdings WHERE user_id=? AND coin=? AND status='OPEN' AND is_live=1",
+            (user_id, coin)
+        ).fetchone()
+        if conflicting_holding:
+            h = dict(conflicting_holding)
+            try:
+                fill_price_close_h = close_spot_holding_real(wallet_addr, h["coin"], h["qty"], h.get("hl_sl_oid"))
+            except Exception:
+                fill_price_close_h = None
+            close_price_h = fill_price_close_h or h["current_price"] or h["entry_price"]
+            pnl_pct_close = (close_price_h - h["entry_price"]) / h["entry_price"] * 100
+            pnl_close_h = h["size_usdc"] * (pnl_pct_close / 100)
+            conn.execute(
+                "UPDATE spot_holdings SET status='CLOSED', close_reason='CLOSED_FOR_MODE_CONFLICT', closed_at=?, pnl=?, pnl_pct=?, current_price=? WHERE id=?",
+                (datetime.utcnow().isoformat(), round(pnl_close_h, 4), round(pnl_pct_close, 4), close_price_h, h["id"])
+            )
+            conn.commit()
+            add_bot_log(user_id, f"🔀 {coin}: holding Spot Accumulation fermé automatiquement (conflit multi-mode) — {round(pnl_close_h,2)} USDC", "warning")
+    except Exception as e:
+        print(f"⚠️ resolve_coin_live_conflict error ({coin}): {e}")
+    finally:
+        conn.close()
+
 def anti_wick_check(conn, table: str, row_id: int, current_reason: str, existing_pending_reason, existing_pending_since, delay_minutes: float, trade_action: str = None, candle_color: str = None):
     """Confirmation anti-mèche GÉNÉRIQUE, réutilisée par tous les mécanismes de sortie, tous
     modes confondus (paper_trades ET spot_holdings) — à la demande explicite de l'utilisateur,
@@ -4973,6 +5053,8 @@ async def scan_markets(user_id: int):
                 target_pct_sp = round(cand["channel_pct"] * (target_ratio_sp / 100), 2)
 
                 if sp_mode == "live":
+                    if is_coin_live_elsewhere(user_id, coin):
+                        resolve_coin_live_conflict(user_id, coin)
                     conn_sp2 = get_db()
                     user_row_sp = conn_sp2.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
                     conn_sp2.close()
@@ -5130,6 +5212,8 @@ async def scan_markets(user_id: int):
                     elif coin_open:
                         add_bot_log(user_id, f"💰 {coin}: Position déjà ouverte", "info")
                     else:
+                        if is_coin_live_elsewhere(user_id, coin):
+                            resolve_coin_live_conflict(user_id, coin)
                         try:
                             cfg_ml = conn.execute("SELECT max_loss_pct, hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
                             max_loss_pct_val = float(cfg_ml["max_loss_pct"]) if cfg_ml and "max_loss_pct" in cfg_ml.keys() and cfg_ml["max_loss_pct"] else 1.0
@@ -7803,6 +7887,14 @@ def execute_manual_trade(user_id: int, coin: str, action: str, size_usdc: float,
     custom_tp_default = min(round(accumulation_channel_pct, 2), ACCUMULATION_TP_DEFAULT_CAP_PCT) if (is_accumulation and accumulation_channel_pct) else c["take_profit_pct"]
 
     if trading_mode == "live":
+        # Résolution GLOBALE tous modes confondus — voir is_coin_live_elsewhere /
+        # resolve_coin_live_conflict pour l'explication complète (fusion/netting de position
+        # sur Hyperliquid, conflit de levier). Ferme la position existante d'un autre mode
+        # plutôt que de bloquer — ce nouveau signal est déjà confirmé à ce stade. Couvre
+        # Accumulation LONG/SHORT, Breakout, Range Trading et le Trading Manuel, tous
+        # exécutés via cette même fonction.
+        if is_coin_live_elsewhere(user_id, coin):
+            resolve_coin_live_conflict(user_id, coin)
         user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
         account_address = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
         if not account_address:
@@ -9204,7 +9296,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.61"
+BACKEND_BUILD_VERSION = "2026-08-20.63"
 
 @app.get("/api/version")
 def get_version():
