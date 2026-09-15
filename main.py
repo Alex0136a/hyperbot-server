@@ -1,4 +1,3 @@
-
 """
 HyperBot AI — Backend Python FastAPI
 Serveur principal avec authentification, API et moteur de scan
@@ -1934,7 +1933,17 @@ async def fetch_candles(client, coin, interval="15m", count=200):
         "type": "candleSnapshot",
         "req": {"coin": coin, "interval": interval, "startTime": now - ms*count, "endTime": now}
     })
-    return data or []
+    if not data:
+        return []
+    # Retire la DERNIÈRE bougie si elle est encore EN COURS de formation (son ouverture + la
+    # durée de l'intervalle dépasse l'heure actuelle) — sinon TOUS nos calculs (RSI/MACD/ATR,
+    # sur tous les modes) se basaient en partie sur une valeur encore mouvante, pas une vraie
+    # clôture. Particulièrement sensible pour les détections de croisement frais
+    # (crossBull/crossBear) : une bougie non terminée peut basculer plusieurs fois avant sa
+    # clôture réelle, donnant un signal prématuré qui se serait inversé une fois close.
+    if data and (data[-1].get("t", 0) + ms) > now:
+        data = data[:-1]
+    return data
 
 async def fetch_positions(client, address):
     if not address:
@@ -9355,7 +9364,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.65"
+BACKEND_BUILD_VERSION = "2026-08-20.66"
 
 @app.get("/api/version")
 def get_version():
