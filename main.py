@@ -755,6 +755,22 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Proximité ATR-RELATIVE — remplace le seuil fixe (accumulation_proximity_pct,
+        # conservé mais plus utilisé par défaut) qui ne tenait pas compte de la volatilité
+        # propre à chaque coin : 1% pour un coin calme est vraiment proche, 1% pour un coin
+        # volatil peut avoir déjà bougé plusieurs fois cette distance en quelques minutes.
+        # Tolérance = ce multiple de l'ATR du coin, qui s'adapte automatiquement.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_atr_mult REAL DEFAULT 0.5")
+        conn.commit()
+    except: pass
+    try:
+        # Confirmation par le volume — un vrai rebond sur un support s'accompagne souvent d'un
+        # pic de volume (achats réels qui défendent le niveau), pas juste un prix qui
+        # s'approche tranquillement sans activité derrière.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_volume_confirm_mult REAL DEFAULT 1.3")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("UPDATE bot_config SET accumulation_proximity_pct=2.5 WHERE accumulation_proximity_pct IN (0.5, 1.0)")
         conn.commit()
     except: pass
@@ -4431,13 +4447,35 @@ async def scan_markets(user_id: int):
                         accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                         add_bot_log(user_id, f"💰🔍 {coin}: support proche, mais canal trop étroit ({channel_pct:.2f}% < {accum_min_channel_pct}%) — pas assez de marge, pas d'achat", "info")
                 else:
-                    accum_proximity_pct = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5
-                    near_support = abs(price - support) / support * 100 <= accum_proximity_pct
+                    # Proximité ATR-RELATIVE (remplace le seuil fixe) : tolérance = un multiple
+                    # de l'ATR du coin, qui s'adapte automatiquement à sa volatilité propre —
+                    # 1% fixe pour un coin calme est vraiment proche, pour un coin volatil ça
+                    # peut avoir déjà bougé plusieurs fois cette distance en quelques minutes.
+                    atr_val_acc = tech.get("atr")
+                    proximity_atr_mult = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5
+                    near_support = bool(atr_val_acc and abs(price - support) <= atr_val_acc * proximity_atr_mult)
+                    # Confirmation par le VOLUME — un vrai rebond s'accompagne souvent d'un pic
+                    # de volume (achats réels qui défendent le niveau), pas juste un prix qui
+                    # s'approche tranquillement sans activité derrière.
+                    vol_confirm_mult_acc = config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3
+                    volume_confirmed_acc = bool(vol_avg and vol_cur > vol_avg * vol_confirm_mult_acc)
+                    # REJET PAR MÈCHE — la dernière bougie (réellement close, voir fetch_candles)
+                    # est descendue SOUS le support puis a clôturé AU-DESSUS : signal de
+                    # retournement plus fort qu'un simple "le prix est proche du niveau".
+                    wick_rejection_acc = bool(len(candles) >= 1 and candles[-1]["l"] <= support and candles[-1]["c"] > support)
                     if not near_support:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                            dist_pct = abs(price - support) / support * 100
-                            add_bot_log(user_id, f"💰🔍 {coin}: support détecté à ${support:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct}%) — pas d'achat", "info")
+                            dist_abs = abs(price - support)
+                            add_bot_log(user_id, f"💰🔍 {coin}: support détecté à ${support:.4g} mais prix trop loin (écart ${dist_abs:.4g} > {proximity_atr_mult}x ATR ${atr_val_acc:.4g}) — pas d'achat", "info")
+                    elif not volume_confirmed_acc:
+                        if should_log_diag:
+                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: support proche mais volume pas confirmé (vol actuel {vol_cur:.0f} < {vol_confirm_mult_acc}x moyenne {vol_avg:.0f}) — pas d'achat", "info")
+                    elif not wick_rejection_acc:
+                        if should_log_diag:
+                            accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: support proche + volume confirmé, mais pas de rejet par mèche (dernière bougie: bas ${candles[-1]['l']:.4g}, clôture ${candles[-1]['c']:.4g}, support ${support:.4g}) — pas d'achat", "info")
                     else:
                         # Compteur du résumé périodique : uniquement les coins RÉELLEMENT proches
                         # d'un support maintenant (pas "tout coin scanné", devenu vrai depuis le
@@ -4544,13 +4582,28 @@ async def scan_markets(user_id: int):
                         accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                         add_bot_log(user_id, f"💰🔍 {coin}: résistance proche, mais canal trop étroit ({channel_pct_short:.2f}% < {accum_min_channel_pct_short}%) — pas assez de marge, pas de vente", "info")
                 else:
-                    accum_proximity_pct_short = config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5
-                    near_resistance = abs(price - resistance) / resistance * 100 <= accum_proximity_pct_short
+                    # Miroir exact du LONG — voir ses commentaires pour l'explication complète.
+                    atr_val_acc_s = tech.get("atr")
+                    proximity_atr_mult_s = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5
+                    near_resistance = bool(atr_val_acc_s and abs(price - resistance) <= atr_val_acc_s * proximity_atr_mult_s)
+                    vol_confirm_mult_acc_s = config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3
+                    volume_confirmed_acc_s = bool(vol_avg and vol_cur > vol_avg * vol_confirm_mult_acc_s)
+                    # Rejet par mèche HAUTE (miroir) : la dernière bougie est montée AU-DESSUS
+                    # de la résistance puis a clôturé EN DESSOUS.
+                    wick_rejection_acc_s = bool(len(candles) >= 1 and candles[-1]["h"] >= resistance and candles[-1]["c"] < resistance)
                     if not near_resistance:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                            dist_pct = abs(price - resistance) / resistance * 100
-                            add_bot_log(user_id, f"💰🔍 {coin}: résistance détectée à ${resistance:.4g} mais prix trop loin ({dist_pct:.1f}% > {accum_proximity_pct_short}%) — pas de vente", "info")
+                            dist_abs_s = abs(price - resistance)
+                            add_bot_log(user_id, f"💰🔍 {coin}: résistance détectée à ${resistance:.4g} mais prix trop loin (écart ${dist_abs_s:.4g} > {proximity_atr_mult_s}x ATR ${atr_val_acc_s:.4g}) — pas de vente", "info")
+                    elif not volume_confirmed_acc_s:
+                        if should_log_diag_short:
+                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: résistance proche mais volume pas confirmé (vol actuel {vol_cur:.0f} < {vol_confirm_mult_acc_s}x moyenne {vol_avg:.0f}) — pas de vente", "info")
+                    elif not wick_rejection_acc_s:
+                        if should_log_diag_short:
+                            accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
+                            add_bot_log(user_id, f"💰🔍 {coin}: résistance proche + volume confirmé, mais pas de rejet par mèche (dernière bougie: haut ${candles[-1]['h']:.4g}, clôture ${candles[-1]['c']:.4g}, résistance ${resistance:.4g}) — pas de vente", "info")
                     else:
                         # Même correction que le LONG : ne compte que les coins réellement
                         # proches d'une résistance, pas tout coin scanné.
@@ -6543,6 +6596,8 @@ class UpdateConfigRequest(BaseModel):
     accumulation_atr_sl_min_mult: Optional[float] = None
     accumulation_atr_sl_max_mult: Optional[float] = None
     accumulation_proximity_pct: Optional[float] = None
+    accumulation_proximity_atr_mult: Optional[float] = None
+    accumulation_volume_confirm_mult: Optional[float] = None
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_max_loss_pct: Optional[float] = None
@@ -6762,6 +6817,8 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_atr_sl_min_mult": config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5,
         "accumulation_atr_sl_max_mult": config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5,
+        "accumulation_proximity_atr_mult": config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5,
+        "accumulation_volume_confirm_mult": config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
@@ -6991,6 +7048,10 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_atr_sl_max_mult=? WHERE user_id=?", (req.accumulation_atr_sl_max_mult, user_id))
     if req.accumulation_proximity_pct is not None:
         conn.execute("UPDATE bot_config SET accumulation_proximity_pct=? WHERE user_id=?", (req.accumulation_proximity_pct, user_id))
+    if req.accumulation_proximity_atr_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_proximity_atr_mult=? WHERE user_id=?", (req.accumulation_proximity_atr_mult, user_id))
+    if req.accumulation_volume_confirm_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_volume_confirm_mult=? WHERE user_id=?", (req.accumulation_volume_confirm_mult, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
@@ -9364,7 +9425,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.66"
+BACKEND_BUILD_VERSION = "2026-08-20.68"
 
 @app.get("/api/version")
 def get_version():
