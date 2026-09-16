@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.38";
+const APP_BUILD_VERSION = "2026-08-20.39";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2159,7 +2159,7 @@ Confirmer ?`
                           <span style={{background:"#1e2d4a",color:"#60a5fa",padding:"1px 6px",borderRadius:3,fontSize:9}}>{h.close_reason}</span>
                           <span style={{fontSize:9,color:"#475569"}}>entré à ${h.entry_price} · acheté pour {h.size_usdc}$</span>
                         </div>
-                        <span style={{color:h.pnl>=0?"#34d399":"#f87171",fontSize:11,fontWeight:700}}>{h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$ ({h.pnl_pct>=0?"+":""}{Number(h.pnl_pct||0).toFixed(2)}%)</span>
+                        <span style={{color:h.pnl>=0?"#34d399":"#f87171",fontSize:11,fontWeight:700}}>{h.pnl>=0?"+":""}{Number(h.pnl||0).toFixed(2)}$ ({h.pnl_pct>=0?"+":""}{Number(h.pnl_pct||0).toFixed(2)}%)<br/><span style={{color:"#475569",fontSize:9,fontWeight:400}}>{h.closed_at?`${new Date(h.closed_at).toLocaleDateString("fr-FR")} ${new Date(h.closed_at).toLocaleTimeString("fr-FR")}`:""}</span></span>
                       </div>
                     ))}
                   </div>
@@ -2286,7 +2286,7 @@ Confirmer ?`
                       <span style={{color:trade.pnl>=0?"#34d399":"#f87171",fontWeight:700,fontSize:12}}>
                         {trade.pnl>=0?"+":""}{trade.pnl?.toFixed(2)} USDC
                       </span>
-                      <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
+                      <span style={{color:"#475569",fontSize:10}}>{new Date(trade.closed_at).toLocaleDateString("fr-FR")} {new Date(trade.closed_at).toLocaleTimeString("fr-FR")}</span>
                     </div>
                   </div>
                 ))}
