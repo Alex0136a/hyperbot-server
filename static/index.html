@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.39";
+const APP_BUILD_VERSION = "2026-08-20.40";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -3279,7 +3279,8 @@ Confirmer ?`
           {/* ANTI-MÈCHE */}
           <div style={{background:"#0a1628",border:"1px solid #3d3a0a",borderRadius:12,padding:16,marginBottom:12}}>
             <div style={{fontSize:26,fontWeight:700,color:"#facc15",marginBottom:10}}>🕯️ Anti-mèche (tous modes, tous déclencheurs)</div>
-            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Dès qu'un déclencheur de sortie se produit (Max Loss, trailing, plafond absolu, cassure de niveau — sans exception, sur les 5 modes), la fermeture n'est PAS exécutée immédiatement. Deux conditions doivent être réunies : <b style={{color:"#f8fafc"}}>la bougie en cours doit confirmer la couleur défavorable</b> à la position (RED pour un LONG, GREEN pour un SHORT) <b style={{color:"#f8fafc"}}>ET</b> le motif doit persister depuis au moins le délai configuré (1 minute par défaut). Si le prix revient avant que les deux conditions soient réunies, l'état en attente est effacé et la position continue d'être tenue normalement — évite de sortir prématurément sur une simple mèche de prix qui se corrige quelques instants plus tard.</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Dès qu'un déclencheur de sortie "souple" se produit (trailing, plancher précoce, TP manuel — sur les 5 modes), la fermeture n'est PAS exécutée immédiatement. Deux conditions doivent être réunies : <b style={{color:"#f8fafc"}}>la bougie en cours doit confirmer la couleur défavorable</b> à la position (RED pour un LONG, GREEN pour un SHORT) <b style={{color:"#f8fafc"}}>ET</b> le motif doit persister depuis au moins le délai configuré (1 minute par défaut). Si le prix revient avant que les deux conditions soient réunies, l'état en attente est effacé et la position continue d'être tenue normalement — évite de sortir prématurément sur une simple mèche de prix qui se corrige quelques instants plus tard.</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}><b style={{color:"#f87171"}}>Exclu de l'anti-mèche</b> : les filets de sécurité DURS (Stop Loss, Max Loss, plafond absolu, Hard Cap) restent inconditionnels et immédiats, sans délai ni confirmation de couleur — observé concrètement : sur un mouvement rapide et violent, retarder ces filets avait laissé une perte censée être plafonnée à 1.5% se creuser jusqu'à -5.2/-5.4% pendant l'attente de confirmation.</div>
             <div style={{fontSize:18,color:"#64748b"}}>La couleur de bougie est calculée en <b style={{color:"#f8fafc"}}>temps réel</b> — les frontières de bougie (toutes les 15 min pile) sont calculées mathématiquement, sans dépendre du cycle de scan : dès qu'une frontière est franchie, le prix WebSocket exact à cet instant devient l'ouverture de la nouvelle bougie, capturée immédiatement. Le prix actuel est ensuite comparé en continu à cette ouverture pour déterminer la couleur. Le cycle de scan ne sert plus que de filet de secours (amorçage initial, ou après une coupure WebSocket).</div>
           </div>
 
