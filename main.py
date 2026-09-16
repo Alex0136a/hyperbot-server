@@ -2959,11 +2959,30 @@ def resolve_coin_live_conflict(user_id: int, coin: str) -> None:
     finally:
         conn.close()
 
+HARD_STOP_REASONS = {
+    "STOP_LOSS", "MAX_LOSS", "HARD_CAP",  # bot principal
+    "ACCUMULATION_ABSOLUTE_MAX_LOSS",  # Accumulation
+    "BREAKOUT_MAX_LOSS",  # Breakout
+    "RANGE_TRADE_MAX_LOSS",  # Range Trading
+    "SPOT_ACCUM_MAX_LOSS",  # Spot Accumulation
+}  # Filets de sécurité DURS — exclus de l'anti-mèche (voir anti_wick_check). Observé
+   # concrètement : sur un mouvement rapide et violent, l'anti-mèche retardait la fermeture
+   # (couleur de bougie + délai minimum) pendant que le prix continuait de chuter — un Stop
+   # Loss censé plafonner la perte à 1.5% se retrouvait à fermer à -5.2/-5.4%, 3 à 4 fois plus
+   # loin que prévu. Ces filets restent inconditionnels et immédiats, comme prévu à l'origine
+   # — l'anti-mèche continue de s'appliquer aux mécanismes "souples" (trailing, plancher
+   # précoce, TP manuel), où éviter une sortie prématurée sur une mèche a du sens.
+
 def anti_wick_check(conn, table: str, row_id: int, current_reason: str, existing_pending_reason, existing_pending_since, delay_minutes: float, trade_action: str = None, candle_color: str = None):
-    """Confirmation anti-mèche GÉNÉRIQUE, réutilisée par tous les mécanismes de sortie, tous
-    modes confondus (paper_trades ET spot_holdings) — à la demande explicite de l'utilisateur,
-    pour éviter de sortir prématurément sur une mèche de prix qui se corrige quelques minutes
-    plus tard.
+    """Confirmation anti-mèche GÉNÉRIQUE, réutilisée par les mécanismes de sortie "souples"
+    (trailing, plancher précoce, TP manuel), tous modes confondus (paper_trades ET
+    spot_holdings) — à la demande explicite de l'utilisateur, pour éviter de sortir
+    prématurément sur une mèche de prix qui se corrige quelques minutes plus tard.
+
+    NE S'APPLIQUE PAS aux filets de sécurité DURS (voir HARD_STOP_REASONS) — observé
+    concrètement : sur un mouvement rapide et violent, l'anti-mèche retardait la fermeture
+    pendant que le prix continuait de chuter, un Stop Loss censé plafonner la perte à 1.5% se
+    retrouvant à fermer à -5.2/-5.4%. Ces filets restent inconditionnels et immédiats.
 
     Logique à DEUX conditions, les DEUX requises AU MOMENT de la décision finale : (1) le motif
     doit persister depuis au moins delay_minutes (chronomètre démarré dès la première apparition
@@ -3227,7 +3246,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 accum_log_msg = f"📉 {trade['coin']}: Support cassé confirmé (${cur:.4g} < ${breakdown_level:.4g}, marge {buffer_pct}%) — revente {round(pnl,2)} USDC plutôt que d'attendre indéfiniment"
 
         if accum_close_reason:
-            if not anti_wick_check(conn, "paper_trades", trade["id"], accum_close_reason,
+            if accum_close_reason not in HARD_STOP_REASONS and not anti_wick_check(conn, "paper_trades", trade["id"], accum_close_reason,
                                     trade.get("pending_close_reason"), trade.get("pending_close_since"),
                                     anti_wick_delay, trade["action"], candle_color):
                 conn.commit()
@@ -3304,7 +3323,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 bo_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(bo_peak_pct,2)}%, plancher = {round(bo_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if bo_close_reason:
-            if not anti_wick_check(conn, "paper_trades", trade["id"], bo_close_reason,
+            if bo_close_reason not in HARD_STOP_REASONS and not anti_wick_check(conn, "paper_trades", trade["id"], bo_close_reason,
                                     trade.get("pending_close_reason"), trade.get("pending_close_since"),
                                     anti_wick_delay, trade["action"], candle_color):
                 conn.commit()
@@ -3377,7 +3396,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 rt_log_msg = f"🔒 {trade['coin']}: Plancher précoce touché (pic {round(rt_peak_pct,2)}%, plancher = {round(rt_early_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
 
         if rt_close_reason:
-            if not anti_wick_check(conn, "paper_trades", trade["id"], rt_close_reason,
+            if rt_close_reason not in HARD_STOP_REASONS and not anti_wick_check(conn, "paper_trades", trade["id"], rt_close_reason,
                                     trade.get("pending_close_reason"), trade.get("pending_close_since"),
                                     anti_wick_delay, trade["action"], candle_color):
                 conn.commit()
@@ -3608,7 +3627,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
         conn.commit()
         return None
 
-    if not anti_wick_check(conn, "paper_trades", trade["id"], close_reason,
+    if close_reason not in HARD_STOP_REASONS and not anti_wick_check(conn, "paper_trades", trade["id"], close_reason,
                             trade.get("pending_close_reason"), trade.get("pending_close_since"),
                             anti_wick_delay, trade["action"], candle_color):
         _dp, _dpp = _display_pnl(pnl)
@@ -3952,7 +3971,7 @@ async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin:
 
         if close_reason:
             candle_color_h = candle_color_by_coin.get(h["coin"]) if candle_color_by_coin else None
-            if not anti_wick_check(conn, "spot_holdings", h["id"], close_reason,
+            if close_reason not in HARD_STOP_REASONS and not anti_wick_check(conn, "spot_holdings", h["id"], close_reason,
                                     h.get("pending_close_reason"), h.get("pending_close_since"),
                                     anti_wick_delay, "LONG", candle_color_h):
                 conn.commit()
@@ -9425,7 +9444,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.68"
+BACKEND_BUILD_VERSION = "2026-08-20.69"
 
 @app.get("/api/version")
 def get_version():
