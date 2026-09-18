@@ -580,6 +580,12 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # Proximité ATR-RELATIVE — remplace spot_accum_proximity_pct (conservé mais plus
+        # utilisé par défaut), même logique validée empiriquement sur Accumulation.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN spot_accum_proximity_atr_mult REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
         # Objectif de vente = ce % de l'amplitude du canal (résistance-support), pas un chiffre
         # fixe — un canal plus large vise un objectif plus large, cohérent avec l'échelle du
         # mouvement observé sur ce coin précis. 85% par défaut (pas 100%) — viser l'amplitude
@@ -760,7 +766,15 @@ def init_db():
         # propre à chaque coin : 1% pour un coin calme est vraiment proche, 1% pour un coin
         # volatil peut avoir déjà bougé plusieurs fois cette distance en quelques minutes.
         # Tolérance = ce multiple de l'ATR du coin, qui s'adapte automatiquement.
-        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_atr_mult REAL DEFAULT 0.5")
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_proximity_atr_mult REAL DEFAULT 2.0")
+        conn.commit()
+    except: pass
+    try:
+        # CORRIGÉ : 0.5x ATR était bien trop serré en pratique — analyse empirique d'un log
+        # réel (88 candidats rejetés sur ce seul critère) : médiane à 2.58x ATR, seulement 10
+        # candidats sous 1x ATR. Relevé à 2x ATR, qui aurait laissé passer ~1/3 des candidats
+        # observés tout en filtrant encore les cas clairement trop loin (au-delà de 3x).
+        conn.execute("UPDATE bot_config SET accumulation_proximity_atr_mult=2.0 WHERE accumulation_proximity_atr_mult=0.5")
         conn.commit()
     except: pass
     try:
@@ -4471,7 +4485,7 @@ async def scan_markets(user_id: int):
                     # 1% fixe pour un coin calme est vraiment proche, pour un coin volatil ça
                     # peut avoir déjà bougé plusieurs fois cette distance en quelques minutes.
                     atr_val_acc = tech.get("atr")
-                    proximity_atr_mult = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5
+                    proximity_atr_mult = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 2.0
                     near_support = bool(atr_val_acc and abs(price - support) <= atr_val_acc * proximity_atr_mult)
                     # Confirmation par le VOLUME — un vrai rebond s'accompagne souvent d'un pic
                     # de volume (achats réels qui défendent le niveau), pas juste un prix qui
@@ -4603,7 +4617,7 @@ async def scan_markets(user_id: int):
                 else:
                     # Miroir exact du LONG — voir ses commentaires pour l'explication complète.
                     atr_val_acc_s = tech.get("atr")
-                    proximity_atr_mult_s = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5
+                    proximity_atr_mult_s = config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 2.0
                     near_resistance = bool(atr_val_acc_s and abs(price - resistance) <= atr_val_acc_s * proximity_atr_mult_s)
                     vol_confirm_mult_acc_s = config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3
                     volume_confirmed_acc_s = bool(vol_avg and vol_cur > vol_avg * vol_confirm_mult_acc_s)
@@ -4691,8 +4705,13 @@ async def scan_markets(user_id: int):
                 spot_channel_pct = (resistance - support) / support * 100
                 spot_min_channel = config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5
                 if spot_channel_pct >= spot_min_channel:
-                    spot_proximity = config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0
-                    near_support_spot = abs(price - support) / support * 100 <= spot_proximity
+                    # Proximité ATR-RELATIVE — même logique validée empiriquement sur
+                    # Accumulation (voir accumulation_proximity_atr_mult), remplace l'ancien
+                    # seuil fixe en % qui ne tenait pas compte de la volatilité propre à chaque
+                    # coin.
+                    spot_atr_prox = tech.get("atr")
+                    spot_proximity_atr_mult = config["spot_accum_proximity_atr_mult"] if "spot_accum_proximity_atr_mult" in config.keys() and config["spot_accum_proximity_atr_mult"] is not None else 2.0
+                    near_support_spot = bool(spot_atr_prox and abs(price - support) <= spot_atr_prox * spot_proximity_atr_mult)
                     if near_support_spot:
                         # Momentum cohérent — même logique que l'Accumulation à levier.
                         spot_momentum_margin = config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3
@@ -6590,6 +6609,7 @@ class UpdateConfigRequest(BaseModel):
     spot_accum_max_positions: Optional[int] = None
     spot_accum_min_channel_pct: Optional[float] = None
     spot_accum_proximity_pct: Optional[float] = None
+    spot_accum_proximity_atr_mult: Optional[float] = None
     spot_accum_target_ratio_pct: Optional[float] = None
     spot_accum_trailing_lock_ratio_pct: Optional[float] = None
     spot_accum_momentum_margin_pct: Optional[float] = None
@@ -6811,6 +6831,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "spot_accum_max_positions": config["spot_accum_max_positions"] if "spot_accum_max_positions" in config.keys() and config["spot_accum_max_positions"] else 5,
         "spot_accum_min_channel_pct": config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5,
         "spot_accum_proximity_pct": config["spot_accum_proximity_pct"] if "spot_accum_proximity_pct" in config.keys() and config["spot_accum_proximity_pct"] is not None else 1.0,
+        "spot_accum_proximity_atr_mult": config["spot_accum_proximity_atr_mult"] if "spot_accum_proximity_atr_mult" in config.keys() and config["spot_accum_proximity_atr_mult"] is not None else 2.0,
         "spot_accum_target_ratio_pct": config["spot_accum_target_ratio_pct"] if "spot_accum_target_ratio_pct" in config.keys() and config["spot_accum_target_ratio_pct"] is not None else 85.0,
         "spot_accum_trailing_lock_ratio_pct": config["spot_accum_trailing_lock_ratio_pct"] if "spot_accum_trailing_lock_ratio_pct" in config.keys() and config["spot_accum_trailing_lock_ratio_pct"] is not None else 50.0,
         "spot_accum_momentum_margin_pct": config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3,
@@ -6836,7 +6857,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_atr_sl_min_mult": config["accumulation_atr_sl_min_mult"] if "accumulation_atr_sl_min_mult" in config.keys() and config["accumulation_atr_sl_min_mult"] is not None else 0.5,
         "accumulation_atr_sl_max_mult": config["accumulation_atr_sl_max_mult"] if "accumulation_atr_sl_max_mult" in config.keys() and config["accumulation_atr_sl_max_mult"] is not None else 2.5,
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5,
-        "accumulation_proximity_atr_mult": config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 0.5,
+        "accumulation_proximity_atr_mult": config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 2.0,
         "accumulation_volume_confirm_mult": config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
@@ -7017,6 +7038,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET spot_accum_min_channel_pct=? WHERE user_id=?", (req.spot_accum_min_channel_pct, user_id))
     if req.spot_accum_proximity_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_proximity_pct=? WHERE user_id=?", (req.spot_accum_proximity_pct, user_id))
+    if req.spot_accum_proximity_atr_mult is not None:
+        conn.execute("UPDATE bot_config SET spot_accum_proximity_atr_mult=? WHERE user_id=?", (req.spot_accum_proximity_atr_mult, user_id))
     if req.spot_accum_target_ratio_pct is not None:
         conn.execute("UPDATE bot_config SET spot_accum_target_ratio_pct=? WHERE user_id=?", (req.spot_accum_target_ratio_pct, user_id))
     if req.spot_accum_trailing_lock_ratio_pct is not None:
@@ -9444,7 +9467,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.69"
+BACKEND_BUILD_VERSION = "2026-08-20.70"
 
 @app.get("/api/version")
 def get_version():
