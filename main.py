@@ -2989,6 +2989,18 @@ def resolve_coin_live_conflict(user_id: int, coin: str) -> None:
     finally:
         conn.close()
 
+# Coins avec un VRAI marché spot sur Hyperliquid (pas seulement perpétuel) — fournie par
+# l'utilisateur directement depuis l'exchange, ~30 paires SPOT/USDC. Utilisée pour restreindre
+# Spot Accumulation aux seuls coins où un achat spot réel est possible (l'exchange n'a PAS
+# qu'un seul actif spot comme supposé initialement, mais reste très limité comparé aux
+# perpétuels — la grande majorité des coins actifs du bot n'a AUCUN marché spot du tout).
+HL_SPOT_TRADEABLE_COINS = {
+    "HYPE", "BTC", "ETH", "ZEC", "SOL", "DRV", "PURR", "PUMP", "USDT", "KNTQ",
+    "ENA", "XPL", "TREAD", "FARTCOIN", "XAUT", "SEDA", "ANSEM", "KHYPE", "MON",
+    "USDE", "BASED", "SEI", "PENGU", "HFUN", "SPX", "SPCXD", "HPL", "AVAX",
+    "NVDAX", "FEUSD", "MUX", "USDH",
+}
+
 HARD_STOP_REASONS = {
     "STOP_LOSS", "MAX_LOSS", "HARD_CAP",  # bot principal
     "ACCUMULATION_ABSOLUTE_MAX_LOSS",  # Accumulation
@@ -4647,7 +4659,10 @@ async def scan_markets(user_id: int):
             # minimum bien plus large (2.5% par défaut, contre 0.5% pour l'Accumulation à
             # levier) — pas de Max Loss ici, donc pas question d'entrer sur un mouvement de
             # bruit : il faut un vrai va-et-vient qui vaut la peine d'être tenu jusqu'au bout.
-            if config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] and coin not in spot_accum_blocked_set and support and resistance:
+            # RESTREINT aux coins ayant un VRAI marché spot sur Hyperliquid (voir
+            # HL_SPOT_TRADEABLE_COINS) — ce mode revient à l'achat spot réel, impossible sur un
+            # coin sans marché spot correspondant, peu importe la qualité du signal détecté.
+            if config and "spot_accum_enabled" in config.keys() and config["spot_accum_enabled"] and coin in HL_SPOT_TRADEABLE_COINS and coin not in spot_accum_blocked_set and support and resistance:
                 spot_channel_pct = (resistance - support) / support * 100
                 spot_min_channel = config["spot_accum_min_channel_pct"] if "spot_accum_min_channel_pct" in config.keys() and config["spot_accum_min_channel_pct"] is not None else 2.5
                 if spot_channel_pct >= spot_min_channel:
@@ -5187,24 +5202,14 @@ async def scan_markets(user_id: int):
                         add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — capital insuffisant ({round(capital_sp,2)}$ < {size_sp}$ requis) — achat annulé", "warning")
                         continue
                     try:
-                        # CHANGEMENT : exécution via PERPÉTUEL (x1, sans levier) plutôt qu'un
-                        # achat spot réel — Hyperliquid n'a qu'un seul actif disponible en spot
-                        # (HYPE), ce mode ne pouvait donc pas fonctionner sur les autres coins.
-                        # Même exposition économique (x1 = aucun levier), mais couvre désormais
-                        # tous les coins actifs comme les autres modes. Bonus : pose aussi un
-                        # SL de sécurité réel sur l'exchange, impossible en spot pur.
-                        # BUG CORRIGÉ : utilisait la connexion englobante `conn`, déjà fermée à
-                        # ce stade du cycle de scan (fermée juste après la boucle principale par
-                        # coin, avant le traitement des candidats Spot Accum) — chaque tentative
-                        # échouait avec "Cannot operate on a closed database".
-                        conn_cfg_sp = get_db()
-                        cfg_sl_sp = conn_cfg_sp.execute("SELECT hl_safety_sl_multiplier FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                        safety_mult_sp = cfg_sl_sp["hl_safety_sl_multiplier"] if cfg_sl_sp and "hl_safety_sl_multiplier" in cfg_sl_sp.keys() and cfg_sl_sp["hl_safety_sl_multiplier"] else 5.0
-                        cfg_maxloss_sp = conn_cfg_sp.execute("SELECT spot_accum_max_loss_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-                        max_loss_sp = cfg_maxloss_sp["spot_accum_max_loss_pct"] if cfg_maxloss_sp and "spot_accum_max_loss_pct" in cfg_maxloss_sp.keys() and cfg_maxloss_sp["spot_accum_max_loss_pct"] is not None else 1.5
-                        conn_cfg_sp.close()
-                        qty_sp, sl_oid_sp, fill_price_sp, _, _, _, _, _, _ = hl_open_position(
-                            hl_wallet_sp, coin, "LONG", size_sp, 1, cur_price_sp, max_loss_sp, safety_mult_sp)
+                        # RETOUR à l'achat SPOT RÉEL — la prémisse initiale ("Hyperliquid n'a
+                        # qu'un seul actif spot, HYPE") était incomplète : l'exchange a en
+                        # réalité une trentaine de paires spot (voir HL_SPOT_TRADEABLE_COINS,
+                        # filtrée dès la détection ci-dessus). Le passage au perpétuel n'était
+                        # donc pas nécessaire pour ces coins-là — retour à l'exécution d'origine,
+                        # cohérente avec le nom même du mode.
+                        qty_sp, fill_price_sp = hl_spot_buy(hl_wallet_sp, coin, size_sp, cur_price_sp)
+                        sl_oid_sp = None  # pas de SL de sécurité posable sur l'exchange en spot pur
                         conn_ins = get_db()
                         conn_ins.execute("""INSERT INTO spot_holdings
                             (user_id, coin, status, entry_price, current_price, qty, size_usdc,
@@ -5216,7 +5221,7 @@ async def scan_markets(user_id: int):
                              sl_oid_sp, datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
                         conn_ins.commit()
                         conn_ins.close()
-                        add_bot_log(user_id, f"🤖🪙 Spot Accumulation LIVE (perpétuel x1): achat {qty_sp} {coin} @ ${fill_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
+                        add_bot_log(user_id, f"🤖🪙 Spot Accumulation LIVE (achat spot réel): achat {qty_sp} {coin} @ ${fill_price_sp} ({size_sp} USDC, canal {cand['channel_pct']:.1f}%, objectif +{target_pct_sp}%)", "success")
                     except Exception as e:
                         add_bot_log(user_id, f"⛔ {coin}: Spot Accumulation live — achat échoué ({e}) — nouvelle tentative au prochain cycle", "warning")
                 else:
@@ -9439,7 +9444,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.80"
+BACKEND_BUILD_VERSION = "2026-08-20.81"
 
 @app.get("/api/version")
 def get_version():
