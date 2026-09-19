@@ -4821,7 +4821,13 @@ async def scan_markets(user_id: int):
                     spot_atr_prox = tech.get("atr")
                     spot_proximity_atr_mult = config["spot_accum_proximity_atr_mult"] if "spot_accum_proximity_atr_mult" in config.keys() and config["spot_accum_proximity_atr_mult"] is not None else 2.0
                     near_support_spot = bool(spot_atr_prox and abs(price - support) <= spot_atr_prox * spot_proximity_atr_mult)
-                    if near_support_spot:
+                    if not is_range:
+                        # AJOUTÉ — même principe qu'Accumulation : is_range devient un filtre
+                        # OBLIGATOIRE, plus une simple option du score. Sans un vrai range
+                        # confirmé (support ET résistance validés), on ne confirme jamais qu'on
+                        # est réellement en phase d'accumulation.
+                        add_bot_log(user_id, f"🪙🔍 {coin}: support proche mais pas de VRAI range confirmé (accumulation non confirmée) — pas d'achat spot", "info")
+                    elif near_support_spot:
                         # Marge minimale jusqu'à la résistance — vérifie qu'il reste VRAIMENT
                         # de la place pour monter, pas seulement que le prix est proche du
                         # support.
@@ -4860,13 +4866,24 @@ async def scan_markets(user_id: int):
                         price_action_ok_spot = spot_wick_rejection or spot_reversal_confirmed
 
                         # Tendance à ÉTAT PERSISTANT (MACD 1h, même état partagé qu'Accumulation).
-                        spot_trend = await get_coin_trend_state(coin)
-                        context_ok_spot = (spot_trend != "BEAR") or is_range
+                        spot_trend_full = await get_coin_trend_state_full(coin)
+                        spot_trend = spot_trend_full["direction"]
+                        spot_established_price = spot_trend_full["established_price"]
+                        trend_aligned_spot = spot_trend != "BEAR"
 
-                        entry_score_spot = sum([volume_ok_spot, price_action_ok_spot, context_ok_spot])
+                        # AJOUTÉ — même principe qu'Accumulation : exploite established_price
+                        # (jamais utilisé jusqu'ici) pour éviter une accumulation tardive, trop
+                        # loin du prix où le dernier retournement a été confirmé.
+                        spot_max_dist_reversal = config["accumulation_max_dist_from_reversal_pct"] if "accumulation_max_dist_from_reversal_pct" in config.keys() and config["accumulation_max_dist_from_reversal_pct"] is not None else 3.0
+                        spot_dist_from_reversal_pct = (abs(price - spot_established_price) / spot_established_price * 100) if spot_established_price else 0.0
+                        spot_not_too_late = spot_established_price is None or spot_dist_from_reversal_pct <= spot_max_dist_reversal
 
-                        if entry_score_spot < 2:
-                            add_bot_log(user_id, f"🪙🔍 {coin}: support proche mais score insuffisant ({entry_score_spot}/3 — volume:{volume_ok_spot}, action prix:{price_action_ok_spot}, contexte:{context_ok_spot}) — pas d'achat spot", "info")
+                        entry_score_spot = sum([volume_ok_spot, price_action_ok_spot, trend_aligned_spot])
+
+                        if not spot_not_too_late:
+                            add_bot_log(user_id, f"🪙🔍 {coin}: support proche mais prix trop éloigné du dernier retournement confirmé (écart {spot_dist_from_reversal_pct:.2f}% > {spot_max_dist_reversal}% depuis ${spot_established_price:.4g}) — accumulation tardive, pas d'achat spot", "info")
+                        elif entry_score_spot < 2:
+                            add_bot_log(user_id, f"🪙🔍 {coin}: support proche mais score insuffisant ({entry_score_spot}/3 — volume:{volume_ok_spot}, action prix:{price_action_ok_spot}, tendance:{trend_aligned_spot}) — pas d'achat spot", "info")
                         elif not momentum_ok_spot:
                             raison_mom_spot = "prix déjà passé sous le support (chute en cours)" if not spot_price_not_breached else "dernière bougie anormalement large vs ATR"
                             add_bot_log(user_id, f"🪙🔍 {coin}: score suffisant ({entry_score_spot}/3) mais momentum pas cohérent ({raison_mom_spot}) — pas d'achat spot", "info")
@@ -7671,6 +7688,11 @@ class ManualTradeRequest(BaseModel):
     custom_trail_trigger_pct: Optional[float] = None
     custom_stop_loss_price: Optional[float] = None
 
+class ManualSpotTradeRequest(BaseModel):
+    coin: str
+    size_usdc: float
+    # LONG uniquement — pas de champ action, Spot Accumulation ne fait pas de SHORT.
+
 class OrderCondition(BaseModel):
     type: str  # PRICE_ABOVE, PRICE_BELOW, RSI_ABOVE, RSI_BELOW, MACD_BULLISH, MACD_BEARISH
     value: Optional[float] = None  # requis pour PRICE_*/RSI_*, ignoré pour MACD_*
@@ -8773,6 +8795,88 @@ def manual_open_trade(req: ManualTradeRequest, user_id: int = Depends(get_curren
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/api/manual-spot-trade")
+async def manual_spot_trade(req: ManualSpotTradeRequest, user_id: int = Depends(get_current_user)):
+    """Prise de trade Spot Accumulation MANUELLE — jusqu'ici cette fonctionnalité n'existait
+    pas du tout, seul le scan automatique du bot pouvait ouvrir un holding spot_holdings.
+    LONG uniquement (Spot Accumulation ne fait pas de SHORT). Utilise le mode paper/live
+    actuellement configuré pour ce mode. En Live, restreint aux coins ayant un vrai marché
+    spot sur Hyperliquid (voir HL_SPOT_TRADEABLE_COINS) — impossible d'acheter au comptant un
+    coin sans marché spot correspondant, peu importe la demande."""
+    conn = get_db()
+    config = conn.execute("SELECT spot_accum_trading_mode FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    sp_mode = config["spot_accum_trading_mode"] if config and "spot_accum_trading_mode" in config.keys() and config["spot_accum_trading_mode"] else "paper"
+
+    if sp_mode == "live" and req.coin not in HL_SPOT_TRADEABLE_COINS:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"{req.coin} n'a pas de vrai marché spot sur Hyperliquid — achat impossible en Live pour ce coin")
+
+    already_open = conn.execute(
+        "SELECT id FROM spot_holdings WHERE user_id=? AND coin=? AND status='OPEN'", (user_id, req.coin)
+    ).fetchone()
+    if already_open:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"{req.coin} a déjà un holding Spot Accumulation ouvert")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            spot_prices = await fetch_spot_metas(client)
+        cur_price = spot_prices.get(req.coin, {}).get("price")
+        if not cur_price:
+            # Repli sur le prix perpétuel si le prix spot n'a pas pu être résolu (structure de
+            # réponse Hyperliquid pas garantie à 100%, voir fetch_spot_metas) — mieux qu'un
+            # échec total, avec un léger risque d'écart entre les deux marchés.
+            async with httpx.AsyncClient(timeout=10) as client:
+                perp_prices = await fetch_all_metas(client)
+            cur_price = perp_prices.get(req.coin)
+        if not cur_price:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Prix introuvable pour {req.coin}")
+
+        if sp_mode == "live":
+            user_row = conn.execute("SELECT hl_wallet FROM users WHERE id=?", (user_id,)).fetchone()
+            hl_wallet = user_row["hl_wallet"] if user_row and "hl_wallet" in user_row.keys() else None
+            if not hl_wallet:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Aucune adresse wallet Hyperliquid configurée")
+            try:
+                qty, fill_price = hl_spot_buy(hl_wallet, req.coin, req.size_usdc, cur_price)
+            except Exception as e:
+                conn.close()
+                raise HTTPException(status_code=500, detail=f"Échec de l'achat spot réel: {e}")
+            conn.execute("""INSERT INTO spot_holdings
+                (user_id, coin, status, entry_price, current_price, qty, size_usdc, is_live,
+                 opened_at, session_date)
+                VALUES (?,?,'OPEN',?,?,?,?,1,?,?)""",
+                (user_id, req.coin, fill_price, fill_price, qty, req.size_usdc,
+                 datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
+            conn.commit()
+            conn.close()
+            add_bot_log(user_id, f"👤🪙 Spot Accumulation MANUEL LIVE: achat {qty} {req.coin} @ ${fill_price} ({req.size_usdc} USDC)", "success")
+            return {"message": f"Achat spot réel manuel {req.coin} @ ${fill_price}"}
+        else:
+            portfolio = conn.execute("SELECT balance FROM paper_portfolio WHERE user_id=?", (user_id,)).fetchone()
+            if not portfolio or portfolio["balance"] < req.size_usdc:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Solde paper insuffisant")
+            qty_paper = req.size_usdc / cur_price
+            conn.execute("""INSERT INTO spot_holdings
+                (user_id, coin, status, entry_price, current_price, qty, size_usdc, is_live,
+                 opened_at, session_date)
+                VALUES (?,?,'OPEN',?,?,?,?,0,?,?)""",
+                (user_id, req.coin, cur_price, cur_price, qty_paper, req.size_usdc,
+                 datetime.utcnow().isoformat(), datetime.utcnow().strftime("%Y-%m-%d")))
+            conn.execute("UPDATE paper_portfolio SET balance = balance - ? WHERE user_id=?", (req.size_usdc, user_id))
+            conn.commit()
+            conn.close()
+            add_bot_log(user_id, f"👤🪙 Spot Accumulation MANUEL Paper: achat {round(qty_paper,6)} {req.coin} @ ${cur_price} ({req.size_usdc} USDC)", "info")
+            return {"message": f"Achat spot paper manuel {req.coin} @ ${cur_price}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
 VALID_CONDITION_TYPES = ("PRICE_ABOVE", "PRICE_BELOW", "RSI_ABOVE", "RSI_BELOW", "MACD_BULLISH", "MACD_BEARISH")
 
 @app.post("/api/pending-orders")
@@ -9649,7 +9753,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.86"
+BACKEND_BUILD_VERSION = "2026-08-20.88"
 
 @app.get("/api/version")
 def get_version():
