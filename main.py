@@ -1972,6 +1972,43 @@ async def fetch_all_metas(client):
             prices[asset["name"]] = float(ctxs[i]["markPx"])
     return prices
 
+async def fetch_spot_metas(client):
+    """Équivalent SPOT de fetch_all_metas — utilisé pour l'onglet Marché Spot (prix/volume
+    réels des ~30 paires SPOT/USDC sur Hyperliquid, voir HL_SPOT_TRADEABLE_COINS). Le nom de
+    la paire (meta["universe"][i]["name"]) est souvent au format "TOKEN/USDC" ou un identifiant
+    interne "@N" — dans ce dernier cas, le vrai symbole est résolu via meta["tokens"], indexé
+    par le premier élément de "tokens" de la paire (convention Hyperliquid : tokens[0] = base,
+    tokens[1] = quote). Défensif : renvoie un dict vide par coin en cas de structure
+    inattendue plutôt que de faire planter l'appelant."""
+    data = await hl_post(client, "/info", {"type": "spotMetaAndAssetCtxs"})
+    if not data:
+        return {}
+    meta, ctxs = data
+    token_names = {t["index"]: t["name"] for t in meta.get("tokens", [])} if meta.get("tokens") and isinstance(meta["tokens"][0], dict) and "index" in meta["tokens"][0] else {i: t["name"] for i, t in enumerate(meta.get("tokens", []))}
+    result = {}
+    for i, pair in enumerate(meta.get("universe", [])):
+        try:
+            name = pair.get("name", "")
+            symbol = name.split("/")[0] if "/" in name else None
+            if not symbol and pair.get("tokens"):
+                symbol = token_names.get(pair["tokens"][0])
+            if not symbol:
+                continue
+            ctx = ctxs[i] if i < len(ctxs) else {}
+            price = float(ctx.get("markPx") or ctx.get("midPx") or 0) or None
+            volume = float(ctx.get("dayNtlVlm") or 0)
+            prev_px = ctx.get("prevDayPx")
+            change_pct = None
+            if price and prev_px:
+                try:
+                    change_pct = (price - float(prev_px)) / float(prev_px) * 100
+                except Exception:
+                    change_pct = None
+            result[symbol] = {"price": price, "volume_24h": volume, "change_24h_pct": change_pct}
+        except Exception:
+            continue
+    return result
+
 async def fetch_candles(client, coin, interval="15m", count=200):
     now = int(time.time() * 1000)
     ms = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000}.get(interval, 900000)
@@ -7591,6 +7628,39 @@ def get_spot_accum_market(user_id: int = Depends(get_current_user)):
     } for c in active_coins]
     return {"coins": coins}
 
+@app.get("/api/spot-accum/spot-market")
+async def get_spot_accum_spot_market(user_id: int = Depends(get_current_user)):
+    """Liste des ~30 actifs ayant un VRAI marché spot sur Hyperliquid (voir
+    HL_SPOT_TRADEABLE_COINS) — DISTINCT de /api/spot-accum/market qui liste active_coins (peu
+    importe s'ils ont un marché spot ou non). Données LIVE (prix, volume 24h, variation 24h)
+    directement depuis l'API spot Hyperliquid, plus le même statut de blocage que l'onglet
+    Marketplace existant (table spot_accum_blocked_coins, partagée entre les deux vues — bloquer
+    ici bloque aussi là-bas et inversement, un seul état de blocage par coin)."""
+    conn = get_db()
+    blocked_rows = conn.execute("SELECT coin, blocked_at, reason FROM spot_accum_blocked_coins WHERE user_id=?", (user_id,)).fetchall()
+    blocked_map = {r["coin"]: {"blocked_at": r["blocked_at"], "reason": r["reason"]} for r in blocked_rows}
+    perf_rows = conn.execute("""
+        SELECT coin, COUNT(*) as total, AVG(pnl_pct) as avg_pnl_pct
+        FROM spot_holdings WHERE user_id=? AND status='CLOSED' GROUP BY coin
+    """, (user_id,)).fetchall()
+    perf_map = {r["coin"]: {"total": r["total"], "avg_pnl_pct": round(r["avg_pnl_pct"] or 0, 3)} for r in perf_rows}
+    conn.close()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            spot_data = await fetch_spot_metas(client)
+    except Exception:
+        spot_data = {}
+    coins = [{
+        "coin": c, "blocked": c in blocked_map,
+        "blocked_at": blocked_map.get(c, {}).get("blocked_at"), "reason": blocked_map.get(c, {}).get("reason"),
+        "total_trades": perf_map.get(c, {}).get("total", 0),
+        "avg_pnl_pct": perf_map.get(c, {}).get("avg_pnl_pct"),
+        "price": spot_data.get(c, {}).get("price"),
+        "volume_24h": spot_data.get(c, {}).get("volume_24h"),
+        "change_24h_pct": spot_data.get(c, {}).get("change_24h_pct"),
+    } for c in sorted(HL_SPOT_TRADEABLE_COINS)]
+    return {"coins": coins}
+
 class SpotAccumBlockRequest(BaseModel):
     coin: str
     reason: Optional[str] = None
@@ -9452,7 +9522,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.82"
+BACKEND_BUILD_VERSION = "2026-08-20.83"
 
 @app.get("/api/version")
 def get_version():
