@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.44";
+const APP_BUILD_VERSION = "2026-08-20.45";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -753,7 +753,7 @@ function App() {
     if (mode === config?.spot_accum_trading_mode) return;
     const modeLabel = mode === "paper" ? "Paper (simulation)" : "LIVE (argent réel)";
     const confirmMsg = mode === "live"
-      ? `Basculer Spot Accumulation en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les holdings LIVE ne sont jamais affectés). Exécuté via un contrat perpétuel x1 (aucun levier, même exposition qu'un vrai achat) — couvre tous les coins actifs, pas seulement HYPE.\n\nConfirmer ?`
+      ? `Basculer Spot Accumulation en LIVE (argent réel) ?\n\n⚠️ Toutes vos positions et votre historique PAPER sur ce mode seront définitivement effacés au moment du basculement (les holdings LIVE ne sont jamais affectés). Achat SPOT RÉEL — restreint aux coins ayant un vrai marché spot sur Hyperliquid (~30 paires, pas tous les coins actifs).\n\nConfirmer ?`
       : `Repasser Spot Accumulation en Paper (simulation) ?`;
     if (!window.confirm(confirmMsg)) return;
     try {
@@ -2065,7 +2065,7 @@ Confirmer ?`
             {/* SPOT ACCUMULATION */}
             {(paperSubTab === "all" || paperSubTab === "spot") && (spotHoldings.open.length > 0 || spotHoldings.closed.length > 0 || config?.spot_accum_enabled) && (
               <div style={{background:"#0f1629",border:"1px solid #3d3a0a",borderRadius:10,padding:16,marginTop:16}}>
-                <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — exécution perpétuelle x1, Stop Loss 1.5%</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#facc15",marginBottom:12}}>🪙 Spot Accumulation — achat spot réel, Stop Loss 1.5%</div>
 
                 <div style={{display:"flex",gap:6,marginBottom:14}}>
                   {[{id:"positions",label:"📈 Positions"},{id:"marche",label:"🗺️ Marché"},{id:"performance",label:"🏆 Performance"}].map(st=>(
@@ -3411,7 +3411,7 @@ Confirmer ?`
           {/* SPOT ACCUMULATION */}
           <div style={{background:"#0a1628",border:"1px solid #3d3a0a",borderRadius:12,padding:16,marginBottom:12}}>
             <div style={{fontSize:26,fontWeight:700,color:"#facc15",marginBottom:10}}>🪙 Spot Accumulation</div>
-            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Exécuté via un contrat PERPÉTUEL en x1 (aucun levier, même exposition économique qu'un vrai achat au comptant) et le tient jusqu'au bon moment pour revendre. Changé depuis un achat spot réel : Hyperliquid n'a qu'un seul actif disponible en spot (HYPE), ce mode ne pouvait donc pas fonctionner sur les autres coins. Table de suivi dédiée (`spot_holdings`), séparée des trades à levier des autres modes. LONG uniquement. Désactivé par défaut.</div>
+            <div style={{fontSize:18,color:"#64748b",marginBottom:10}}>Achète l'actif RÉEL au comptant sur le wallet Hyperliquid et le tient jusqu'au bon moment pour revendre — restreint aux coins ayant un vrai marché spot sur Hyperliquid (voir HL_SPOT_TRADEABLE_COINS, ~30 paires SPOT/USDC). Historique : ce mode était passé brièvement à l'exécution perpétuelle sur la prémisse qu'Hyperliquid n'avait qu'un seul actif spot (HYPE) — prémisse incomplète, l'exchange a en réalité une trentaine de paires spot, d'où ce retour à l'exécution d'origine, cohérente avec le nom du mode. Table de suivi dédiée (`spot_holdings`), séparée des trades à levier des autres modes. LONG uniquement. Désactivé par défaut.</div>
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
