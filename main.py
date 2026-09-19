@@ -4569,7 +4569,7 @@ async def scan_markets(user_id: int):
                             # recalculée à froid à chaque cycle sur un indicateur qui varie sans
                             # arrêt.
                             trend_bg = await get_coin_trend_state(coin)
-                            trend_aligned = trend_bg == "BULL"
+                            trend_aligned = trend_bg != "BEAR"
 
                             # NOUVEAU : détection de "début de mouvement" — s'ajoute à la
                             # proximité + tendance globale (macro, change rarement). Capte le
@@ -4586,7 +4586,7 @@ async def scan_markets(user_id: int):
                             if not trend_aligned:
                                 if should_log_diag:
                                     accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
-                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais tendance de fond pas haussière ({trend_bg}) — pas d'achat", "info")
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + support ${support:.4g} proche, mais tendance de fond clairement baissière ({trend_bg}) — support jugé peu fiable, pas d'achat", "info")
                             elif not movement_starting:
                                 if should_log_diag:
                                     accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
@@ -4676,7 +4676,7 @@ async def scan_markets(user_id: int):
                             # (jugée trop tardive) comme condition bloquante. Réutilise le même
                             # état persistant par coin que le LONG (voir get_coin_trend_state).
                             trend_bg_s = await get_coin_trend_state(coin)
-                            trend_aligned_s = trend_bg_s == "BEAR"
+                            trend_aligned_s = trend_bg_s != "BULL"
 
                             # Miroir du LONG : réutilise crossBear déjà calculé + accélération.
                             fresh_cross_down = bool(macd and macd.get("crossBear"))
@@ -4686,7 +4686,7 @@ async def scan_markets(user_id: int):
                             if not trend_aligned_s:
                                 if should_log_diag_short:
                                     accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
-                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais tendance de fond pas baissière ({trend_bg_s}) — pas de vente", "info")
+                                    add_bot_log(user_id, f"💰🔍 {coin}: RSI {rsi:.1f} + résistance ${resistance:.4g} proche, mais tendance de fond clairement haussière ({trend_bg_s}) — résistance jugée peu fiable, pas de vente", "info")
                             elif not movement_starting_s:
                                 if should_log_diag_short:
                                     accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
@@ -9467,7 +9467,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.70"
+BACKEND_BUILD_VERSION = "2026-08-20.71"
 
 @app.get("/api/version")
 def get_version():
