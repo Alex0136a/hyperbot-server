@@ -785,6 +785,14 @@ def init_db():
         conn.commit()
     except: pass
     try:
+        # NOUVEAU CHEMIN D'ENTRÉE — pendant la phase d'accumulation elle-même (vrai range
+        # détecté), sans attendre qu'une tendance s'établisse ou qu'un début de mouvement se
+        # produise. Volontairement plus strict que le simple bonus de confiance (1.15x) car ce
+        # seuil CONTOURNE les exigences de tendance/mouvement plutôt que de les renforcer.
+        conn.execute("ALTER TABLE bot_config ADD COLUMN accumulation_range_volume_mult REAL DEFAULT 1.5")
+        conn.commit()
+    except: pass
+    try:
         conn.execute("UPDATE bot_config SET accumulation_proximity_pct=2.5 WHERE accumulation_proximity_pct IN (0.5, 1.0)")
         conn.commit()
     except: pass
@@ -4496,11 +4504,26 @@ async def scan_markets(user_id: int):
                     # est descendue SOUS le support puis a clôturé AU-DESSUS : signal de
                     # retournement plus fort qu'un simple "le prix est proche du niveau".
                     wick_rejection_acc = bool(len(candles) >= 1 and candles[-1]["l"] <= support and candles[-1]["c"] > support)
+                    # NOUVEAU CHEMIN D'ENTRÉE — pendant la phase d'accumulation elle-même (vrai
+                    # range détecté), sans attendre qu'une tendance s'établisse ou qu'un début
+                    # de mouvement se produise. 3 conditions, toutes nécessaires : (1) is_range
+                    # déjà validé plus haut dans la boucle (support ET résistance confirmés, pas
+                    # juste du calme par hasard) ; (2) volume nettement élevé (1.5x par défaut,
+                    # volontairement plus strict que la confirmation standard à 1.3x puisque ce
+                    # chemin CONTOURNE les exigences de tendance/mouvement plutôt que de les
+                    # renforcer) ; (3) proximité au bord du range (réutilise near_support,
+                    # déjà vérifié ci-dessus).
+                    range_vol_mult_acc = config["accumulation_range_volume_mult"] if "accumulation_range_volume_mult" in config.keys() and config["accumulation_range_volume_mult"] is not None else 1.5
+                    range_volume_ok_acc = bool(vol_avg and vol_cur > vol_avg * range_vol_mult_acc)
+                    range_path_ok_acc = bool(is_range and range_volume_ok_acc)
                     if not near_support:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
                             dist_abs = abs(price - support)
                             add_bot_log(user_id, f"💰🔍 {coin}: support détecté à ${support:.4g} mais prix trop loin (écart ${dist_abs:.4g} > {proximity_atr_mult}x ATR ${atr_val_acc:.4g}) — pas d'achat", "info")
+                    elif range_path_ok_acc:
+                        accumulation_candidates.append({"coin": coin, "support": support, "resistance": resistance, "rsi": rsi, "action": "LONG", "channel_pct": channel_pct})
+                        add_bot_log(user_id, f"💰🎯 {coin}: entrée via le NOUVEAU chemin range — vrai range détecté + volume {vol_cur:.0f} ({vol_cur/vol_avg:.1f}x moyenne) + proche du support ${support:.4g} — achat sans attendre tendance/mouvement", "success")
                     elif not volume_confirmed_acc:
                         if should_log_diag:
                             accumulation_diagnostic_cache[diag_key] = datetime.utcnow()
@@ -4624,11 +4647,18 @@ async def scan_markets(user_id: int):
                     # Rejet par mèche HAUTE (miroir) : la dernière bougie est montée AU-DESSUS
                     # de la résistance puis a clôturé EN DESSOUS.
                     wick_rejection_acc_s = bool(len(candles) >= 1 and candles[-1]["h"] >= resistance and candles[-1]["c"] < resistance)
+                    # Miroir exact du LONG — voir ses commentaires pour l'explication complète.
+                    range_vol_mult_acc_s = config["accumulation_range_volume_mult"] if "accumulation_range_volume_mult" in config.keys() and config["accumulation_range_volume_mult"] is not None else 1.5
+                    range_volume_ok_acc_s = bool(vol_avg and vol_cur > vol_avg * range_vol_mult_acc_s)
+                    range_path_ok_acc_s = bool(is_range and range_volume_ok_acc_s)
                     if not near_resistance:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
                             dist_abs_s = abs(price - resistance)
                             add_bot_log(user_id, f"💰🔍 {coin}: résistance détectée à ${resistance:.4g} mais prix trop loin (écart ${dist_abs_s:.4g} > {proximity_atr_mult_s}x ATR ${atr_val_acc_s:.4g}) — pas de vente", "info")
+                    elif range_path_ok_acc_s:
+                        accumulation_candidates.append({"coin": coin, "resistance": resistance, "support": support, "rsi": rsi, "action": "SHORT", "channel_pct": channel_pct_short})
+                        add_bot_log(user_id, f"💰🎯 {coin}: entrée via le NOUVEAU chemin range — vrai range détecté + volume {vol_cur:.0f} ({vol_cur/vol_avg:.1f}x moyenne) + proche de la résistance ${resistance:.4g} — vente sans attendre tendance/mouvement", "success")
                     elif not volume_confirmed_acc_s:
                         if should_log_diag_short:
                             accumulation_diagnostic_cache[diag_key_short] = datetime.utcnow()
@@ -4713,45 +4743,57 @@ async def scan_markets(user_id: int):
                     spot_proximity_atr_mult = config["spot_accum_proximity_atr_mult"] if "spot_accum_proximity_atr_mult" in config.keys() and config["spot_accum_proximity_atr_mult"] is not None else 2.0
                     near_support_spot = bool(spot_atr_prox and abs(price - support) <= spot_atr_prox * spot_proximity_atr_mult)
                     if near_support_spot:
-                        # Momentum cohérent — même logique que l'Accumulation à levier.
-                        spot_momentum_margin = config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3
-                        spot_price_not_breached = price >= support * (1 - spot_momentum_margin / 100)
-                        spot_atr_val = tech.get("atr")
-                        spot_candle_atr_mult = config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0
-                        spot_candle_ok = True
-                        if spot_atr_val and candles:
-                            spot_last_range = candles[-1]["h"] - candles[-1]["l"]
-                            spot_candle_ok = spot_last_range <= spot_atr_val * spot_candle_atr_mult
-                        if spot_price_not_breached and spot_candle_ok:
-                            spot_recent_low = min(closes[-3:]) if len(closes) >= 3 else price
-                            spot_bouncing_up = price > spot_recent_low * 1.001
-                            spot_rsi_recovering = False
-                            if len(closes) > 17:
-                                spot_rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
-                                if spot_rsi_prev is not None and rsi is not None and rsi > spot_rsi_prev:
-                                    spot_rsi_recovering = True
-                            spot_macd_bull = bool(macd and macd["macd"] > macd["signal"])
-                            spot_reversal_confirmed = spot_bouncing_up and spot_rsi_recovering and spot_macd_bull
-                            # CORRIGÉ : utilisait le même MACD 15min que la confirmation de
-                            # rebond ci-dessus, rendant les deux redondantes plutôt
-                            # qu'indépendantes — remplacé par la tendance à ÉTAT PERSISTANT sur
-                            # MACD 1h (même état partagé que Accumulation, voir
-                            # get_coin_trend_state), qui reste figée depuis son dernier
-                            # retournement confirmé.
-                            spot_trend = await get_coin_trend_state(coin)
-                            # Marge minimale jusqu'à la résistance — vérifie qu'il reste
-                            # VRAIMENT de la place pour monter avant d'acheter, pas seulement
-                            # que le prix est proche du support. Sans ce garde-fou, un prix qui
-                            # aurait dérivé anormalement près de la résistance (malgré un canal
-                            # large au global) pourrait encore qualifier via la seule proximité
-                            # au support.
-                            spot_min_room = config["spot_accum_min_room_pct"] if "spot_accum_min_room_pct" in config.keys() and config["spot_accum_min_room_pct"] is not None else 1.5
-                            spot_room_to_resistance = (resistance - price) / price * 100
-                            spot_room_ok = spot_room_to_resistance >= spot_min_room
-                            if spot_reversal_confirmed and spot_trend != "BEAR" and spot_room_ok:
-                                spot_accum_candidates.append({"coin": coin, "support": support, "resistance": resistance, "channel_pct": spot_channel_pct})
-                            elif spot_reversal_confirmed and spot_trend != "BEAR" and not spot_room_ok:
-                                add_bot_log(user_id, f"🪙🔍 {coin}: retournement confirmé mais trop proche de la résistance ${resistance:.4g} (marge {spot_room_to_resistance:.2f}% < {spot_min_room}%) — pas d'achat spot", "info")
+                        # Marge minimale jusqu'à la résistance — calculée ici (avant les deux
+                        # chemins), réutilisée par le nouveau chemin range ET l'ancien chemin.
+                        # Vérifie qu'il reste VRAIMENT de la place pour monter, pas seulement
+                        # que le prix est proche du support.
+                        spot_min_room = config["spot_accum_min_room_pct"] if "spot_accum_min_room_pct" in config.keys() and config["spot_accum_min_room_pct"] is not None else 1.5
+                        spot_room_to_resistance = (resistance - price) / price * 100
+                        spot_room_ok = spot_room_to_resistance >= spot_min_room
+
+                        # NOUVEAU CHEMIN D'ENTRÉE — même principe qu'Accumulation (voir ses
+                        # commentaires) : pendant la phase d'accumulation elle-même (vrai range
+                        # détecté), sans attendre de retournement confirmé ni de tendance.
+                        spot_range_vol_mult = config["accumulation_range_volume_mult"] if "accumulation_range_volume_mult" in config.keys() and config["accumulation_range_volume_mult"] is not None else 1.5
+                        spot_range_volume_ok = bool(vol_avg and vol_cur > vol_avg * spot_range_vol_mult)
+                        spot_range_path_ok = bool(is_range and spot_range_volume_ok)
+
+                        if spot_range_path_ok and spot_room_ok:
+                            spot_accum_candidates.append({"coin": coin, "support": support, "resistance": resistance, "channel_pct": spot_channel_pct})
+                            add_bot_log(user_id, f"🪙🎯 {coin}: entrée via le NOUVEAU chemin range — vrai range détecté + volume {vol_cur:.0f} ({vol_cur/vol_avg:.1f}x moyenne) + proche du support ${support:.4g} — achat spot sans attendre retournement/tendance", "success")
+                        else:
+                            # Momentum cohérent — même logique que l'Accumulation à levier.
+                            spot_momentum_margin = config["spot_accum_momentum_margin_pct"] if "spot_accum_momentum_margin_pct" in config.keys() and config["spot_accum_momentum_margin_pct"] is not None else 0.3
+                            spot_price_not_breached = price >= support * (1 - spot_momentum_margin / 100)
+                            spot_atr_val = tech.get("atr")
+                            spot_candle_atr_mult = config["spot_accum_candle_atr_mult"] if "spot_accum_candle_atr_mult" in config.keys() and config["spot_accum_candle_atr_mult"] is not None else 2.0
+                            spot_candle_ok = True
+                            if spot_atr_val and candles:
+                                spot_last_range = candles[-1]["h"] - candles[-1]["l"]
+                                spot_candle_ok = spot_last_range <= spot_atr_val * spot_candle_atr_mult
+                            if spot_price_not_breached and spot_candle_ok:
+                                spot_recent_low = min(closes[-3:]) if len(closes) >= 3 else price
+                                spot_bouncing_up = price > spot_recent_low * 1.001
+                                spot_rsi_recovering = False
+                                if len(closes) > 17:
+                                    spot_rsi_prev = calc_rsi(closes[:-3], int(rsi_period))
+                                    if spot_rsi_prev is not None and rsi is not None and rsi > spot_rsi_prev:
+                                        spot_rsi_recovering = True
+                                spot_macd_bull = bool(macd and macd["macd"] > macd["signal"])
+                                spot_reversal_confirmed = spot_bouncing_up and spot_rsi_recovering and spot_macd_bull
+                                # CORRIGÉ : utilisait le même MACD 15min que la confirmation de
+                                # rebond ci-dessus, rendant les deux redondantes plutôt
+                                # qu'indépendantes — remplacé par la tendance à ÉTAT PERSISTANT sur
+                                # MACD 1h (même état partagé que Accumulation, voir
+                                # get_coin_trend_state), qui reste figée depuis son dernier
+                                # retournement confirmé.
+                                spot_trend = await get_coin_trend_state(coin)
+                                # spot_room_ok déjà calculé plus haut, réutilisé ici (évite un
+                                # double calcul redondant).
+                                if spot_reversal_confirmed and spot_trend != "BEAR" and spot_room_ok:
+                                    spot_accum_candidates.append({"coin": coin, "support": support, "resistance": resistance, "channel_pct": spot_channel_pct})
+                                elif spot_reversal_confirmed and spot_trend != "BEAR" and not spot_room_ok:
+                                    add_bot_log(user_id, f"🪙🔍 {coin}: retournement confirmé mais trop proche de la résistance ${resistance:.4g} (marge {spot_room_to_resistance:.2f}% < {spot_min_room}%) — pas d'achat spot", "info")
 
 
             # Pré-filtre technique — un vrai signal (RSI extrême, croisement MACD ou pic de volume)
@@ -6637,6 +6679,7 @@ class UpdateConfigRequest(BaseModel):
     accumulation_proximity_pct: Optional[float] = None
     accumulation_proximity_atr_mult: Optional[float] = None
     accumulation_volume_confirm_mult: Optional[float] = None
+    accumulation_range_volume_mult: Optional[float] = None
     accumulation_rsi_threshold: Optional[float] = None
     accumulation_breakdown_buffer_pct: Optional[float] = None
     accumulation_max_loss_pct: Optional[float] = None
@@ -6859,6 +6902,7 @@ def get_config(user_id: int = Depends(get_current_user)):
         "accumulation_proximity_pct": config["accumulation_proximity_pct"] if "accumulation_proximity_pct" in config.keys() and config["accumulation_proximity_pct"] is not None else 2.5,
         "accumulation_proximity_atr_mult": config["accumulation_proximity_atr_mult"] if "accumulation_proximity_atr_mult" in config.keys() and config["accumulation_proximity_atr_mult"] is not None else 2.0,
         "accumulation_volume_confirm_mult": config["accumulation_volume_confirm_mult"] if "accumulation_volume_confirm_mult" in config.keys() and config["accumulation_volume_confirm_mult"] is not None else 1.3,
+        "accumulation_range_volume_mult": config["accumulation_range_volume_mult"] if "accumulation_range_volume_mult" in config.keys() and config["accumulation_range_volume_mult"] is not None else 1.5,
         "accumulation_rsi_threshold": config["accumulation_rsi_threshold"] if "accumulation_rsi_threshold" in config.keys() and config["accumulation_rsi_threshold"] else 30.0,
         "accumulation_breakdown_buffer_pct": config["accumulation_breakdown_buffer_pct"] if "accumulation_breakdown_buffer_pct" in config.keys() and config["accumulation_breakdown_buffer_pct"] else 1.0,
         "accumulation_max_loss_pct": config["accumulation_max_loss_pct"] if "accumulation_max_loss_pct" in config.keys() and config["accumulation_max_loss_pct"] else 0.3,
@@ -7094,6 +7138,8 @@ def update_config(req: UpdateConfigRequest, user_id: int = Depends(get_current_u
         conn.execute("UPDATE bot_config SET accumulation_proximity_atr_mult=? WHERE user_id=?", (req.accumulation_proximity_atr_mult, user_id))
     if req.accumulation_volume_confirm_mult is not None:
         conn.execute("UPDATE bot_config SET accumulation_volume_confirm_mult=? WHERE user_id=?", (req.accumulation_volume_confirm_mult, user_id))
+    if req.accumulation_range_volume_mult is not None:
+        conn.execute("UPDATE bot_config SET accumulation_range_volume_mult=? WHERE user_id=?", (req.accumulation_range_volume_mult, user_id))
     if req.accumulation_rsi_threshold is not None:
         conn.execute("UPDATE bot_config SET accumulation_rsi_threshold=? WHERE user_id=?", (req.accumulation_rsi_threshold, user_id))
     if req.accumulation_breakdown_buffer_pct is not None:
@@ -9467,7 +9513,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.71"
+BACKEND_BUILD_VERSION = "2026-08-20.74"
 
 @app.get("/api/version")
 def get_version():
