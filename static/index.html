@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.48";
+const APP_BUILD_VERSION = "2026-08-20.49";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -424,6 +424,8 @@ function App() {
   const [spotAccumMarket, setSpotAccumMarket] = useState(null);
   const [spotAccumMarketLoading, setSpotAccumMarketLoading] = useState(false);
   const [spotAccumSpotMarket, setSpotAccumSpotMarket] = useState(null);
+  const [manualSpotCoin, setManualSpotCoin] = useState("");
+  const [manualSpotSize, setManualSpotSize] = useState("");
   const [spotAccumSpotMarketLoading, setSpotAccumSpotMarketLoading] = useState(false);
   const [spotAccumPerf, setSpotAccumPerf] = useState(null);
   const [spotAccumPerfLoading, setSpotAccumPerfLoading] = useState(false);
@@ -2102,6 +2104,27 @@ Confirmer ?`
 
                 {spotAccumSubTab === "positions" && (
                 <>
+                <div style={{background:"#0a1628",border:"1px solid #3d3a0a",borderRadius:8,padding:10,marginBottom:12}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#facc15",marginBottom:6}}>👤 Achat manuel (LONG uniquement)</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                    <input value={manualSpotCoin} onChange={e=>setManualSpotCoin(e.target.value.toUpperCase())} placeholder="Coin (ex: BTC)" style={{background:"#0a0e1a",border:"1px solid #1e293b",borderRadius:4,padding:"5px 8px",color:"#e2e8f0",fontSize:11,width:100}} />
+                    <input type="number" value={manualSpotSize} onChange={e=>setManualSpotSize(e.target.value)} placeholder="Montant $" style={{background:"#0a0e1a",border:"1px solid #1e293b",borderRadius:4,padding:"5px 8px",color:"#e2e8f0",fontSize:11,width:90}} />
+                    <button onClick={async ()=>{
+                      if(!manualSpotCoin || !manualSpotSize || Number(manualSpotSize)<=0){ addLog("⛔ Renseignez un coin et un montant valide","error"); return; }
+                      const isLiveSpot = config?.spot_accum_trading_mode==="live";
+                      if(isLiveSpot && !confirm(`Confirmer l'achat spot RÉEL de ${manualSpotCoin} pour ${manualSpotSize} USDC ?`)) return;
+                      try {
+                        const r = await apiCall("/api/manual-spot-trade","POST",{coin:manualSpotCoin, size_usdc:Number(manualSpotSize)},token);
+                        addLog(r.message,"success");
+                        setManualSpotCoin(""); setManualSpotSize("");
+                        loadData();
+                      } catch(e){ addLog("⛔ "+e.message,"error"); }
+                    }} style={{background:"#1a1706",border:"1px solid #facc15",borderRadius:4,padding:"5px 12px",color:"#facc15",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                      Acheter ({config?.spot_accum_trading_mode==="live"?"🔴 LIVE":"🎮 Paper"})
+                    </button>
+                  </div>
+                  <div style={{fontSize:9,color:"#475569",marginTop:4}}>En Live, restreint aux coins ayant un vrai marché spot sur Hyperliquid.</div>
+                </div>
                 {spotHoldings.open.length === 0 && spotHoldings.closed.length === 0 && (
                   <div style={{fontSize:10,color:"#475569",fontStyle:"italic"}}>Mode actif, en attente d'un canal ≥{config?.spot_accum_min_channel_pct||2.5}% avec retournement confirmé — aucun achat pour l'instant. Consultez les logs "💰🔍" pour voir pourquoi chaque coin n'a pas encore qualifié.</div>
                 )}
@@ -3478,11 +3501,14 @@ Confirmer ?`
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
               <li>Canal (support-résistance) ≥ 2.5% par défaut — bien plus large qu'Accumulation à levier (0.5%), pour capter un vrai va-et-vient plutôt qu'un micro-mouvement</li>
-              <li><b style={{color:"#f8fafc"}}>Proximité ATR-relative</b> au support (2× l'ATR du coin par défaut) — SEUL filtre obligatoire, non négociable, même logique qu'Accumulation à levier</li>
-              <li><b style={{color:"#fbbf24"}}>Système de score</b> (même principe qu'Accumulation à levier) — au moins 2 des 3 catégories : <b>Volume</b> (≥1.3× la moyenne), <b>Action de prix</b> (rejet par mèche OU retournement confirmé — rebond + RSI qui remonte + MACD haussier), <b>Contexte favorable</b> (tendance pas clairement contraire OU vrai range détecté)</li>
+              <li><b style={{color:"#f8fafc"}}>Proximité ATR-relative</b> au support (2× l'ATR du coin par défaut) — SEUL filtre de position obligatoire, non négociable, même logique qu'Accumulation à levier</li>
+              <li><b style={{color:"#fbbf24"}}>Vrai range OBLIGATOIRE</b> (aligné sur Accumulation à levier) — support ET résistance confirmés requis, plus une simple option du score : sans lui, on ne confirme jamais qu'on est réellement en phase d'accumulation</li>
+              <li><b style={{color:"#fbbf24"}}>Distance au dernier retournement confirmé EXPLOITÉE</b> (aligné sur Accumulation) — si le prix a déjà bougé de plus de 3% (réglable, réglage partagé avec Accumulation) depuis le prix où la tendance 1h a basculé pour la dernière fois, l'achat est refusé : accumulation jugée tardive</li>
+              <li><b style={{color:"#fbbf24"}}>Système de score</b> — au moins 2 des 3 catégories : <b>Volume</b> (≥1.3× la moyenne), <b>Action de prix</b> (rejet par mèche OU retournement confirmé — rebond + RSI qui remonte + MACD haussier), <b>Tendance</b> (pas clairement contraire — is_range étant désormais un filtre obligatoire séparé, il ne fait plus partie de cette catégorie)</li>
               <li><b style={{color:"#f8fafc"}}>Momentum cohérent</b> (garde-fou de risque séparé) : prix pas déjà passé sous le support, bougie pas anormale vs ATR</li>
               <li><b style={{color:"#f8fafc"}}>Marge minimale jusqu'à la résistance</b> (1.5% par défaut) : bloque l'achat si le prix a dérivé trop près de la résistance, même si le support est proche</li>
               <li>Taille = 50% du capital ÷ positions Spot Accumulation simultanées max, sans levier</li>
+              <li><b style={{color:"#fbbf24"}}>Achat manuel</b> (nouveau — jusqu'ici seul le scan automatique pouvait ouvrir un holding) : formulaire coin + montant dans l'onglet Positions, LONG uniquement. Utilise le mode paper/live actuellement configuré ; en Live, restreint aux coins ayant un vrai marché spot sur Hyperliquid</li>
             </ul>
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Sortie</div>
