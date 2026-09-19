@@ -2994,6 +2994,25 @@ def resolve_coin_live_conflict(user_id: int, coin: str) -> None:
 # Spot Accumulation aux seuls coins où un achat spot réel est possible (l'exchange n'a PAS
 # qu'un seul actif spot comme supposé initialement, mais reste très limité comparé aux
 # perpétuels — la grande majorité des coins actifs du bot n'a AUCUN marché spot du tout).
+def _apply_giveback_cap(peak: float, floor: float, user_id: int) -> float:
+    """Plafond de pullback GLOBAL (4+ modes) — voir migration ttp_giveback_cap_after_pct pour
+    le principe complet. Retourne le plancher le plus STRICT entre celui déjà calculé par le
+    mode et ce plafond, uniquement si le pic a atteint le seuil.
+    BUG CORRIGÉ : cette fonction était définie comme une fermeture LOCALE à l'intérieur de
+    manage_open_trade — inaccessible depuis manage_spot_holdings (une fonction séparée), qui
+    plantait avec "name '_apply_giveback_cap' is not defined" à chaque tentative, cassant toute
+    la boucle de gestion des holdings et provoquant des blocages en cascade (dont les erreurs
+    "database is locked" observées, des connexions non refermées proprement après le crash).
+    Désormais autonome au niveau module, avec sa propre requête DB."""
+    conn_cap = get_db()
+    giveback_cap_cfg = conn_cap.execute("SELECT ttp_giveback_cap_after_pct, ttp_giveback_cap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
+    conn_cap.close()
+    giveback_cap_after = giveback_cap_cfg["ttp_giveback_cap_after_pct"] if giveback_cap_cfg and "ttp_giveback_cap_after_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_after_pct"] is not None else 3.0
+    giveback_cap_pct = giveback_cap_cfg["ttp_giveback_cap_pct"] if giveback_cap_cfg and "ttp_giveback_cap_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_pct"] is not None else 0.5
+    if peak >= giveback_cap_after:
+        return max(floor, peak - giveback_cap_pct)
+    return floor
+
 HL_SPOT_TRADEABLE_COINS = {
     "HYPE", "BTC", "ETH", "ZEC", "SOL", "DRV", "PURR", "PUMP", "USDT", "KNTQ",
     "ENA", "XPL", "TREAD", "FARTCOIN", "XAUT", "SEDA", "ANSEM", "KHYPE", "MON",
@@ -3157,17 +3176,6 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
     voir current_candle_open), pas seulement au cycle de scan — se met à jour à chaque tick."""
     anti_wick_cfg = conn.execute("SELECT anti_wick_delay_minutes FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
     anti_wick_delay = anti_wick_cfg["anti_wick_delay_minutes"] if anti_wick_cfg and "anti_wick_delay_minutes" in anti_wick_cfg.keys() and anti_wick_cfg["anti_wick_delay_minutes"] is not None else 1.0
-    giveback_cap_cfg = conn.execute("SELECT ttp_giveback_cap_after_pct, ttp_giveback_cap_pct FROM bot_config WHERE user_id=?", (user_id,)).fetchone()
-    giveback_cap_after = giveback_cap_cfg["ttp_giveback_cap_after_pct"] if giveback_cap_cfg and "ttp_giveback_cap_after_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_after_pct"] is not None else 3.0
-    giveback_cap_pct = giveback_cap_cfg["ttp_giveback_cap_pct"] if giveback_cap_cfg and "ttp_giveback_cap_pct" in giveback_cap_cfg.keys() and giveback_cap_cfg["ttp_giveback_cap_pct"] is not None else 0.5
-
-    def _apply_giveback_cap(peak, floor):
-        """Plafond de pullback GLOBAL (4 modes) — voir migration ttp_giveback_cap_after_pct
-        pour le principe complet. Retourne le plancher le plus STRICT entre celui déjà calculé
-        par le mode et ce plafond, uniquement si le pic a atteint le seuil."""
-        if peak >= giveback_cap_after:
-            return max(floor, peak - giveback_cap_pct)
-        return floor
 
     direction = 1 if trade["action"] == "LONG" else -1
     pnl = (cur - trade["entry_price"]) / trade["entry_price"] * trade["size_usdc"] * trade["leverage"] * direction
@@ -3216,7 +3224,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
                 conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
 
             accum_floor = round(accum_peak_pct * (accum_lock_ratio / 100), 4)
-            accum_floor = _apply_giveback_cap(accum_peak_pct, accum_floor)
+            accum_floor = _apply_giveback_cap(accum_peak_pct, accum_floor, user_id)
 
             if pnl_pct_live <= accum_floor:
                 accum_close_reason = "ACCUMULATION_TRAILING_TP"
@@ -3319,7 +3327,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not bo_close_reason and bo_peak_pct >= bo_main_arm:
             bo_floor = round(bo_peak_pct * (bo_lock_ratio / 100), 4)
-            bo_floor = _apply_giveback_cap(bo_peak_pct, bo_floor)
+            bo_floor = _apply_giveback_cap(bo_peak_pct, bo_floor, user_id)
             if pnl_pct_live <= bo_floor:
                 bo_close_reason = "BREAKOUT_TRAILING_TP"
                 bo_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(bo_peak_pct,2)}%, plancher {round(bo_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
@@ -3392,7 +3400,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
             conn.execute("UPDATE paper_trades SET trailing_armed=1 WHERE id=?", (trade["id"],))
         if not rt_close_reason and rt_peak_pct >= rt_main_arm:
             rt_floor = round(rt_peak_pct * (rt_lock_ratio / 100), 4)
-            rt_floor = _apply_giveback_cap(rt_peak_pct, rt_floor)
+            rt_floor = _apply_giveback_cap(rt_peak_pct, rt_floor, user_id)
             if pnl_pct_live <= rt_floor:
                 rt_close_reason = "RANGE_TRADE_TRAILING_TP"
                 rt_log_msg = f"🔒 {trade['coin']}: Trailing principal touché (pic {round(rt_peak_pct,2)}%, plancher {round(rt_floor,2)}%) — clôture +{round(pnl,2)} USDC ({round(pnl_pct_live,2)}%)"
@@ -3616,7 +3624,7 @@ async def manage_open_trade(user_id: int, trade: dict, cur: float, conn, accum_r
 
         if candidate_stops:
             reason, stop_level_pct = max(candidate_stops, key=lambda x: x[1])
-            stop_level_pct = _apply_giveback_cap(peak_pct, stop_level_pct)
+            stop_level_pct = _apply_giveback_cap(peak_pct, stop_level_pct, user_id)
             if pnl_pct_live <= stop_level_pct:
                 close_reason = reason
                 close_stop_level_pct = stop_level_pct
@@ -3964,7 +3972,7 @@ async def manage_spot_holdings(user_id: int, prices: dict, candle_color_by_coin:
 
             if trailing_armed:
                 floor_pct = round(peak_pct * (lock_ratio / 100), 4)
-                floor_pct = _apply_giveback_cap(peak_pct, floor_pct)
+                floor_pct = _apply_giveback_cap(peak_pct, floor_pct, user_id)
 
                 if pnl_pct <= floor_pct:
                     close_reason = "SPOT_ACCUM_TARGET_TRAILING"
@@ -9444,7 +9452,7 @@ def cleanup_signals(user_id: int = Depends(get_current_user)):
 # Incrémenté à CHAQUE fichier main.py livré par Claude — permet de vérifier en visitant
 # simplement /api/version dans le navigateur que le déploiement Railway est bien à jour,
 # sans avoir à deviner à partir du comportement observé du bot.
-BACKEND_BUILD_VERSION = "2026-08-20.81"
+BACKEND_BUILD_VERSION = "2026-08-20.82"
 
 @app.get("/api/version")
 def get_version():
