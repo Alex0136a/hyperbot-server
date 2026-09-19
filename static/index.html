@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.46";
+const APP_BUILD_VERSION = "2026-08-20.47";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -625,6 +625,17 @@ function App() {
     const id = setInterval(fetchRealBalance, 30000);
     return () => clearInterval(id);
   }, [token]);
+
+  useEffect(() => {
+    // Rafraîchissement automatique du Marché Spot — sans ça, les données restaient figées à
+    // l'instant du clic sur l'onglet, potentiellement des heures si la page reste ouverte
+    // sans qu'on reclique dessus. Actif UNIQUEMENT tant que cet onglet précis est affiché,
+    // pour ne pas solliciter l'API Hyperliquid inutilement en arrière-plan.
+    if(!token || spotAccumSubTab !== "spotmarche") return;
+    loadSpotAccumSpotMarket();
+    const id = setInterval(loadSpotAccumSpotMarket, 15000);
+    return () => clearInterval(id);
+  }, [token, spotAccumSubTab]);
 
   useEffect(() => { logEnd.current?.scrollIntoView({behavior:"smooth"}); }, [logs]);
 
