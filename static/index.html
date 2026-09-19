@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.47";
+const APP_BUILD_VERSION = "2026-08-20.48";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -2428,8 +2428,14 @@ Confirmer ?`
                     {key:"accumulation_top_leverage",label:"Accumulation - levier boosté sur les meilleurs actifs (top-10)",def:3,step:1,min:1,max:10},
                     {key:"accumulation_min_channel_pct",label:"Accumulation - largeur minimale du canal support/résistance (%)",def:0.5,step:0.1,min:0.1,max:10},
                     {key:"accumulation_proximity_pct",label:"Accumulation - proximité fixe (%, plus utilisée par défaut, voir ATR ci-dessous)",def:1.0,step:0.1,min:0.1,max:10},
-                    {key:"accumulation_proximity_atr_mult",label:"Accumulation - proximité ATR-relative (× ATR du coin, critère principal désormais)",def:0.5,step:0.05,min:0.1,max:3},
-                    {key:"accumulation_volume_confirm_mult",label:"Accumulation - confirmation volume (× moyenne)",def:1.3,step:0.1,min:1,max:5},
+                    {key:"accumulation_proximity_atr_mult",label:"Accumulation - ancien champ unifié (plus utilisé, voir LONG/SHORT séparés ci-dessous)",def:0.5,step:0.05,min:0.1,max:3},
+                    {key:"accumulation_volume_confirm_mult",label:"Spot Accumulation - confirmation volume (× moyenne)",def:1.3,step:0.1,min:1,max:5},
+                    {key:"accumulation_proximity_atr_mult_long",label:"🔵 Accumulation LONG - proximité ATR-relative (× ATR)",def:2.0,step:0.05,min:0.1,max:5},
+                    {key:"accumulation_proximity_atr_mult_short",label:"🔴 Accumulation SHORT - proximité ATR-relative (× ATR, plus strict — les baisses sont plus rapides/violentes)",def:1.5,step:0.05,min:0.1,max:5},
+                    {key:"accumulation_volume_confirm_mult_long",label:"🔵 Accumulation LONG - confirmation volume (× moyenne)",def:1.3,step:0.1,min:1,max:5},
+                    {key:"accumulation_volume_confirm_mult_short",label:"🔴 Accumulation SHORT - confirmation volume (× moyenne, plus strict — le volume de panique est courant mais peu fiable)",def:1.6,step:0.1,min:1,max:5},
+                    {key:"accumulation_channel_safety_margin",label:"Accumulation - marge de sécurité canal (garantit zones LONG/SHORT jamais chevauchées)",def:1.5,step:0.1,min:1,max:5},
+                    {key:"accumulation_max_dist_from_reversal_pct",label:"Accumulation - distance max au dernier retournement confirmé (%, au-delà = accumulation jugée tardive)",def:3.0,step:0.5,min:0.5,max:20},
                     {key:"hl_safety_sl_multiplier",label:"SL de sécurité Hyperliquid - multiplicateur (x fois le Max Loss, filet de dernier recours)",def:5.0,step:0.5,min:2,max:15},
                     {key:"accumulation_trailing_main_pct",label:"Accumulation - ancien seuil d'armement (plus utilisé, voir ci-dessous)",def:1.0,step:0.05,min:0.1,max:5},
                     {key:"accumulation_arm_pct",label:"Accumulation/Spot Accum - NOUVEAU seuil d'armement unique (% PnL, sortie simplifiée)",def:0.4,step:0.05,min:0.1,max:5},
@@ -3385,15 +3391,18 @@ Confirmer ?`
 
             <div style={{fontSize:22,fontWeight:700,color:"#cbd5e1",marginBottom:4}}>Entrée</div>
             <ul style={{fontSize:20,color:"#cbd5e1",margin:"0 0 10px 0",paddingLeft:18,lineHeight:1.7}}>
-              <li><b style={{color:"#f8fafc"}}>Proximité ATR-relative</b> (2× l'ATR du coin par défaut, ajusté empiriquement à partir de logs réels) — SEUL filtre obligatoire, non négociable : sans être au bon endroit, la prémisse même de l'entrée n'existe pas. S'adapte automatiquement à la volatilité propre à chaque coin</li>
-              <li><b style={{color:"#fbbf24"}}>Système de score</b> (remplace une ancienne conjonction stricte de 5 conditions qui rendait une entrée statistiquement quasi impossible) — au moins <b style={{color:"#f8fafc"}}>2 des 3 catégories suivantes</b> doivent être satisfaites :
+              <li><b style={{color:"#fbbf24"}}>RÉVOLUTION — canal minimum DYNAMIQUE</b> (remplace un seuil fixe de 0.5%, cause racine d'un vrai bug observé : sur un canal trop étroit, les zones de proximité LONG et SHORT se chevauchaient entièrement, provoquant des ouvertures/fermetures en ping-pong entre les deux sens sur le même coin) — le canal minimum requis est désormais calculé pour garantir que les deux zones ne se touchent JAMAIS : <code>2 × zone de proximité × marge de sécurité (1.5× par défaut)</code></li>
+              <li><b style={{color:"#fbbf24"}}>Vrai range OBLIGATOIRE</b> (support ET résistance confirmés, prix entre les deux) — n'est plus une simple option du score, mais un filtre bloquant à part entière : sans lui, on ne confirme jamais qu'on est réellement en phase d'accumulation, juste que le prix est proche d'un niveau isolé</li>
+              <li><b style={{color:"#f8fafc"}}>Proximité ATR-relative</b> — DIFFÉRENCIÉE par sens : <b>2.0× l'ATR pour LONG</b>, <b>1.5× pour SHORT</b> (plus strict — les baisses sont statistiquement plus rapides et violentes que les hausses, moins de marge avant qu'un support ne cède brutalement)</li>
+              <li><b style={{color:"#fbbf24"}}>Distance au dernier retournement confirmé EXPLOITÉE</b> (donnée trackée depuis longtemps mais jamais utilisée jusqu'ici) — si le prix a déjà bougé de plus de 3% (réglable) depuis le prix où la tendance 1h a basculé pour la dernière fois, l'entrée est jugée tardive et refusée : on vise le début du mouvement, pas un train déjà bien lancé</li>
+              <li><b style={{color:"#fbbf24"}}>Système de score</b> — au moins <b style={{color:"#f8fafc"}}>2 des 3 catégories suivantes</b> :
                 <ul style={{paddingLeft:18,marginTop:4}}>
-                  <li><b>Volume</b> : ≥1.3× la moyenne — une vraie activité derrière le prix</li>
-                  <li><b>Action de prix</b> : rejet par mèche (la dernière bougie a touché le niveau puis clôturé du bon côté) OU début de mouvement (croisement MACD 15min frais + accélération ≥1× ATR) — un seul suffit, les deux capturent la même idée sous deux angles</li>
-                  <li><b>Contexte favorable</b> : tendance pas clairement contraire (état persistant sur MACD 1h) OU vrai range détecté (support ET résistance confirmés) — deux façons de dire "rien ne s'oppose à l'entrée"</li>
+                  <li><b>Volume</b> : ≥1.3× la moyenne pour LONG, <b>≥1.6× pour SHORT</b> (plus strict — le volume de panique est courant mais moins fiable comme signal que le volume d'achat progressif)</li>
+                  <li><b>Action de prix</b> : rejet par mèche OU début de mouvement (croisement MACD 15min frais + accélération ≥1× ATR) — un seul suffit</li>
+                  <li><b>Tendance</b> : pas clairement contraire (état persistant sur MACD 1h) — is_range étant désormais un filtre obligatoire séparé, il ne fait plus partie de cette catégorie</li>
                 </ul>
               </li>
-              <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
+              <li><b style={{color:"#fbbf24"}}>Anti-conflit interne LONG/SHORT</b> — si une position Accumulation existe déjà sur ce coin (peu importe le sens), aucune nouvelle tentative n'est ouverte dans l'autre sens : la position déjà en place n'est jamais perturbée par un signal contradictoire, plus de ping-pong entre LONG et SHORT sur le même coin</li>
               <li><b style={{color:"#f8fafc"}}>Momentum cohérent</b> (garde-fou de RISQUE séparé, toujours vérifié peu importe le score) : le prix ne doit pas être déjà passé franchement au-delà du niveau (évite de "rattraper un couteau qui tombe"), et la dernière bougie ne doit pas être anormalement large vs l'ATR (mouvement violent/instable)</li>
               <li><b style={{color:"#f8fafc"}}>Cohérence ATR/SL</b> (garde-fou de RISQUE séparé) : l'ATR (en % du prix) doit se situer entre 50% et 250% du Max Loss configuré — ni marché trop calme (bruit pur avant que le SL coupe), ni trop agité (le SL coupe sur une bougie normale)</li>
               <li>RSI n'est plus un filtre obligatoire (ni zone, ni pente) — le score suffit</li>
