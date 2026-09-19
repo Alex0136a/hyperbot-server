@@ -341,7 +341,7 @@ function LoginPage({ onLogin }) {
 // Numéro de build — incrémenté à CHAQUE fichier livré par Claude, pour vérifier en un coup
 // d'œil (dans l'en-tête de l'app) que le déploiement Railway est bien à jour, sans avoir à
 // comparer manuellement le code ou deviner à partir du comportement observé.
-const APP_BUILD_VERSION = "2026-08-20.40";
+const APP_BUILD_VERSION = "2026-08-20.41";
 
 function App() {
   const [token, setToken] = useState(()=>localStorage.getItem("hb_token")||"");
@@ -3334,7 +3334,7 @@ Confirmer ?`
               <li><b style={{color:"#f8fafc"}}>Proximité ATR-relative</b> (0.5× l'ATR du coin par défaut) — remplace l'ancien seuil fixe en %, qui ne tenait pas compte de la volatilité propre à chaque coin. S'adapte automatiquement : un coin calme et un coin volatil n'ont pas la même définition de "proche"</li>
               <li><b style={{color:"#f8fafc"}}>Confirmation par le volume</b> (1.3× la moyenne par défaut) — un vrai rebond sur un niveau s'accompagne souvent d'un pic de volume (achats/ventes réels qui défendent le niveau), pas juste un prix qui s'approche tranquillement sans activité derrière</li>
               <li><b style={{color:"#f8fafc"}}>Rejet par mèche</b> — la dernière bougie close doit être descendue sous le support (ou montée au-dessus de la résistance) puis avoir clôturé du bon côté : signal de retournement plus fort qu'un simple "le prix est proche du niveau"</li>
-              <li><b style={{color:"#f8fafc"}}>Tendance alignée OBLIGATOIRE</b> : LONG exige une tendance de fond HAUSSIÈRE confirmée (MACD croisé et du bon côté de zéro), SHORT exige une tendance BAISSIÈRE confirmée — pas juste "pas contraire" comme avant. La garantie d'entrer dans le sens du mouvement remplace la confirmation de rebond</li>
+              <li><b style={{color:"#f8fafc"}}>Tendance pas clairement contraire</b> : LONG bloqué uniquement si la tendance de fond est clairement BAISSIÈRE, SHORT bloqué uniquement si clairement HAUSSIÈRE — le range/neutre reste accepté, c'est justement le moment "accumulation" par excellence, avant qu'une direction ne se confirme. Exiger une tendance déjà confirmée aurait dénaturé le principe même du mode (construire une position en amont du mouvement, pas après)</li>
               <li>Largeur de canal minimum : 0.5% (réglable) — bloque les canaux trop étroits/dégénérés</li>
               <li><b style={{color:"#f8fafc"}}>Momentum cohérent</b> : le prix ne doit pas être déjà passé franchement au-delà du niveau (évite de "rattraper un couteau qui tombe"), et la dernière bougie ne doit pas être anormalement large vs l'ATR (mouvement violent/instable)</li>
               <li><b style={{color:"#f8fafc"}}>Cohérence ATR/SL</b> : l'ATR (en % du prix) doit se situer entre 50% et 250% du Max Loss configuré — ni marché trop calme (bruit pur avant que le SL coupe), ni trop agité (le SL coupe sur une bougie normale)</li>
