@@ -1013,3 +1013,8 @@ Fichiers : `bot_engine.py`, `README.md`.
 - Cas constaté : #35 TAO suivi en x10 alors que la position Hyperliquid est en x1 (levier refusé à l'ouverture, avant le correctif v4.412).
 - Toutes les 5 minutes, le levier **réel** de chaque position manuelle live (perp) est lu sur Hyperliquid ; s'il diffère du suivi, le suivi est aligné (levier, marge, % de marge, PnL en %), le trade enregistré en base est mis à jour, et un avertissement « ⚠ demandé xN » s'affiche. Le notionnel ne change pas. Couvre aussi un levier modifié à la main sur Hyperliquid.
 - Fichiers : manual_trading.py, db.py, bot_engine.py (version), README.md
+
+## v4.414 — Levier réel : recoupement par la marge utilisée + bouton de vérification
+- La v4.413 ne corrigeait pas le cas #35 TAO : Hyperliquid annonçait peut-être x10 dans le champ « leverage » alors que la marge réellement utilisée correspond à x1. Le levier effectif est maintenant **recoupé** : valeur de position ÷ marge utilisée ; si l'écart dépasse 30 % avec le champ annoncé, le levier effectif fait foi (journal : « levier annoncé xN mais marge utilisée => xM effectif »).
+- Nouveau bouton **🔍 Vérifier le levier réel** (en-tête « Positions manuelles ouvertes ») : affiche pour chaque position ce que renvoie Hyperliquid (objet levier brut, marge utilisée, valeur de position, levier effectif) et la synthèse du compte, puis aligne le suivi immédiatement. Route : `GET /api/manual/leverage-check`.
+- Fichiers : manual_trading.py, api.py, bot_engine.py (version + marge utilisée), index_src.html, index.html, db.py, README.md

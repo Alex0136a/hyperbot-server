@@ -39,7 +39,7 @@ import queue
 # Incrementer a chaque modification importante
 # Visible dans le header du dashboard pour identifier
 # exactement quelle version tourne sans ambiguite
-BOT_VERSION = "4.413"
+BOT_VERSION = "4.414"
 BOT_BUILD   = "2026-10-14-a"  # incremente a chaque correctif — visible dans les logs
                                # pour confirmer sans ambiguite quelle version tourne
 # Historique :
@@ -2223,7 +2223,7 @@ def fetch_exchange_positions(info, wallet_address, tickers=None):
                 result[coin] = {"szi": szi, "entry": entry, "leverage": lev,
                                 # v4.292 — infos supplementaires pour le controle de synchronisation
                                 "liquidation_px": _f("liquidationPx"), "unrealized_pnl": _f("unrealizedPnl"),
-                                "position_value": _f("positionValue")}
+                                "position_value": _f("positionValue"), "margin_used": _f("marginUsed")}
     return result
 
 

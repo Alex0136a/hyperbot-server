@@ -1528,7 +1528,8 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
 
       {/* POSITIONS MANUELLES */}
       <div style={MT.card}>
-        <div style={MT.title}>📈 POSITIONS MANUELLES OUVERTES ({st.positions.length})</div>
+        <div style={MT.title}>📈 POSITIONS MANUELLES OUVERTES ({st.positions.length})
+          <button style={{...MT.btn("#a78bfa"),marginLeft:10,padding:"2px 8px",fontSize:10}} onClick={async()=>{ try { const r = await apiCall("/api/manual/leverage-check","GET",null,token); const L = (r.positions||[]).map(p=>`#${p.id} ${p.ticker} : suivi x${p.tracked_leverage} → x${p.tracked_leverage_after}\n  Hyperliquid : levier ${JSON.stringify(p.hl_leverage)} · marge utilisée ${p.marginUsed} · valeur ${p.positionValue} · effectif x${p.effective_leverage}${p.error?"\n  erreur : "+p.error:""}`); alert((L.join("\n")||r.note||"rien à vérifier") + `\nCompte : ${JSON.stringify(r.account)}` + (r.sync_error?"\nErreur sync : "+r.sync_error:"") + `\nAlignés : ${r.aligned}`); load && load(); } catch(e) { alert(e.message); } }}>🔍 Vérifier le levier réel</button></div>
         {st.positions.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucune position manuelle.</div> : st.positions.map(p=>(
           <div key={p.id} style={{borderBottom:"1px solid #131d33",padding:"10px 0"}}>
             <div style={{display:"flex",flexWrap:"wrap",gap:14,alignItems:"center",fontSize:12,color:"#e2e8f0"}}>

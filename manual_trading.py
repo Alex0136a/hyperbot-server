@@ -1283,7 +1283,47 @@ class ManualTrading:
                 time.sleep(1.0)
         return None
 
-    def sync_leverage(self):
+    def leverage_check(self):
+        """v4.414 — diagnostic + resynchronisation immediate : pour chaque position manuelle live (perp), ce que
+        Hyperliquid renvoie VRAIMENT (objet levier brut, marge utilisee, valeur de position, levier effectif =
+        valeur / marge) face au levier suivi par le bot. Applique ensuite l alignement."""
+        items = [i for i in list(self.items.values()) if i.get("status") == "open" and i.get("mode") == "live" and i.get("market") == "perp"]
+        out = {"positions": [], "account": {}, "aligned": 0}
+        if not items:
+            out["note"] = "aucune position manuelle live ouverte"
+            return out
+        wallet = self._wallet()
+        for it in items:
+            row = {"id": it["id"], "ticker": it["ticker"], "tracked_leverage": it.get("leverage")}
+            try:
+                dex = be._dex_of(it["ticker"])
+                state = self.bot.info.user_state(wallet, dex) if dex else self.bot.info.user_state(wallet)
+                if not out["account"]:
+                    ms = (state or {}).get("crossMarginSummary") or (state or {}).get("marginSummary") or {}
+                    out["account"] = {k: ms.get(k) for k in ("accountValue", "totalNtlPos", "totalMarginUsed")}
+                for ap in (state or {}).get("assetPositions", []):
+                    p = ap.get("position", {}) or {}
+                    if p.get("coin") == it["ticker"]:
+                        row["hl_leverage"] = p.get("leverage")
+                        row["marginUsed"] = p.get("marginUsed")
+                        row["positionValue"] = p.get("positionValue")
+                        try:
+                            row["effective_leverage"] = round(float(p["positionValue"]) / float(p["marginUsed"]), 2)
+                        except Exception:
+                            row["effective_leverage"] = None
+            except Exception as e:
+                row["error"] = f"{type(e).__name__}: {e}"
+            out["positions"].append(row)
+        try:
+            out["aligned"] = self.sync_leverage(force=True)
+        except Exception as e:
+            out["sync_error"] = f"{type(e).__name__}: {e}"
+        for row in out["positions"]:
+            it = self.items.get(row["id"])
+            row["tracked_leverage_after"] = it.get("leverage") if it else None
+        return out
+
+    def sync_leverage(self, force=False):
         """v4.413 — le levier REEL de chaque position manuelle live (lu sur Hyperliquid) fait foi : s il differe de celui
         suivi par le bot (levier refuse / plafonne a l ouverture, ou modifie a la main sur Hyperliquid), on aligne le
         suivi. Le notionnel ne change pas ; marge, % de marge et PnL en pourcentage sont recalcules. Toutes les 5 min."""
@@ -1305,6 +1345,14 @@ class ManualTrading:
                 real = int(float(ep.get("leverage") or 0))
             except (TypeError, ValueError):
                 real = 0
+            # levier effectif = valeur de position / marge utilisee (recoupe le champ « leverage » d Hyperliquid)
+            try:
+                eff = float(ep["position_value"]) / float(ep["margin_used"])
+                if eff > 0 and (real <= 0 or abs(eff - real) / real > 0.3):
+                    self._log(f"#{it['id']} {it['ticker']} : levier annonce x{real} mais marge utilisee => x{eff:.1f} effectif", "warn")
+                    real = max(1, int(round(eff)))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                pass
             if real <= 0 or real == it.get("leverage"):
                 continue
             old = it.get("leverage")
