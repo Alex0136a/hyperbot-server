@@ -999,3 +999,12 @@ Fichiers : `bot_engine.py`, `README.md`.
 - **Rattrapage** : une fois par heure, les trades manuels live fermés (14 derniers jours) marqués « estimée » sont recontrôlés ; si le remplissage existe, prix de sortie, PnL et source sont corrigés (fiche manuelle et table des trades). Un seul essai par trade.
 - Si le remplissage reste introuvable, le libellé devient « estimée par le bot (remplissage Hyperliquid introuvable) ».
 - Fichiers : manual_trading.py, db.py, bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.412 — Levier refusé par Hyperliquid : le suivi prend le levier réel
+- Constat : le SDK ne lève pas d erreur quand Hyperliquid refuse un levier, il renvoie un statut « err ». Le refus passait inaperçu : l'ordre partait avec le levier déjà en place sur Hyperliquid, mais le trade restait suivi avec le levier demandé (marge, % de marge et PnL faux).
+- Correctif (trades manuels live perp, ticket et ordres programmés) :
+  1. refus détecté et journalisé avec la raison donnée par Hyperliquid ;
+  2. si le levier demandé dépasse le maximum de l'actif, nouvel essai au **levier maximal** de l'actif ;
+  3. après l'ouverture, le **levier réel de la position** lu sur Hyperliquid devient le levier du trade (le notionnel ne change pas ; la marge utilisée en dépend).
+- Affichage : « ⚠ demandé x5 » à côté du levier réel dans les positions ouvertes (survol = explication).
+- Fichiers : manual_trading.py, bot_engine.py (version), index_src.html, index.html, README.md

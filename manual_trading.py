@@ -1101,10 +1101,28 @@ class ManualTrading:
 
     def _open_live_perp(self, item, price, is_long):
         ex, ticker, lev = self.bot.exchange, item["ticker"], item["leverage"]
+        want = lev
+        is_cross = not ticker.startswith("xyz:")
         try:
-            ex.update_leverage(lev, ticker, is_cross=not ticker.startswith("xyz:"))
+            resp = ex.update_leverage(lev, ticker, is_cross=is_cross)
         except Exception as e:
             raise ManualError(f"levier x{lev} refuse par Hyperliquid ({e})")
+        # v4.412 : le SDK ne leve pas d exception quand Hyperliquid REFUSE le levier, il renvoie {"status": "err", ...}.
+        # Avant, la refus passait inapercu : l ordre partait avec le levier deja en place sur Hyperliquid, mais le suivi
+        # gardait le levier demande (marge, % de marge, PnL faux).
+        if isinstance(resp, dict) and resp.get("status") not in (None, "ok"):
+            why = str(resp.get("response") or resp)[:160]
+            self._log(f"#{item['id']} {ticker} : levier x{want} REFUSE par Hyperliquid ({why})", "warn")
+            item["leverage_note"] = f"levier x{want} refusé par Hyperliquid : {why}"
+            mx = self._asset_max_leverage(ticker)
+            if mx and mx < lev:
+                try:
+                    r2 = ex.update_leverage(mx, ticker, is_cross=is_cross)
+                    if not (isinstance(r2, dict) and r2.get("status") not in (None, "ok")):
+                        lev = mx
+                        self._log(f"#{item['id']} {ticker} : levier ramene au maximum de l actif (x{mx})", "warn")
+                except Exception:
+                    pass
         sl_price = price * (1 - item["sl_pct"] / 100) if is_long else price * (1 + item["sl_pct"] / 100)
         margin = item["notional_usd"] / max(lev, 1)
         ok, err, fill = be.place_order(ex, ticker, is_long, margin, price, self.cfg, sl_price=sl_price,
@@ -1119,7 +1137,28 @@ class ManualTrading:
             time.sleep(0.7)
         if not ep or ep["szi"] == 0:
             raise ManualError("ordre accepte mais aucune position constatee sur Hyperliquid")
+        # v4.412 : le levier REEL de la position fait foi (marge, % de marge, affichage)
+        real = ep.get("leverage")
+        try:
+            real = int(float(real)) if real else None
+        except (TypeError, ValueError):
+            real = None
+        final = real or lev
+        if final != want:
+            item["leverage_requested"] = want
+            item.setdefault("leverage_note", f"levier x{want} demandé, x{final} appliqué par Hyperliquid")
+            self._log(f"#{item['id']} {ticker} : levier REEL x{final} (demande x{want}) — suivi mis a jour", "warn")
+        item["leverage"] = final
         return (fill or ep["entry"] or price), abs(ep["szi"])
+
+    def _asset_max_leverage(self, ticker):
+        try:
+            for u in (self.bot.info.meta() or {}).get("universe", []):
+                if u.get("name") == ticker:
+                    return int(u.get("maxLeverage") or 0) or None
+        except Exception:
+            pass
+        return None
 
     def _spot_available(self, token):
         state = self.bot.info.spot_user_state(self._wallet()) or {}
