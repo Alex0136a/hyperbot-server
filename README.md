@@ -1008,3 +1008,8 @@ Fichiers : `bot_engine.py`, `README.md`.
   3. après l'ouverture, le **levier réel de la position** lu sur Hyperliquid devient le levier du trade (le notionnel ne change pas ; la marge utilisée en dépend).
 - Affichage : « ⚠ demandé x5 » à côté du levier réel dans les positions ouvertes (survol = explication).
 - Fichiers : manual_trading.py, bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.413 — Alignement du levier sur les positions déjà ouvertes
+- Cas constaté : #35 TAO suivi en x10 alors que la position Hyperliquid est en x1 (levier refusé à l'ouverture, avant le correctif v4.412).
+- Toutes les 5 minutes, le levier **réel** de chaque position manuelle live (perp) est lu sur Hyperliquid ; s'il diffère du suivi, le suivi est aligné (levier, marge, % de marge, PnL en %), le trade enregistré en base est mis à jour, et un avertissement « ⚠ demandé xN » s'affiche. Le notionnel ne change pas. Couvre aussi un levier modifié à la main sur Hyperliquid.
+- Fichiers : manual_trading.py, db.py, bot_engine.py (version), README.md

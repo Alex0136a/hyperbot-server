@@ -1283,6 +1283,44 @@ class ManualTrading:
                 time.sleep(1.0)
         return None
 
+    def sync_leverage(self):
+        """v4.413 — le levier REEL de chaque position manuelle live (lu sur Hyperliquid) fait foi : s il differe de celui
+        suivi par le bot (levier refuse / plafonne a l ouverture, ou modifie a la main sur Hyperliquid), on aligne le
+        suivi. Le notionnel ne change pas ; marge, % de marge et PnL en pourcentage sont recalcules. Toutes les 5 min."""
+        items = [i for i in list(self.items.values()) if i.get("status") == "open" and i.get("mode") == "live" and i.get("market") == "perp"]
+        if not items:
+            return 0
+        try:
+            exch = be.fetch_exchange_positions(self.bot.info, self._wallet(), [i["ticker"] for i in items])
+        except Exception:
+            return 0
+        if not exch:
+            return 0
+        n = 0
+        for it in items:
+            ep = exch.get(it["ticker"])
+            if not ep or ep["szi"] == 0 or (ep["szi"] > 0) != (it["direction"] == "long"):
+                continue
+            try:
+                real = int(float(ep.get("leverage") or 0))
+            except (TypeError, ValueError):
+                real = 0
+            if real <= 0 or real == it.get("leverage"):
+                continue
+            old = it.get("leverage")
+            it.setdefault("leverage_requested", old)
+            it["leverage_note"] = f"levier suivi x{old} corrigé en x{real} d'après Hyperliquid"
+            it["leverage"] = real
+            n += 1
+            self._log(f"#{it['id']} {it['ticker']} : levier reel Hyperliquid x{real} (suivi x{old}) — suivi aligne", "warn")
+            self._save(it)
+            try:
+                if it.get("trade_uid"):
+                    db.set_trade_leverage_by_uid(it["trade_uid"], real, it["notional_usd"] / max(real, 1))
+            except Exception as e:
+                print(f"[MANUEL] Alignement levier historique #{it['id']} impossible : {e}")
+        return n
+
     def reconcile_exit_sources(self, max_age_days=14, limit=20):
         """v4.411 — trades manuels LIVE perp deja fermes avec une sortie « estimee par le bot » : si le vrai remplissage
         Hyperliquid existe (stop natif declenche avant que le bot ne ferme), on corrige prix de sortie, PnL et source.
@@ -1602,6 +1640,9 @@ class ManualTrading:
             self.on_tick()
         if time.time() - getattr(self, "_recon_exit_ts", 0) >= 3600:
             threading.Thread(target=lambda: self.reconcile_exit_sources(), daemon=True).start()
+        if time.time() - getattr(self, "_lev_sync_ts", 0) >= 300:
+            self._lev_sync_ts = time.time()
+            threading.Thread(target=self.sync_leverage, daemon=True).start()
         now = time.time()
         for item in list(self.items.values()):
             if item["status"] == "scheduled" and now > item.get("expires_at", now + 1):
