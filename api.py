@@ -1247,6 +1247,7 @@ ADVANCED_SETTINGS = {
     "FOREX_DSL_FEE_PAD_PCT":     {"label": "Forex - SL dynamique : plancher apres armement = entree + frais (%)", "default": 0.10},
     "FOREX_STALE_ENABLED":       {"label": "Forex · SANS PROGRES - sortir un trade qui n'a jamais pris de gain apres un delai (1 = oui, 0 = non)", "default": 1},
     "FOREX_STALE_MIN":           {"label": "Forex · SANS PROGRES - delai avant de verifier (minutes)", "default": 90},
+    "MANUAL_DEFAULT_SWING":      {"label": "Trading manuel - ouvrir par defaut avec les reglages du mode Swing Support (1 = oui, 0 = reglages libres)", "default": 1},
     "ASSET_BT_DAYS":             {"label": "Resume d actif - profondeur de l historique rejoue pour choisir la pre-programmation (jours, 30 a 180)", "default": 90},
     "FOREX_STALE_PEAK_PCT":      {"label": "Forex · SANS PROGRES - sort si le pic de gain est reste sous ce seuil (% du prix)", "default": 0.15},
     "FOREX_DSL_TRAIL_FRACTION":  {"label": "Forex - SL dynamique : distance du suiveur (fraction du gain maximal)", "default": 0.40},
@@ -1350,7 +1351,7 @@ def get_advanced_config(email: str = Depends(require_user)):
 # (periodes, cycles, compteurs, heures) sont desormais convertis en int et
 # bornes ; None n est accepte que pour les reglages "herite" (defaut None).
 _RSI_FLOAT_THRESHOLDS = {"RSI_OVERSOLD", "RSI_OVERBOUGHT", "RSI_EXTREME_LOW", "RSI_EXTREME_HIGH"}
-_ZERO_ALLOWED_INT_KEYS = {"FUNDING_EXCLUDE_WEAK_COINS","FUNDING_STALE_ENABLED","FOREX_STALE_ENABLED","FOREX_SCALP_STALE_ENABLED","FOREX_SCALP_EARLYFAIL_ENABLED","FXSWING_ENABLED","SUPSW_LEVER_SCALE","SUPSW_RESERVE_ASSETS","TRENDF_ENABLED","TRENDF_ALLOW_SHORT","TRENDF_ENTRY_MODE","TRENDF_EXIT_H4_REVERSE","TRENDF_COOLDOWN_SEC","SUPSW_ENABLED","SUPSW_EXIT_REQUIRE_H4_END","SUPSW_EXIT_LEVEL","FEES_IN_STATS","FOREX_SCALP_ENABLED", "FOREX_SCALP_REQUIRE_1M", "FOREX_SCALP_COOLDOWN_SEC","MTF_USE_H4_LOWER", "MTF_SIGNAL_MAX_AGE_SEC", "MTF_DOUBLE_PATTERN_ENABLED", "MTF_TREND_PATH_ENABLED", "MTF_REQUIRE_FLOW_CONFIRM", "MTF_REQUIRE_REAL_TARGET_ZONE", "MTF_REQUIRE_H1_STRUCTURE", "SPOT_ACCUM_TREND_MODE", "ACCUMULATION_TREND_MODE",
+_ZERO_ALLOWED_INT_KEYS = {"FUNDING_EXCLUDE_WEAK_COINS","FUNDING_STALE_ENABLED","FOREX_STALE_ENABLED","MANUAL_DEFAULT_SWING","FOREX_SCALP_STALE_ENABLED","FOREX_SCALP_EARLYFAIL_ENABLED","FXSWING_ENABLED","SUPSW_LEVER_SCALE","SUPSW_RESERVE_ASSETS","TRENDF_ENABLED","TRENDF_ALLOW_SHORT","TRENDF_ENTRY_MODE","TRENDF_EXIT_H4_REVERSE","TRENDF_COOLDOWN_SEC","SUPSW_ENABLED","SUPSW_EXIT_REQUIRE_H4_END","SUPSW_EXIT_LEVEL","FEES_IN_STATS","FOREX_SCALP_ENABLED", "FOREX_SCALP_REQUIRE_1M", "FOREX_SCALP_COOLDOWN_SEC","MTF_USE_H4_LOWER", "MTF_SIGNAL_MAX_AGE_SEC", "MTF_DOUBLE_PATTERN_ENABLED", "MTF_TREND_PATH_ENABLED", "MTF_REQUIRE_FLOW_CONFIRM", "MTF_REQUIRE_REAL_TARGET_ZONE", "MTF_REQUIRE_H1_STRUCTURE", "SPOT_ACCUM_TREND_MODE", "ACCUMULATION_TREND_MODE",
                           "CRYPTO_OFFPEAK_HOUR_START_UTC", "CRYPTO_OFFPEAK_HOUR_END_UTC",
                           "CPI_BLACKOUT_BEFORE_MIN", "CPI_BLACKOUT_AFTER_MIN",
                           "ACCUMULATION_LOSS_COOLDOWN_SEC", "SPOT_ACCUM_LOSS_COOLDOWN_SEC", "FUNDING_LOSS_COOLDOWN_SEC",
@@ -1495,6 +1496,8 @@ def _coerce_advanced_value(key: str, value):
         return False, "1 (oui) ou 0 (non)"
     if key == "FUNDING_MAX_ANNUAL_PCT" and not 0 <= value <= 1000:
         return False, "entre 0 (sans plafond) et 1000 %"
+    if key == "MANUAL_DEFAULT_SWING" and value not in (0, 1):
+        return False, "0 ou 1"
     if key == "ASSET_BT_DAYS" and not 30 <= value <= 180:
         return False, "entre 30 et 180 jours"
     if key == "FOREX_STALE_MIN" and not 10 <= value <= 720:

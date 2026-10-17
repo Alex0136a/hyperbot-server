@@ -1018,3 +1018,10 @@ Fichiers : `bot_engine.py`, `README.md`.
 - La v4.413 ne corrigeait pas le cas #35 TAO : Hyperliquid annonçait peut-être x10 dans le champ « leverage » alors que la marge réellement utilisée correspond à x1. Le levier effectif est maintenant **recoupé** : valeur de position ÷ marge utilisée ; si l'écart dépasse 30 % avec le champ annoncé, le levier effectif fait foi (journal : « levier annoncé xN mais marge utilisée => xM effectif »).
 - Nouveau bouton **🔍 Vérifier le levier réel** (en-tête « Positions manuelles ouvertes ») : affiche pour chaque position ce que renvoie Hyperliquid (objet levier brut, marge utilisée, valeur de position, levier effectif) et la synthèse du compte, puis aligne le suivi immédiatement. Route : `GET /api/manual/leverage-check`.
 - Fichiers : manual_trading.py, api.py, bot_engine.py (version + marge utilisée), index_src.html, index.html, db.py, README.md
+
+## v4.415 — Trades manuels : réglages Swing Support par défaut
+- Tout nouveau ticket manuel **crypto** s'ouvre par défaut avec les réglages du mode Swing Support : levier (`SUPSW_LEVERAGE`), stop et objectif (`SUPSW_SL_PCT` / `SUPSW_TP_PCT`, ou échelle selon le levier si activée), taille (`SUPSW_RISK_PCT`, plafond `SUPSW_MAX_NOTIONAL_USD`), « laisser courir au TP » (verrou et suiveur du mode), sans trailing classique. Tout reste modifiable avant validation.
+- **LONG** : le trade est étiqueté « Swing Support ». **SHORT** : le mode n'achète que ; le SHORT reçoit les mêmes réglages mais garde l'étiquette « Libre ».
+- Valable pour le formulaire « Ordre libre », la fenêtre « résumé d'actif » (Préparer LONG/SHORT, Pré-programmer) et le repli des alertes expirées. Les tickets issus d'une opportunité d'un autre mode (Spot-Accum, Accumulation, Funding) gardent les réglages de ce mode ; les marchés Forex (`xyz:`) gardent les réglages libres.
+- Nouveau réglage `MANUAL_DEFAULT_SWING` (1 = oui, 0 = ancien comportement).
+- Fichiers : manual_trading.py, api.py, bot_engine.py (version + réglage), index_src.html, index.html, README.md

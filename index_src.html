@@ -1189,7 +1189,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
       }));
     } catch(e) { alert(e.message); setSel(null); setProp(null); setF(null); }
   };
-  const choose = (opp, preset) => { setSel(opp); setF(null); loadProposal(opp, "perp", preset); setTimeout(() => { const el = document.getElementById("manual-ticket"); if (el) el.scrollIntoView({behavior:"smooth", block:"start"}); }, 700); };
+  const choose = (opp0, preset) => { const opp = (opp0.strategy==="libre" && opp0.direction==="long" && !String(opp0.ticker).startsWith("xyz:")) ? {...opp0, strategy:"swing_support"} : opp0;   /* v4.415 : par defaut Swing Support */ setSel(opp); setF(null); loadProposal(opp, "perp", preset); setTimeout(() => { const el = document.getElementById("manual-ticket"); if (el) el.scrollIntoView({behavior:"smooth", block:"start"}); }, 700); };
   // v4.381 : prepare un ticket depuis une alerte. Opportunite encore valable -> ticket de son mode ; sinon ticket libre (Swing Support : ses propres niveaux).
   useEffect(() => {      // v4.406 : ticket prepare depuis la fenetre « resume de l'actif »
     if (prep && prep.ticker) { choose({strategy:"libre", ticker:prep.ticker, direction:prep.direction}, prep.preset); if (onPrepDone) onPrepDone(); }

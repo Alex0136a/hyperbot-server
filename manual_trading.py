@@ -801,10 +801,10 @@ class ManualTrading:
         p["tp1_pct"], p["tp1_close_pct"] = t1, cp
         p["tp1_be"] = bool(p.get("tp1_be", True))
 
-    def _propose_swing_support(self, ticker, direction, market):
+    def _propose_swing_support(self, ticker, direction, market, mirror=False):
         """v4.381 : ticket prepare depuis une alerte Swing Support (n importe quel actif crypto). Memes stop / objectif / levier
         / taille que le mode Swing Support, tout reste modifiable ; aucune opportunite du bot n est requise."""
-        if direction != "long":
+        if direction != "long" and not mirror:
             raise ManualError("Swing Support : achat (LONG) uniquement.")
         p = self._propose_free(ticker, direction, market)
         cfg = self.cfg
@@ -818,12 +818,20 @@ class ManualTrading:
                   "tp_run_lock_pct": float(cfg.get("SUPSW_TRAIL_LOCK_PCT", 0.5)), "tp_run_trail_pct": float(cfg.get("SUPSW_TRAIL_PCT", 0.5)), "leverage": lev, "notional_usd": round(notional, 2),
                   "margin_usd": round(notional / lev, 2), "sl_pct": round(sl, 3), "sl_basis": "stop Swing Support (selon le levier)" if int(cfg.get("SUPSW_LEVER_SCALE", 0)) == 1 else "stop fixe Swing Support",
                   "tp_pct": round(tp, 3), "tp_basis": "objectif Swing Support",
-                  "reasons": ["Ticket prepare depuis une alerte Swing Support : stop, objectif, levier et taille du mode (modifiables). "
+                  "reasons": ["Reglages par defaut du mode Swing Support : stop, objectif, levier, taille et « laisser courir » (tout est modifiable). "
                               "La sortie anticipee du mode ne s applique pas aux trades manuels."]})
         return p
 
     def propose(self, strategy, ticker, direction, market="perp"):
         if strategy == "libre":
+            # v4.415 : par defaut, tout ticket manuel (crypto) s ouvre avec les reglages du mode Swing Support
+            # (stop, objectif, levier, taille, laisser courir). Les marches Forex (xyz:) gardent les reglages libres.
+            if int(self.cfg.get("MANUAL_DEFAULT_SWING", 1)) == 1 and not str(ticker).startswith("xyz:"):
+                p = self._propose_swing_support(ticker, direction, market, mirror=True)
+                if direction != "long":
+                    p["strategy"] = "libre"       # le mode Swing Support n achete que : un SHORT garde l etiquette libre
+                    p["reasons"] = ["Reglages par defaut du mode Swing Support appliques a un SHORT (stop, objectif, levier, taille, laisser courir) : tout est modifiable."]
+                return p
             return self._propose_free(ticker, direction, market)
         if strategy == "swing_support":
             return self._propose_swing_support(ticker, direction, market)

@@ -39,7 +39,7 @@ import queue
 # Incrementer a chaque modification importante
 # Visible dans le header du dashboard pour identifier
 # exactement quelle version tourne sans ambiguite
-BOT_VERSION = "4.414"
+BOT_VERSION = "4.415"
 BOT_BUILD   = "2026-10-14-a"  # incremente a chaque correctif — visible dans les logs
                                # pour confirmer sans ambiguite quelle version tourne
 # Historique :
@@ -268,6 +268,7 @@ CONFIG = {
     "FOREX_STALE_ENABLED": 1,             # v4.399 : sortie "sans progres" Forex (1/0)
     "FOREX_STALE_MIN": 90,                # ... apres N minutes
     "FOREX_STALE_PEAK_PCT": 0.15,         # ... si le pic de gain est reste sous N % du prix
+    "MANUAL_DEFAULT_SWING": 1,            # v4.415 : tickets manuels crypto ouverts par defaut avec les reglages Swing Support (1/0)
     "ASSET_BT_DAYS": 90,                  # v4.410 : profondeur (jours) de l historique rejoue pour la pre-programmation
     "FOREX_DSL_TRAIL_FRACTION": 0.40,     # distance du suiveur >= 40 % du gain maximal (jamais plus serre que la marge ATR)
     "FOREX_DSL_FALLBACK_TOL_PCT": 0.08,   # marge de repli si l ATR n est pas encore disponible
