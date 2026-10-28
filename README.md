@@ -1025,3 +1025,474 @@ Fichiers : `bot_engine.py`, `README.md`.
 - Valable pour le formulaire « Ordre libre », la fenêtre « résumé d'actif » (Préparer LONG/SHORT, Pré-programmer) et le repli des alertes expirées. Les tickets issus d'une opportunité d'un autre mode (Spot-Accum, Accumulation, Funding) gardent les réglages de ce mode ; les marchés Forex (`xyz:`) gardent les réglages libres.
 - Nouveau réglage `MANUAL_DEFAULT_SWING` (1 = oui, 0 = ancien comportement).
 - Fichiers : manual_trading.py, api.py, bot_engine.py (version + réglage), index_src.html, index.html, README.md
+
+## v4.416 — Levier : remise sur Hyperliquid, raison visible, diagnostic complet
+- Quand le levier réel d'une position manuelle live diffère du levier voulu, le bot **tente d'abord de remettre le levier voulu sur Hyperliquid** (une fois par trade, ou à chaque clic sur « Vérifier le levier réel »). S'il est refusé, la **raison donnée par Hyperliquid** est affichée sous la position (« ⚠ Hyperliquid refuse x10 : … ») ; repli au levier maximal de l'actif ; le suivi s'aligne ensuite sur le levier réellement appliqué.
+- Le diagnostic s'affiche désormais dans la page (texte sélectionnable, boutons Copier / Fermer) et contient : position brute Hyperliquid, réglage de levier de l'actif (`activeAssetData`), levier maximal, levier effectif (valeur ÷ marge), levier suivi avant/après et note.
+- Fichiers : manual_trading.py, bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.417 — Levier : maximum Hyperliquid vérifié avant l'ordre
+- Constat (#34 PENDLE, #35 TAO) : le levier demandé (x10) dépassait le maximum Hyperliquid de l'actif (x5) → « Invalid leverage value ». Le suivi (v4.416) s'alignait ensuite sur le levier réel, mais l'écart était évitable.
+- Le **levier maximal de l'actif** (méta Hyperliquid, cache 10 min) est maintenant affiché sur le ticket (« maximum Hyperliquid pour PENDLE : x5 », en rouge si dépassé) et **vérifié à la création** d'un ordre et à la modification d'un ordre programmé : message clair « Levier x10 impossible : Hyperliquid limite PENDLE à x5 » au lieu d'un ordre qui part avec un autre levier. Marchés `xyz:` : pas de contrôle (méta d'un autre DEX).
+- Les mécanismes de rattrapage de la v4.416 (repli au maximum, alignement du suivi, raison affichée) restent en place pour les cas résiduels.
+- Fichiers : manual_trading.py, api.py, bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.418 — Libellé du levier simplifié
+- Les deux avertissements (« ⚠ demandé x10 » et « ⚠ Hyperliquid refuse x10 … ») sont remplacés par une seule mention : **« Levier disponible : xN »**. Le détail (raison du refus) reste visible au survol.
+- Fichiers : bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.419 — Programmation : ouvrir au rebond (ou au recul) confirmé, pas pendant la chute
+- Deux nouveaux types de déclenchement, pour le ticket et la modification d'un ordre programmé :
+  - **« Descend à…, puis REBONDIT »** (`bounce_up`) : quand le prix atteint le niveau, l'ordre est **armé** ; le bot suit le **point bas** et n'ouvre que lorsque le prix a **remonté** de X % depuis ce point bas (défaut 0,3 %, réglable 0,05–10 %). Aucune ouverture pendant que le prix continue de descendre.
+  - **« Monte à…, puis RECULE »** (`bounce_down`) : symétrique (point haut, recul de X %), pour un SHORT sous une résistance.
+- L'état armé et le point extrême sont mémorisés (survivent à un redémarrage) et affichés dans le tableau des ordres programmés (« ARMÉ (bas …) »).
+- Fenêtre « résumé d'actif » : les situations **rebond de support** et **rejet de résistance** utilisent désormais ce déclenchement confirmé (0,3 %) ; les cassures restent sur prix. L'historique rejoué (méthode de la v4.409) simule la confirmation : entrée à la clôture de la bougie H4 de confirmation (prudent, évite un biais d'anticipation), pas d'entrée si le niveau du stop cède avant la confirmation. Sur des prix aléatoires, ces situations donnent une espérance proche des seuls frais, comme attendu.
+- Limite : le stop et l'objectif d'un ordre programmé sont des % de l'entrée réelle ; l'entrée étant plus haute que le niveau (de la confirmation), leurs prix s'en trouvent légèrement décalés.
+- Fichiers : manual_trading.py, api.py, bot_engine.py (version), index_src.html, index.html, README.md
+
+## v4.420 — TP1 : minimum de 10 $ d'Hyperliquid
+- Cause de l'erreur « Order must have minimum value of $10 » : la clôture partielle TP1 (ex. 50 % d'une position de ~15 $ ≈ 7 $) passait sous le minimum de 10 $ par ordre d'Hyperliquid, même en reduce-only. Le bot retentait toutes les 60 s sans succès.
+- Création/modification : un TP1 est refusé en LIVE perp si la part clôturée ou le reste est < 10 $, avec la taille minimale requise.
+- Exécution : si la situation se présente quand même (prix ayant évolué), le TP1 est ignoré proprement (une seule trace dans le journal), plus de boucle d'essais ; la position continue vers le TP2 et le SL.
+- Fichiers : manual_trading.py, bot_engine.py (version), README.md
+
+## v4.421 — Mode SCALP CRYPTO (paper par défaut, passage en live par bouton)
+Fichiers : `scalp_crypto.py` (nouveau), `manual_trading.py`, `api.py`, `bot_engine.py`, `index_src.html`, `index.html` (généré), `README.md`.
+
+- **Principe** : beaucoup de petits gains — **x3, taille 60 $, TP fixe 0,6 % du prix, stop 1 %** (≈ +0,31 $ net par trade gagnant, ≈ −0,65 $ par stop). Seuil de rentabilité ≈ 66 % de trades gagnants.
+- **Actifs** : les **15 plus échangés** (volume 24 h Hyperliquid) parmi les actifs suivis, réévalués toutes les 30 min.
+- **Entrées rapides** (bougies 5 min, zones support/résistance H1) :
+  - **Rebond** : le prix touche une zone et une bougie de retournement se confirme (avalement, marteau/étoile).
+  - **Cassure confirmée** : clôture 5 min au-delà de la zone, corps fort, volume ≥ 1,5× la moyenne, entrée au plus à 0,4 % du niveau (on ne court pas après le mouvement).
+  - **Note 0-100** (tendance H1 et 15 min, volume, contacts de la zone, BTC, place avant la zone suivante) ; seuil 62. La note n'est **pas calibrée** : c'est le paper qui mesure le vrai taux de réussite.
+  - **Signaux propices** : volatilité 15 min minimale (0,6 % atteignable), au moins 0,9 % de place avant la zone opposée.
+- **Tranches horaires UTC** réglables (défaut 7-11 et 13-21) ; statistiques par heure pour affiner.
+- **Garde-fous** : 4 positions max, 40 trades/jour, perte journalière max 3 $, pause 60 min après 3 pertes de suite, attente 30 min par actif, durée max 90 min par trade.
+- **Interface** : carte « ⚡ SCALP CRYPTO » en haut de l'onglet Trading manuel : ACTIF/ARRÊTÉ, PAPER/LIVE (confirmation obligatoire), résultats du jour/total, rebond vs cassure, résultats par heure, journal des signaux, tous les réglages. **Désactivé par défaut** : à activer depuis la carte.
+- Les trades passent par le moteur manuel (stratégie « Scalp ») : SL natif en live, historique, prix de sortie réels.
+- Limite : testé sur données simulées uniquement (pas d'accès au marché ici) ; aucune performance réelle n'est garantie.
+
+## v4.422 — Scalp : plus de plafond de positions, doubles ouvertures bloquées par mode, capital en live
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version, `SCALP_MAX_OPEN` = 0), `api.py`, `index_src.html`, `index.html`, `README.md`.
+
+- **Plus de limite de positions simultanées** (`SCALP_MAX_OPEN` = 0 : illimité). Si ce réglage avait été enregistré à 4 depuis la carte, le remettre à 0.
+- **Doublons bloqués seulement dans le même mode** : une position paper sur un actif n'empêche plus d'ouvrir le même actif en live, et inversement. L'attente par actif (30 min) est aussi séparée par mode.
+- **En live, le capital limite** : avant chaque ouverture, le bot lit la marge libre d'Hyperliquid et n'ouvre pas si elle est inférieure à la marge requise (60 $ / levier). Le refus apparaît dans le journal des signaux. Les autres garde-fous (perte journalière, série de pertes, trades/jour, tranches horaires) restent actifs.
+
+## v4.423 — Scalp : les données passées motivent (note) au lieu de bloquer
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `index_src.html`, `index.html`, `README.md`.
+
+- **Ne bloquent plus** : volatilité 15 min minimale, place minimale avant la zone suivante, note minimale (réglages `SCALP_MIN_ATR15_PCT`, `SCALP_MIN_ROOM_PCT`, `SCALP_MIN_SCORE` = **0 = désactivés** par défaut ; restent disponibles comme filtres facultatifs).
+- **Ils comptent dans la note** (affichée dans le journal et enregistrée sur chaque trade) : marché calme −4 / actif +4, peu de place avant la zone suivante −8 / beaucoup de place +5.
+- **Ce qui décide l'entrée** : le type de signal (rebond sur support, rejet de résistance, cassure haussière ou baissière), la zone support/résistance H1 et l'emplacement de l'entrée (bougie 5 min de confirmation ; cassure : au plus 0,4 % du niveau cassé, volume de la bougie de cassure).
+- Conservés : l'historique minimal de bougies (technique), la marge libre en live (capital), les garde-fous de perte et de tranches horaires.
+- Si les anciens seuils (62 / 0,15 / 0,9) ont été enregistrés depuis la carte Scalp, les remettre à 0.
+
+## v4.424 — FIX : le Scalp analysait des noms d'actifs invalides (« BTC_0 »…) et ne pouvait donc jamais ouvrir de trade
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version), `README.md`.
+
+- Cause : la liste des actifs suivis contient des **clés de slot** (`BTC_0`, `ETH_2`…). Le Scalp les utilisait telles quelles : le classement par volume Hyperliquid ne trouvait aucun actif et les bougies de `BTC_0` ne pouvaient pas être chargées, donc aucun signal n'était évalué.
+- Correction : extraction du vrai ticker (`BTC`), suppression des doublons, exclusion de PAXG (or, pas une crypto) et des actifs `xyz:`, puis classement par volume 24 h : les 15 plus échangés.
+
+## v4.425 — Historique manuel : onglets LIVE et PAPER séparés
+Fichiers : `manual_trading.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+
+- L'historique du Trading manuel (qui contient aussi les trades du Scalp) est divisé en deux onglets **LIVE** et **PAPER**, avec le nombre de trades de chacun.
+- Chaque onglet affiche son propre résumé : trades clôturés, % gagnants, PnL.
+- Le serveur renvoie les **100 derniers par mode** (avant : 50 au total), pour que le volume du paper Scalp ne repousse pas les trades live.
+
+## v4.426 — Historique manuel : suppression des trades terminés après sélection
+Fichiers : `db.py`, `api.py`, `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+
+- Dans l'historique du Trading manuel (onglets LIVE / PAPER) : case à cocher par ligne, « Tout sélectionner » et bouton **🗑 Supprimer la sélection (n)** avec confirmation.
+- Ne peuvent être supprimés que les éléments **terminés** (clôturés, annulés, expirés, échoués) : une position ouverte ou un ordre programmé n'est jamais touché (contrôle côté serveur).
+- La suppression est définitive et retire les lignes de l'historique manuel ; les statistiques du Scalp (calculées depuis cet historique) sont recalculées. L'historique général des trades (tableau de bord / export) n'est pas modifié.
+
+## v4.427 — Historique : détail Scalp de chaque trade
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Sous le motif de chaque trade Scalp de l'historique : type de signal (rebond / cassure), note, **pic de gain atteint** par rapport à l'objectif, et la raison principale du signal. Sert à voir si les pertes viennent d'entrées qui n'ont jamais progressé (signal à revoir) ou de trades qui ont approché l'objectif avant de retomber (objectif ou stop à revoir).
+
+## v4.428 — Scalp : exigence renforcée pour les SHORT
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage **`SCALP_SHORT_MIN_SCORE`** (défaut **62**, 0 = aucune exigence) : un SHORT n'est ouvert que si la note du signal atteint ce seuil ; les LONG gardent le seuil général (`SCALP_MIN_SCORE`, 0 = aucun). Une note de base à ~51 ne passe donc plus pour un short : il lui faut des appuis réels (tendance H1 baissière +12, tendance 15 min +8, volume +10, BTC en baisse +8, zone testée plusieurs fois +6/+10…).
+- Un SHORT pris **contre une tendance H1 haussière** perd en plus 8 points.
+- Les refus apparaissent dans le journal des signaux (« refuse : note X < 62 (exigence SHORT) »).
+- Décision prise sur 3 shorts perdus pour 1 long gagné : échantillon minuscule, à réévaluer avec les résultats rebond/cassure et le pic de gain.
+
+## v4.429 — Scalp : pas de contre-tendance, entrée seulement quand le mouvement se confirme
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+
+- **Sans contre-tendance** (`SCALP_TREND_MODE` = 1, défaut) : le sens du trade doit être celui de la tendance H1 (si H1 est neutre : celui de la tendance 15 min). Un long contre une tendance baissière, ou un short contre une tendance haussière, est refusé (« refuse : contre-tendance », visible dans le journal).
+- **Confirmation avant d'entrer (rebonds)** (`SCALP_CONFIRM_BARS` = 3 bougies de 5 min, 0 = entrer tout de suite) : le signal est mis en attente. Un SHORT entre quand le prix passe **sous le plus bas** de la bougie de rejet ; un LONG quand il repasse **au-dessus du plus haut** de la bougie de rebond.
+- **Mouvement contraire = bruit, mais borné** (`SCALP_NOISE_ATR` = 0,5 × ATR 5 min) : tant que le prix reste sous l'extrême de la bougie signal + cette marge, on attend ; au-delà, ou sans confirmation dans le délai, le signal est abandonné (événements « attente » / « abandon » dans le journal).
+- Les cassures confirmées (déjà basées sur une bougie de mouvement) entrent comme avant, mais passent aussi le filtre de tendance.
+- Cause du changement : 4 shorts de rebond ouverts ensemble ont tous perdu avec un pic de gain de 0,00 à 0,16 % (le prix est parti à contre-sens dès l'entrée).
+
+## v4.430 — FIX : les statistiques et garde-fous du Scalp ne voyaient aucun trade
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version), `README.md`.
+- Cause : les statistiques du Scalp lisaient le statut « closed » dans le contenu JSON des trades, alors que le statut est une colonne de la base (absent du JSON). Résultat : « aucun trade » partout dans la carte.
+- Conséquence cachée corrigée en même temps : les **garde-fous qui reposent sur ces statistiques ne fonctionnaient pas** (perte journalière max, pause après X pertes de suite, nombre max de trades par jour). Ils s'appliquent désormais.
+- Vérifié sur une base de test avec des trades sans clé « status », comme en réel.
+
+## v4.431 — Scalp : plusieurs positions paper sur un même actif
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version), `README.md`.
+- **Paper** : plus aucun blocage « actif déjà ouvert » — le même actif peut être ouvert plusieurs fois.
+- **Live** : un actif déjà tenu en live (par le Scalp, un trade manuel ou le bot) n'est pas rouvert (Hyperliquid ne tient qu'une position par actif).
+- Un trade paper n'empêche jamais un live, et inversement.
+- Reste actif : l'attente par actif (`SCALP_COOLDOWN_MIN`, 30 min), qui évite d'empiler le même signal à chaque bougie ; la mettre à 0 pour la supprimer.
+
+## v4.432 — Scalp : PnL net de frais, pause sur une zone après un stop, stop réduit
+Fichiers : `scalp_crypto.py`, `manual_trading.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- **PnL net de frais** : l'historique affiche sous chaque PnL la valeur « net » (frais estimés ≈ 0,09 % du notionnel par aller-retour), le résumé donne brut + net, et la carte Scalp affiche brut / net.
+- **Pause sur une zone après un stop** (`SCALP_ZONE_COOLDOWN_MIN`, défaut 60, 0 = off) : après une perte (hors sortie « durée max ») sur un support/résistance, le Scalp ne re-entre pas sur la même zone (±0,3 %) pendant ce délai. Les autres zones du même actif restent ouvertes.
+- **Stop par défaut 0,65 %** (avant 1,0 %), objectif 0,6 % : risque ≈ gain. Seuil de rentabilité ≈ 58 % de trades gagnants. Compromis : le stop tombe plus souvent (bruit). Les valeurs déjà enregistrées dans la carte ne changent pas : ajuster « Stop » si besoin.
+
+## v4.433 — Scalp : contre-tendance sécurisée (flux + zone solide + BTC)
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Un trade **contre la tendance** (H1, sinon 15 min) est de nouveau possible, **Paper et Live**, seulement si TOUT est réuni : **rebond** (jamais une cassure) sur une zone **testée au moins 2 fois** ; **flux agressif dans le sens du trade** (long : ≥ 58 % d'achats agressifs sur 10 min ; short : ≥ 58 % de ventes), avec au moins 30 transactions ; **BTC pas contre** (±0,2 % / 1 h) ; **note ≥ 65**. Le rebond garde sa confirmation par le prix. Flux absent ou insuffisant = refus.
+- Le flux utilise le WebSocket des transactions du bot ; le Scalp s'abonne tout seul aux actifs du top 15 qui ne sont pas dans la liste du bot (abonnement refait après reconnexion du bot).
+- **Réglages** (carte Scalp) : `SCALP_COUNTER_ENABLED` (1 = autorisée, **0 = bloquée**, retour au comportement v4.432), `SCALP_COUNTER_MIN_SCORE` (65), `SCALP_COUNTER_FLOW_MIN` (0,58), `SCALP_COUNTER_MIN_TRADES` (30).
+- La carte sépare les résultats **AVEC TENDANCE** / **CONTRE-TENDANCE** ; l'historique marque « CONTRE-TENDANCE ».
+- Test sur marchés simulés : sans flux ou flux contraire = 0 contre-tendance ; flux favorable = quelques longs contre-tendance ; réglage à 0 = aucun. Seuils non calibrés sur le vrai marché : juger sur ≥ 30 trades.
+
+## v4.434 — Scalp : laisser courir après l'objectif
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage **`SCALP_RUN_ENABLED`** (défaut 1) : à l'objectif (TP 0,6 %), le trade n'est plus fermé ; son stop remonte à 0,2 % sous le prix, puis suit chaque nouveau plus haut (plus bas pour un short). Sortie quand le prix recule de plus de **`SCALP_RUN_TRAIL_PCT`** (défaut **0,2 %**) depuis son meilleur niveau. Motif de sortie : « TRAILING TAKE PROFIT ». En Live, le stop natif Hyperliquid est mis à jour à chaque palier (mécanisme « laisser courir au TP » existant).
+- **La durée max (`SCALP_MAX_HOLD_MIN`) ne s'applique plus** dès que l'objectif est atteint et le laisser courir armé ; elle reste valable avant l'objectif.
+- Mettre `SCALP_RUN_ENABLED` à 0 rétablit la fermeture nette à l'objectif. Ne concerne que les nouveaux trades.
+- Gain minimal garanti après l'objectif ≈ 0,4 % du prix (avant frais) ; pas de plafond de gain.
+
+## v4.435 — Heure d'ouverture et durée écoulée sur les trades manuels/Scalp ouverts
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Chaque position ouverte (liste « Positions » du trading manuel et carte du trade dans l'onglet « Tous ») affiche « 🕒 ouvert à HH:MM · depuis X h YY min » (la date s'ajoute si l'ouverture date d'un autre jour). Heure locale de l'appareil. Le temps écoulé se rafraîchit à chaque actualisation de l'écran.
+
+## v4.436 — PC : flèches ◀ ▶ et glisser à la souris sur les zones défilables en largeur
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Sur ordinateur (appareil avec souris), au survol d'un tableau ou d'une barre d'onglets plus large que l'écran (historique, trades, onglets…), deux flèches rondes ◀ ▶ apparaissent sur les bords ; un clic fait défiler d'environ 80 % de la largeur. La flèche disparaît quand on est au bout.
+- On peut aussi **glisser à la souris** (clic maintenu sur une zone vide du tableau) ; les boutons, champs et liens gardent leur comportement normal.
+- Téléphone : rien ne change (défilement tactile habituel). Les flèches sont ajoutées hors de l'interface React, sans toucher aux composants. Testé sur une page d'essai (flèche, clic, glisser) ; pas sur l'application complète.
+
+## v4.437 — Retrait du « glisser à la souris » (sélection du texte rétablie)
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Le glisser à la souris de la v4.436 empêchait de sélectionner le texte à copier : supprimé. Les flèches ◀ ▶ au survol restent (clic = défilement), la sélection du texte au clic-glisser fonctionne comme avant.
+
+## v4.438 — Scalp : pas de short tant que BTC monte
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage **`SCALP_SHORT_BTC_BLOCK`** (défaut 1) : un SHORT (rebond ou cassure, tendance ou contre-tendance) est refusé si BTC a monté de plus de **`SCALP_SHORT_BTC_MAX_PCT`** (défaut **+0,1 %**) sur 1 h (4 bougies de 15 min). Refus visible dans le journal : « short refusé : BTC en hausse ». Les longs ne sont pas touchés.
+- Mettre `SCALP_SHORT_BTC_BLOCK` à 0 le désactive ; abaisser le seuil à 0 ou en négatif le rend plus strict.
+- Cause : sur 75 trades Paper, les shorts ont 24 % de gagnants (−7,32 $ net) et 9 shorts corrélés ouverts pendant une hausse de BTC ont tous perdu.
+- Testé sur marchés simulés : BTC +0,5 % = 0 short ; BTC 0 ou négatif = shorts possibles.
+
+## v4.439 — Swing Support : stops « fantômes » à 2 % et 3 % (observation seule)
+Fichiers : `manual_trading.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- Pour chaque trade **Swing Support** (Live et Paper), le moteur note le plus bas atteint et si le prix a touché −2 % / −3 % (par rapport à l'entrée). À la clôture il enregistre ce qu'auraient donné un stop à 2 % et à 3 % : si le seuil a été touché, perte de 2 % (ou 3 %) ; sinon le résultat réel.
+- **Aucun effet sur les positions** : le stop réel (5 %) reste inchangé.
+- L'historique affiche sous chaque trade « 🧪 stop fantôme : réel … · avec stop 2 % … · avec stop 3 % … » et une ligne de total (en $ avant frais et en %). Seuls les trades ouverts puis clôturés après cette version sont concernés.
+- Limites : approximation sans slippage ; le prix est celui observé à chaque cycle du moteur (pas à la seconde), donc un franchissement très bref peut être manqué.
+
+## v4.440 — Taille d'entrée en USDC sur les trades ouverts
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Les positions ouvertes du Trading Manuel (liste « Positions », donc aussi les trades Scalp/Swing Support) et leur carte dans l'onglet « Tous » affichent « Taille XX.XX USDC (marge YY.YY) » : valeur notionnelle de la position et marge engagée (taille / levier).
+
+## v4.441 — Net LIVE avec frais ET funding réels Hyperliquid
+Fichiers : `manual_trading.py`, `scalp_crypto.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- Pour chaque trade manuel/Scalp/Swing Support **Live perp fermé** (30 derniers jours), le bot lit dans Hyperliquid **tous les remplissages** du trade (ouverture, partiels, clôture : somme des frais réels) et le **funding payé/reçu pendant la détention**. Net réel = PnL − frais + funding. Traitement en tâche de fond : 6 trades au plus toutes les 2 min, 3 essais par trade, au moins 2,5 min après la clôture.
+- L'historique affiche « net +0.39 $ ✓ (frais 0.041 · funding −0.013) » quand les coûts réels sont connus, « (est.) » sinon (estimation 0,09 %). Le résumé et les statistiques Scalp utilisent les coûts réels quand ils existent. Le Paper garde l'estimation.
+- Hypothèses : le funding vient de `user_funding_history` (SDK Hyperliquid), filtré par actif ; la position étant unique par actif en Live, tous les remplissages de l'actif pendant la durée du trade lui sont attribués. Testé avec des réponses simulées, pas encore sur le compte réel : vérifier sur un trade connu (ex. PAXG : frais 0,02 $).
+
+## v4.442 — Scalp : gestion de la corrélation (régime du panier) + onglet « 🔗 Corrélation »
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+**Étape 1 — observation (toujours active, sans effet sur les trades)**
+- Toutes les 60 s, le Scalp mesure sur les 5 min des actifs suivis : **corrélation moyenne** des rendements (fenêtre `SCALP_CORR_WINDOW_MIN`, 120 min), **largeur** (part d'actifs qui montent / baissent de plus de 0,05 % sur 30 min) et variation moyenne du panier. Régime **corrélé** si corrélation ≥ `SCALP_CORR_HIGH` (0,6), sinon **dispersé**.
+- Chaque trade Scalp enregistre à l'entrée : régime, corrélation, largeur dans son sens, force relative de l'actif (vs panier), **taille de la grappe** (ouvertures déjà faites dans le même sens sur 30 min) et nombre de pairs. L'historique affiche « corrélé 0.72 · panier 65 % dans le sens · grappe 3 ».
+**Étape 2 — règles (désactivées par défaut, un interrupteur chacune ; ne s'appliquent qu'en régime corrélé sauf mention)**
+1. `SCALP_CORR_DIR_ON` — sens du panier : long seulement si ≥ `SCALP_BREADTH_MIN` % (60) des actifs montent ; short si autant baissent.
+2. `SCALP_CORR_RELSTR_ON` — meilleur du groupe : long seulement si l'actif est plus fort que le panier, short si plus faible.
+3. `SCALP_CLUSTER_MAX` (0 = illimité) / `SCALP_CLUSTER_WINDOW_MIN` (30) — plafond d'ouvertures dans le même sens.
+4. `SCALP_CORR_SIZE_PCT` (100) — taille de chaque trade en régime corrélé (% de la taille normale ; plancher 10,5 $ en live).
+5. `SCALP_PEER_MIN` (0) / `SCALP_PEER_WINDOW_MIN` (30) — confirmation par les pairs (tous régimes) : un signal attend qu'au moins N autres actifs donnent un signal ou soient ouverts dans le même sens ; sinon il expire.
+6. `SCALP_CORR_BASKET_EXIT_ON` (0) / `SCALP_BASKET_EXIT_PCT` (70) — sortie panier : en régime corrélé, un trade en perte (ouvert depuis plus de 2 min, laisser courir non armé) est fermé si ≥ 70 % des actifs vont contre lui (motif « SCALP SORTIE PANIER »).
+**Interface** : la carte Scalp a trois onglets (⚙️ Réglages · 🔗 Corrélation · 📊 Résultats & journal). L'onglet Corrélation affiche le régime en direct, la variation 30 min de chaque actif, les résultats par régime et par taille de grappe, les signaux en attente de pair et tous les réglages ci-dessus.
+**Limites** : seuils de départ non calibrés (le but de l'étape 1 est de les calibrer) ; testé sur séries simulées (corrélation 0,91 vs 0,06) et avec un moteur factice pour les règles, pas sur le marché réel.
+
+## v4.443 — Historique Live : trades anciens qui disparaissaient
+Fichiers : `db.py`, `manual_trading.py`, `bot_engine.py` (version), `README.md`.
+- Cause : l'historique lisait les 800 derniers trades clôturés **tous modes confondus** puis gardait 100 par mode. Le Scalp Paper en produit beaucoup : les plus anciens trades Live sortaient des 800 et disparaissaient de l'affichage (ils restaient en base).
+- Correctif : le filtre Live / Paper se fait maintenant en SQL ; l'historique montre toujours les 100 derniers Live et les 100 derniers Paper. Même correction pour le calcul des frais réels (trades Live anciens).
+- Rien n'est supprimé : les trades « perdus » réapparaissent (dans la limite des 100 derniers Live).
+
+## v4.444 — Réconciliation de l'historique Live avec Hyperliquid
+Fichiers : `db.py`, `manual_trading.py`, `api.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- Le bot lit les remplissages Hyperliquid des 10 derniers jours, reconstitue chaque trade perp (ouverture → retour à zéro) et **ajoute à l'historique Live ceux que le bot ne connaît pas** (source « Importé Hyperliquid »). Un trade est « connu » si un trade du bot sur le même actif chevauche sa période (± 3 min).
+- Prix d'entrée/sortie moyens réels, PnL brut, frais et funding réels (net ✓). Levier non disponible (non affiché dans l'historique).
+- Automatique toutes les 15 min, ou à la demande : bouton **« 🔄 Comparer à Hyperliquid »** (onglet LIVE de l'historique, 14 jours).
+- Les positions encore ouvertes ne sont jamais importées. Un trade importé que tu supprimes à la main n'est pas réimporté.
+- Testé sur ton export Hyperliquid : retrouve SUI 14/10 12:01 (+0,45 $ brut) et BTC 14/10 13:16 (−0,70 $ brut), absents du bot, et ne duplique aucun trade déjà présent.
+
+## v4.445 — Scalp : stop au seuil de rentabilité (option)
+Fichiers : `manual_trading.py`, `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Réglages Scalp (**désactivé par défaut**) : `SCALP_BE_ENABLED` (0/1), `SCALP_BE_ARM_PCT` (0,4 : gain maximal à atteindre) et `SCALP_BE_LOCK_PCT` (0,1 : le stop passe à entrée ± 0,1 %, de quoi couvrir les frais).
+- Quand le gain atteint le seuil, le stop remonte (aussi le stop natif Hyperliquid en Live). Il ne remonte pas si le prix est déjà retombé sous ce niveau. Sortie notée « STOP SEUIL RENTABILITE ».
+- Compatible avec « laisser courir » (objectif 0,6 %) : le stop de rentabilité protège la zone 0,4 → 0,6 %.
+- Contrepartie : certains trades qui auraient fini gagnants après un petit recul sortent à zéro ; à comparer sur une vingtaine de trades Paper.
+
+## v4.446 — Scalp : confirmation par les pairs seulement en marché corrélé
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage `SCALP_PEER_CORR_ONLY` (1 par défaut) : la règle 5 (pairs) ne s'applique plus qu'en marché « corrélé », comme les règles 1, 2, 3, 4 et 6. Mettre 0 pour la rendre valable en tout régime.
+
+## v4.447 — Historique : filtre par date et résultats journaliers
+Fichiers : `index_src.html`, `index.html`, `manual_trading.py`, `bot_engine.py` (version), `README.md`.
+- Au-dessus de l'historique (onglets LIVE et PAPER) : sélecteurs « Du … au … » et boutons Aujourd'hui / Hier / Tout. La liste et le résumé (gagnants, PnL brut, net) ne portent que sur la période choisie.
+- Tableau **par jour** : nombre de trades, gagnants, PnL brut et net de frais. Cliquer sur un jour filtre la liste sur ce jour.
+- Jours en heure locale de l'appareil, d'après la date de fermeture (les statuts annulés / expirés ne sont pas comptés).
+- L'historique renvoyé passe de 100 à **300 derniers trades par mode** pour couvrir plus de jours.
+
+## v4.448 — Historique : sous-onglets « 📜 Trades » et « 📅 Par jour »
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- L'historique (LIVE et PAPER) a deux sous-onglets. **Trades** : filtre par date, résumé, liste. **Par jour** : tableau des résultats journaliers ; un clic sur un jour ouvre ses trades.
+
+## v4.449 — Historique : export CSV de la sélection
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Bouton **⬇ CSV** (sous-onglet Trades) : télécharge les lignes affichées (onglet LIVE ou PAPER, période « Du … au … » choisie) dans `historique_<mode>_<du>_<au>.csv`.
+- Séparateur `;`, décimales à la virgule, UTF-8 avec BOM (ouverture directe dans Excel). Colonnes : id, actif, sens, marché, mode, source, statut, ouverture, fermeture (heure locale), entrée, sortie, taille, levier, PnL brut, frais, funding, net, coûts réels/estimés, pic de gain, motif, type et note Scalp, régime.
+
+## v4.450 — Scalp : flux pour tous les trades, cassure avec retest, contexte d'entrée enregistré
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- **Contexte d'entrée (toujours actif, observation)** : chaque trade Scalp enregistre la part d'achats agressifs et le nombre de transactions du flux, la tendance H1 et 15 min, et la variation de BTC sur 1 h (champ `ctx` du trade). Sert à calibrer les filtres.
+- **Flux pour tous (option, désactivée)** : `SCALP_FLOW_ALL_ON` (0/1), `SCALP_FLOW_ALL_MIN` (0,52 : part mini d'achats agressifs pour un long ; pour un short, part de ventes), `SCALP_FLOW_ALL_MIN_TRADES` (30). Flux indisponible ou trop peu de transactions : pas de blocage. La contre-tendance garde ses propres exigences (58 %).
+- **Cassure avec retest (option, désactivée)** : `SCALP_RETEST_ON` (0/1). Une cassure n'ouvre plus le trade tout de suite : le bot attend que le prix revienne près du niveau cassé (`SCALP_RETEST_TOL_ATR`, 0,3 × ATR 5 min), puis qu'il reparte d'au moins `SCALP_RETEST_BOUNCE_ATR` (0,25 × ATR 5 min) depuis l'extrême du retest. Abandon si le prix repasse de l'autre côté du niveau (marge de bruit `SCALP_NOISE_ATR`) ou sans entrée en `SCALP_RETEST_BARS` bougies 5 min (6). Les rebonds gardent leur confirmation actuelle.
+- Testé sur séries simulées : flux baissier bloque les 44 longs détectés, flux haussier ou trop peu de transactions n'en bloque aucun ; machine du retest validée (retest + rebond → entrée, pas de retest → rien, retour sous le niveau → abandon).
+
+## v4.451 — Historique : filtre par actif
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Liste déroulante « Tous les actifs » à droite des sous-onglets de l'historique (LIVE et PAPER). Elle ne propose que les actifs présents dans l'historique de l'onglet.
+- Le filtre s'applique à la liste, au résumé, au tableau « Par jour » et à l'export CSV, et se combine avec la période « Du … au … ».
+
+## v4.452 — Swing Support : choix des actifs évalués
+Fichiers : `api.py`, `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Dans la carte Swing Support : bouton « ⚙️ Choisir les actifs surveillés » → grille d'actifs à cocher (tous les actifs crypto suivis par le bot, hors Forex), boutons Tous / Par défaut (BTC, ETH, HYPE, TAO, SUI) / Enregistrer. Enregistré dans `SUPSW_SYMBOLS` (persistant), pris en compte au cycle suivant.
+- Les actifs cochés sont évalués comme les cinq d'origine (support Daily, porte BTC, chute récente, résistance, réentrée…) et peuvent déclencher l'entrée automatique de Swing Support. Le plafond `SUPSW_MAX_TRADES` (3 positions simultanées) reste inchangé.
+- Tant que « Actifs réservés » (`SUPSW_RESERVE_ASSETS`) est à 1, les actifs cochés sont ignorés par Tendance / Accumulation / Spot-Accum.
+- API : `GET/PUT /api/supsw/symbols`.
+
+## v4.453 — Export CSV : contexte d'entrée Scalp
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Le CSV de l'historique ajoute 5 colonnes pour les trades Scalp ouverts depuis la v4.450 : `flux_achats` (part d'achats agressifs), `flux_n` (transactions), `tend_h1`, `tend_15m`, `btc_1h_pct`.
+
+## v4.454 — Opportunités : Scalp remplace Funding, ouverture live manuelle, vue « Par mode »
+Fichiers : `manual_trading.py`, `scalp_crypto.py`, `push_alerts.py`, `api.py`, `bot_engine.py`, `index_src.html`, `index.html`, `README.md`.
+- **Types annoncés (alertes téléphone)** : « Funding » est retiré, « Scalp » ajouté. Les préférences déjà enregistrées avec Funding sont migrées (Funding → Scalp). La « confiance ≥ » s'applique à la note du Scalp.
+- **Ouvertures Scalp proposées en manuel** : à chaque ouverture (paper ou live) du Scalp, l'opportunité « Scalp » apparaît dans la liste pendant **5 min** (`MANUAL_SCALP_OPP_TTL_SEC`, 300) puis disparaît. Un trade paper du Scalp ne la masque pas ; seule une position LIVE sur l'actif la retire.
+- **Ticket** : bouton « Ouvrir en live » → ticket **LIVE par défaut** avec les réglages du Scalp (taille, levier, stop, objectif, laisser courir, stop de rentabilité si activé), tout modifiable. Le trade ouvert est un trade Scalp (stats et gestion du Scalp).
+- **Vue « 🗂 Par mode »** dans la carte des opportunités : une section par mode (Scalp, Swing Support, Accumulation, Spot-Accum, Forex, Funding) avec le nombre d'opportunités, les lignes et, pour le Scalp, le temps restant.
+
+## v4.455 — Choix des réglages par défaut d'un mode (ticket, ordre programmé, position ouverte)
+Fichiers : `manual_trading.py`, `api.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- Une barre « Réglages par défaut du mode » (⚡ Scalp · 🧱 Swing Support · ✋ Libre · 🎯 Accumulation · 🌱 Spot-Accum · 💰 Funding · 💱 Forex) apparaît :
+  1. sur le **ticket** d'une opportunité : le mode de l'opportunité est présélectionné (une opportunité Scalp vient avec les réglages Scalp) ; un clic remplit taille, levier, stop, objectif, trailing, laisser courir, verrou et stop de rentabilité du mode choisi ;
+  2. dans « Modifier » d'un **ordre programmé** (mêmes champs, en pourcentages) ;
+  3. dans « Modifier » d'une **position ouverte** : stop et objectif sont recalculés depuis le prix d'entrée ; la taille et le levier ne changent pas.
+- Rien n'est appliqué avant le bouton d'envoi / « Enregistrer » ; tous les champs restent modifiables après le choix.
+- Sur un ticket, si le mode choisi diffère de celui de l'opportunité, le trade prend l'étiquette de ce mode (Scalp, Swing Support ou Libre ; Accumulation, Spot-Accum, Funding et Forex passent en « Libre » avec leurs réglages).
+- API : `GET /api/manual/preset`. Le stop de rentabilité (`be_arm_pct`, `be_lock_pct`) devient modifiable sur ordres programmés et positions ouvertes.
+
+## v4.456 — Conseil par actif : H4/D1 = direction, H1 = décision
+Fichiers : `manual_trading.py`, `bot_engine.py` (version), `README.md` (+ fichiers de v4.455 non encore déployés).
+- **Direction (biais)** : donnée uniquement par H4 (poids 2) et D1 (poids 1). LONG si le cumul ≥ +2, SHORT si ≤ −2, sinon pas de direction (H4 neutre ou contredit par le D1).
+- **Décision** : le H1 doit aller dans le sens du biais. H1 neutre, contraire ou indisponible → **ATTENDRE** avec la raison « H4/D1 donnent la direction LONG, mais le H1 est neutre : on attend que le H1 confirme ».
+- Si le H1 confirme, les autres critères (RSI, zones, BTC, funding, score ≥ ±3, gain/risque ≥ 1,2) décident toujours de l'entrée.
+- « Penche LONG/SHORT » reprend désormais le biais H4/D1 ; ce n'est plus un score cumulé qui ressemble à une décision.
+
+## v4.457 — Historique : pic affiché du plus bas au plus haut
+Fichiers : `manual_trading.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md` (+ fichiers de v4.455/v4.456 non encore déployés : `api.py`).
+- Le plus bas atteint par le prix (`trough_pct`) est désormais enregistré pour **tous** les trades manuels (avant : Swing Support seulement).
+- Chaque ligne de l'historique clôturé affiche « 🏔️ Pic −0.20 % à 1.02 % » (mouvement du prix, sans levier).
+- Le CSV de l'historique gagne une colonne `creux_pct` placée juste avant `pic_gain_pct`.
+- Les trades fermés avant cette version n'ont pas de plus bas enregistré : seul le pic est affiché, avec une mention. Le plus bas est mesuré à chaque cycle de gestion, donc un creux très bref entre deux cycles peut manquer.
+
+## v4.458 — Ajouter à une position ouverte / la réduire (paper et live)
+Fichiers : `manual_trading.py`, `api.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- Deux boutons sur chaque position ouverte : **＋ Taille** et **－ Taille** (perpétuels en live ; paper et live).
+- **Ajouter** (montant en $, notionnel) : paper = au prix courant ; live = ordre réel au marché sur Hyperliquid (marge ajoutée = montant / levier). La taille et le **prix d'entrée moyen** sont relus sur Hyperliquid. Le **SL et l'objectif gardent leurs prix** ; le SL natif est renvoyé à la nouvelle taille. Le pic et le creux sont recalculés par rapport à la nouvelle entrée.
+- **Réduire** (montant en $ ou en %) : paper = au prix courant ; live = clôture partielle au marché (comme le TP1). Le gain ou la perte de la partie retirée est encaissé (`realized_pnl`) et compté dans le PnL final. Refus si la partie retirée ou le reste fait moins de 10 $ (minimum Hyperliquid) ou si cela revient à tout fermer (utiliser « Fermer »).
+- Live : confirmation obligatoire dans l'interface et côté serveur. Chaque ajout ou réduction est consigné dans la position (`resizes`) et le journal.
+- Frais : chaque ajout ou réduction paie les frais d'un ordre au marché (0,045 %). Les frais réels sont réconciliés comme pour les autres trades.
+- API : `POST /api/manual/positions/{id}/resize` (`action`, `notional_usd` ou `pct`, `confirm_live`).
+
+## v4.459 — Grappe Scalp : se débloque sur un recul de l'actif
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version + défaut), `api.py` (plage), `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage **« Grappe : débloquer après un recul de X % depuis le plus bas/haut de la fenêtre »** (`SCALP_CLUSTER_RETRACE_PCT`, 0 = désactivé, comportement inchangé).
+- Contexte : la règle 3 (Grappe, `SCALP_CLUSTER_MAX`) refuse une nouvelle ouverture dans le même sens quand le marché est corrélé et que la grappe est pleine. Avant, le refus durait jusqu'à la fin de la fenêtre de temps. Avec X > 0, un actif peut entrer malgré la grappe pleine **s'il a reculé d'au moins X %** : SHORT = prix remonté de X % depuis son plus bas des bougies 5 min de la fenêtre ; LONG = prix redescendu de X % depuis son plus haut.
+- Le refus indique le recul requis et le recul actuel ; une entrée débloquée enregistre `cluster_retrace` dans le signal.
+- Conditions : `SCALP_CLUSTER_MAX` > 0 et régime « corrélé ». Hors régime corrélé, aucune règle de grappe ne s'applique.
+- Valeurs de départ suggérées : grappe 2 ouvertures sur 30 min, recul 0,3 %.
+
+## v4.460 — Scalp : capital composé, objectif du jour, mode prudent (tout désactivé par défaut)
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version + défauts), `api.py`, `index_src.html`, `index.html`, `README.md`.
+- **Capital composé** (`SCALP_COMPOUND_ON`) : la taille de chaque trade = **capital courant × `SCALP_COMPOUND_PCT` %** (notionnel). Capital courant = **capital de départ** (`SCALP_CAPITAL_USD`) + gains/pertes **nets de frais** des trades Scalp clôturés du mode (paper ou live) depuis le départ. Les pertes réduisent aussi la taille. Plancher : 10,5 $ en live, 1 $ en paper. Les trades ouverts ne comptent pas. Le bouton « ↺ Repartir du capital de départ » (onglet Réglages) refixe le départ à maintenant.
+- **Objectif du jour** (`SCALP_GOAL_PCT`, 0 = aucun) : % du capital de début de journée (jour **UTC**, comme la perte journalière max). Atteint → **mode prudent** jusqu'à minuit UTC (ou arrêt total des entrées si `SCALP_GOAL_STOP_ALL` = 1). Les positions ouvertes continuent d'être gérées.
+- **Mode prudent** : une entrée n'est acceptée que si (1) l'actif a au moins `SCALP_SAFE_MIN_TRADES` trades parmi ses `SCALP_SAFE_WINDOW` derniers, un taux de réussite ≥ `SCALP_SAFE_MIN_WINRATE` % et un net positif ; (2) c'est un rebond (`SCALP_SAFE_REBOND_ONLY`) ; (3) la note est < `SCALP_SAFE_MAX_SCORE` (90 ; 0 = pas de limite — les notes ≥ 90 ont perdu davantage sur les CSV). Chaque refus est écrit dans le journal avec sa raison.
+- L'interface affiche le capital de départ → courant, l'avancement vers l'objectif et la liste des actifs « sûrs ».
+- Contrôle de taille live : la vérification de marge libre utilise la taille composée.
+- (v4.460, ajout) Avec le capital composé, la **marge de tous les trades Scalp ouverts du mode ne dépasse jamais le capital courant** : un nouveau trade est refusé (« capital engagé ») si la marge déjà utilisée + sa marge dépasse le capital. À 100 % du capital et x3, un trade engage 1/3 du capital : 3 trades au maximum en même temps. Pour plus de trades simultanés, baisser « Taille d'un trade (% du capital) ».
+- (v4.460, ajout) **Live : capital de départ lu sur Hyperliquid** (`SCALP_CAPITAL_FROM_HL`, 0 par défaut). Le bot lit le solde du compte **une fois par jour UTC** (et après un redémarrage), avec la même règle que l'onglet Bilan : le plus élevé entre la valeur du compte perps et le solde USDC spot (compte Unifié). Capital courant = ce solde + gains/pertes nets des trades Scalp live clôturés depuis la lecture. `SCALP_CAPITAL_CAP_USD` plafonne le capital utilisé (0 = aucun). Si la lecture échoue, le réglage « Capital de départ » sert de repli. Le paper garde le capital de départ saisi.
+- (v4.460, correction) Le contrôle de marge libre avant un trade live lisait uniquement `accountValue` du compte perps (0 en compte Unifié) : il lit maintenant le solde USDC spot dans ce cas, comme le Bilan.
+
+## v4.461 — Mesures de qualité de tendance à l'entrée (Scalp) — aucune décision modifiée
+Fichiers : `scalp_crypto.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md`.
+- À chaque ouverture Scalp, le trade enregistre (`scalp.tq`) : ratio d'efficacité (mouvement net / chemin parcouru, 1 = tendance propre, 0 = va-et-vient) de **BTC sur 1 h et 4 h**, de **l'actif sur 1 h**, du **panier sur 2 h et 4 h** ; l'**écart du prix à sa moyenne 1 h** (%) ; le **mouvement du panier sur 2 h** (%).
+- Le CSV de l'historique gagne 7 colonnes : `er_btc_1h`, `er_btc_4h`, `er_actif_1h`, `ecart_moy_1h_pct`, `er_panier_2h`, `er_panier_4h`, `panier_2h_pct`. Seuls les trades ouverts après cette version les contiennent.
+- But : vérifier, après quelques jours variés, si une de ces mesures sépare les trades/journées perdants des gagnants avant d'ajouter un filtre.
+
+## v4.462 — Thermomètre de l'objectif du jour (carte Scalp)
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md`.
+- Sous la ligne d'état de la carte Scalp (toujours visible, sans ouvrir les réglages) : un thermomètre horizontal de l'objectif du jour (UTC) du mode affiché (paper ou live). Barre orange jusqu'à l'objectif, repère 🎯 à la valeur de l'objectif, barre verte rayée au-delà (surplus), barre rouge vers la gauche si la journée est négative.
+- Texte : avancement en % et en $, « reste X % (≈ Y $) » ou « ✔ atteint · surplus +X % (≈ +Y $) », et rappel du mode prudent ou de l'arrêt des entrées une fois l'objectif atteint.
+- Si l'objectif est à 0 (désactivé), une ligne discrète affiche seulement le résultat du jour.
+- Aucune décision du bot n'est modifiée.
+
+## v4.463 — Thermomètre : message de diagnostic si le capital n'est pas reçu
+Fichiers : `index_src.html`, `index.html`, `bot_engine.py` (version), `README.md` (+ `scalp_crypto.py` et `api.py` de v4.460–v4.461 en cas de dépôt incomplet).
+- Si le serveur n'envoie pas le champ `capital` du Scalp (fichier `scalp_crypto.py` plus ancien que v4.460), la carte affiche maintenant une ligne jaune « 🌡️ Thermomètre indisponible … » au lieu de rien.
+
+## v4.464 — Page jamais en cache + version de la page affichée
+Fichiers : `api.py`, `bot_engine.py` (version), `index_src.html`, `index.html`, `README.md` (+ `scalp_crypto.py`).
+- La route `/` envoie `Cache-Control: no-store` : le navigateur ou l'application installée ne garde plus de copie de la page.
+- La carte Scalp affiche « [page v4.464] » : c'est la version de `index.html` réellement chargée par le navigateur (différente de `/health`, qui donne la version de `bot_engine.py`). Si `/health` affiche 4.464 mais que la carte affiche une autre version, `index.html` n'a pas été remplacé.
+- Le thermomètre de l'objectif du jour a été vérifié par un rendu réel dans un navigateur de test (objectif en cours, atteint avec surplus, journée négative, serveur sans capital).
+
+## v4.465 — Une seule base horaire pour les statistiques du Scalp
+Fichiers : `scalp_crypto.py`, `bot_engine.py`, `api.py`, `index_src.html`, `index.html`, `README.md`.
+- Nouveau réglage **« Début de la journée du Scalp : décalage avec UTC en heures »** (`SCALP_DAY_OFFSET_H`, **−4** par défaut = heure de Marigot ; 0 = UTC). La « journée » du Scalp commence maintenant à minuit à ce décalage (04:00 UTC pour −4) au lieu de 00:00 UTC.
+- Cette base unique est utilisée pour : la ligne « AUJOURD'HUI » de la carte, le thermomètre et l'objectif du jour, la limite de perte journalière, le nombre de trades max par jour, et le point de départ du solde Hyperliquid lu chaque jour.
+- Les libellés affichent la base (« jour UTC−4 »). Les résultats « par tranche horaire » et les tranches horaires de trading restent en UTC.
+
+## v4.466 — Mode prudent : support/résistance obligatoire
+- Objectif du jour atteint : un rebond n'est accepté que si le support/résistance a été **testé au moins X fois** (`SCALP_SAFE_MIN_TOUCHES`, 2 par défaut ; 0 = aucune exigence).
+- Option `SCALP_SAFE_MIN_ROOM_PCT` (0 = off) : place minimale (%) avant la zone opposée suivante.
+- Ne s'applique qu'après l'objectif atteint (aucun effet si l'objectif est à 0).
+
+## v4.467 — Objectif du jour : net de frais explicite
+- Le calcul était déjà net (gain brut − frais réels − funding, trades clôturés du jour local). Le thermomètre l'indique maintenant : « Objectif du jour NET de frais » avec le détail « net = brut − frais ».
+
+## v4.468 — Thermomètre : sélecteur Aujourd'hui / Hier / Tout / date
+- Le thermomètre du Scalp a un sélecteur : **Aujourd'hui**, **Hier**, **Tout**, ou une **date** choisie. Même calcul net de frais, même base de jour (`SCALP_DAY_OFFSET_H`).
+- Pour un jour passé : net du jour ÷ capital au début de ce jour (capital de départ + net cumulé avant ce jour).
+- « Tout » : cumul depuis le départ (réglage « Capital »), objectif = objectif du jour × nombre de jours de trading.
+- Le serveur envoie `capital.days` (120 derniers jours) et `capital.all`.
+
+## v4.469 — Thermomètre : choix du mode affiché (Paper / Live)
+- Deux boutons PAPER / LIVE dans le cadre du thermomètre permettent de voir les résultats de l'autre mode sans changer le mode du moteur. Le serveur envoie `capital_modes` (paper et live).
+
+## v4.470 — Diagnostic Scalp (diagnostic d'entrée + bouton dans Manuel)
+- Le diagnostic « Pourquoi cet actif ne trade pas ? » a une nouvelle ligne **⚡ SCALP CRYPTO** par actif : dernier verdict du Scalp (signal valide, ou motif du refus : zone, note, tendance, grappe, mode prudent, capital…), fenêtre fermée / pause / position ouverte / signal en attente, état de l'objectif et du mode prudent, régime du marché. L'ancienne ligne « ⚡ SCALP » (Forex) devient « ⚡ SCALP FOREX ».
+- Nouvelle carte **🔍 DIAGNOSTIC SCALP** dans l'onglet Manuel (sous la carte Scalp) : même diagnostic, limité aux actifs du Scalp, avec le verdict Scalp + top-down, situation, niveaux, qualité du marché et flux. Choix d'un actif ou de tous, bouton Copier.
+- Le Scalp mémorise le dernier verdict de chaque actif (`verdicts`), mesure seule, aucun effet sur les décisions.
+
+## v4.471 — Bouton « Masquer » sur les diagnostics
+- Un bouton **🙈 Masquer** à côté de « Copier » (carte Diagnostic Scalp) et à côté de « Diagnostiquer maintenant » (diagnostic « Pourquoi cet actif ne trade pas ? ») cache les résultats ; un nouveau clic sur « Diagnostiquer » les réaffiche.
+
+## v4.472 — Emplacements : N trades simultanés de taille identique, capital repris chaque jour
+- Nouveau réglage **Emplacements** (`SCALP_SLOTS`, 0 = désactivé). Avec N > 0 : au plus N trades Scalp ouverts en même temps (par mode), chacun de **notionnel = capital du début de journée × levier ÷ N** (donc marge = capital ÷ N). La taille est fixe pendant toute la journée ; le capital du lendemain intègre les gains/pertes nets (intérêts composés quotidiens).
+- Remplace pour le dimensionnement « Taille ($) » et « Capital composé » tant qu'il est > 0. Entrée refusée si les N emplacements sont occupés (« n/N emplacements occupés »).
+- Exemple : capital 200 $, N = 4, ×3 → chaque trade 150 $ de notionnel (50 $ de marge), 4 trades au maximum.
+- Le capital du début de journée suit la base de jour (`SCALP_DAY_OFFSET_H`) ; en live avec « capital = solde Hyperliquid », c'est le solde lu au début de la journée.
+
+## v4.473 — Emplacements : réserve de capital
+- Nouveau réglage **Part du capital engagée** (`SCALP_SLOTS_USE_PCT`, 100 par défaut = aucun changement). Taille d'un trade = capital du début de journée × part engagée × levier ÷ N. Exemple : 200 $, N = 4, ×3, 80 % → 120 $ de notionnel par trade (40 $ de marge), 40 $ de réserve.
+
+## v4.474 — Historique : onglets LIVE SCALP et PAPER SCALP
+- Dans l'historique, deux nouveaux onglets **LIVE SCALP** et **PAPER SCALP** n'affichent que les trades du Scalp crypto du mode correspondant (avec compteur). Les onglets LIVE et PAPER restent inchangés (tous les trades du mode). Filtre par actif, par date, « Par jour », export CSV et suppression fonctionnent sur l'onglet affiché ; le CSV est nommé `historique_live_scalp_…`.
+
+## v4.475 — Scalp : résultats par heure en net, boutons Copier / Télécharger
+- « Résultats par heure » affiche désormais le **net de frais** (comme le thermomètre et « AUJOURD'HUI »), avec l'heure locale entre parenthèses. La copie/le fichier donne aussi le brut et les frais.
+- Boutons **Copier** et **Télécharger** (.txt) pour la table par heure et pour le journal des signaux.
+
+## v4.476 — Tendance : entrée H1, sortie sur H1/H4 ou gain acquis, actifs crypto
+Constat : BTC, ETH, HYPE, TAO, SUI sont réservés à Swing Support, donc Tendance n'a eu aucun signal crypto (seulement EUR, JPY, PAXG). Tous les nouveaux réglages sont **désactivés par défaut** (comportement inchangé).
+- `TRENDF_IGNORE_RESERVE` (0/1) : Tendance peut aussi trader ces 5 actifs ; un actif déjà ouvert par un autre mode reste exclu (pas de double position).
+- `TRENDF_REQUIRE_H1` (0/1) : entrée seulement si la tendance H1 (EMA 50/200) est aussi dans le sens, en plus de Daily et H4.
+- `TRENDF_EXIT_H4_REVERSE` : 0 ignorée, 1 H4 franchement retournée (comme avant), **2** dès que H4 n'est plus dans le sens (neutre inclus).
+- `TRENDF_EXIT_H1` : 0 ignorée, 1 H1 franchement retournée, 2 H1 n'est plus dans le sens. Jugée sur bougies clôturées après l'entrée.
+- `TRENDF_LOCK_ARM_PCT` / `TRENDF_LOCK_GIVEBACK_PCT` : gain acquis. Une fois le gain maximal ≥ N % du prix, sortie si le gain retombe de X % de son pic (motif « TENDANCE GAIN PROTEGE »).
+- Le stop suiveur ATR reste actif ; le stop maximal (`TRENDF_MAX_STOP_PCT`, jusqu'à 20) et le levier (`TRENDF_LEVERAGE`, jusqu'à 10) sont déjà réglables.
+
+## v4.477 — Mode défensif du Scalp
+- Quand la journée est à **−1,5 % du capital ou moins** (net de frais, base de jour locale), le Scalp applique les **mêmes filtres stricts que l'objectif atteint** : actifs « sûrs », rebonds seulement, support/résistance testé ≥ X fois, notes < seuil. Réglage `SCALP_DEFENSE_DAY_PCT` (1,5 par défaut ; 0 = désactivé).
+- Option `SCALP_DEFENSE_LOSSES` (0 = off) + `SCALP_DEFENSE_MIN` (60) : même mode après N pertes de suite, pendant N minutes après la dernière clôture.
+- Les trades déjà ouverts ne sont pas touchés ; la journée suivante repart normalement. Refus journalisés « mode défensif (…) ». Une pastille 🛡 s'affiche sous le thermomètre ; le diagnostic Scalp l'indique.
+
+## v4.478 — Corrélation de chaque actif avec BTC
+- Nouvelle carte **📉 CORRÉLATION AVEC BTC** dans l'onglet Manuel (sous « Diagnostic Scalp ») : pour chaque actif crypto du Scalp, corrélation des rendements 1 h avec BTC sur **7 jours** et **30 jours**, corrélation **quand BTC baisse**, et **bêta 30 j**. Trié du moins corrélé au plus corrélé ; couleurs vert < 0,4 / jaune 0,4–0,7 / rouge > 0,7 ; boutons Copier, Télécharger, Masquer, Recalculer.
+- Endpoint `GET /api/scalp/corr-btc` (cache 30 min). Bougies lues directement chez Hyperliquid (pas dans le cache partagé du bot). Mesure seule, aucun effet sur les décisions.
+
+## v4.479 — Bêta : exposition équivalente BTC, plafond, taille ajustée
+- **Betas automatiques** : le bêta 30 j de chaque actif du Scalp par rapport à BTC est rafraîchi en arrière-plan (au plus toutes les 30 min, sans bloquer le scan).
+- **Option 1 — exposition équivalente BTC** (toujours affichée, mesure seule) : sous le thermomètre, pour les positions ouvertes, somme de (notionnel × bêta) par sens, avec le notionnel réel et le net. Bêta inconnu = 1.
+- **Option 2 — plafond d'exposition** `SCALP_BETA_CAP_PCT` (0 = désactivé) : refuse une entrée si l'exposition équivalente BTC dans ce sens dépasserait N % du capital courant. Refus journalisé « exposition BTC SHORT/LONG … ».
+- **Option 3 — taille ajustée au bêta** `SCALP_BETA_SIZE_ON` (0 par défaut), `SCALP_BETA_REF` (1,0), `SCALP_BETA_MIN_FACTOR` (0,4) : si bêta > référence, taille × référence ÷ bêta (jamais augmentée, plancher 40 %).
+- Les options 2 et 3 sont désactivées par défaut : comportement inchangé tant qu'elles ne sont pas activées.
+
+## v4.480 — Tendance : cryptos de l'univers du Scalp
+- Correction : les cryptos du Scalp (SOL, XRP, LINK, etc.) sont bien suivies par le bot ; seule la liste `TRENDF_SYMBOLS` limitait Tendance. Nouveau réglage `TRENDF_SCALP_UNIVERSE` (0 par défaut) : 1 = Tendance évalue aussi les cryptos de l'univers du Scalp, en plus de la liste habituelle. Les 5 actifs réservés à Swing Support restent exclus sauf `TRENDF_IGNORE_RESERVE` = 1. Les conditions d'entrée (Daily + H4 [+ H1], flux) et de sortie sont inchangées.
+
+## v4.481 — Historique : SL du ticket et SL à la sortie
+- Chaque trade fermé de l'historique affiche « 🛑 SL du ticket X % · SL à la sortie ±Y % du prix d'entrée » avec la mention « modifié depuis l'ouverture » si le SL a bougé. Le CSV a deux colonnes de plus : `sl_ticket_pct`, `sl_final_pct`. Permet de vérifier d'un coup d'œil si un stop a été respecté.
+
+## v4.482 — Mesure : bruit du marché vs stop (aucun effet sur les décisions)
+- Le Scalp enregistre l'ATR 5 min (en % du prix) de chaque trade, en plus de l'ATR 15 min déjà gardé.
+- Le CSV de l'historique a quatre colonnes de plus : `atr15_pct`, `atr5_pct`, `sl_sur_atr15`, `sl_sur_atr5` (distance du stop en multiples d'ATR). Permet de vérifier si les stops touchés sont ceux qui sont trop serrés par rapport au bruit. Les anciens trades ont l'ATR 15 min (pas l'ATR 5 min).
+
+## v4.483 — Mode défensif « vigilant »
+- Le mode défensif (journée ≤ -X % ou N pertes de suite) ne bloque plus presque tout : il **vérifie** chaque entrée (`SCALP_DEFENSE_SOFT` = 1, par défaut) :
+  1. amplitude disponible avant la zone suivante ≥ `SCALP_DEFENSE_ROOM_X` × le stop (1,5 par défaut) ;
+  2. stop plus grand que `SCALP_DEFENSE_SL_ATR` × ATR 5 min (1,0) — sinon le stop est dans le bruit ;
+  3. pas de contre-tendance ; cassure seulement avec la tendance H1 et un flux dans le sens ; rebond seulement sur zone testée ≥ 2 fois ;
+  4. un actif n'est écarté que si son historique récent est clairement négatif (plus de « pas assez de trades »).
+- Les trades acceptés sont pris à `SCALP_DEFENSE_SIZE_PCT` % de la taille normale (60 par défaut).
+- `SCALP_DEFENSE_SOFT` = 0 rétablit les anciens filtres stricts. L'objectif atteint reste strict.
+
+## v4.484 — Mode vigilant : cassures
+- Correction : le mode vigilant exigeait une tendance H1 franche pour les cassures, alors que le moteur accepte déjà la tendance 15 min quand H1 est neutre. Toutes les cassures étaient refusées en marché « fond neutre ». L'exigence est retirée ; restent : pas de contre-tendance, flux dans le sens (> 55 %), amplitude, stop supérieur au bruit.
+
+## v4.485 — Mode vigilant : contre-tendance sécurisée admise
+- `SCALP_DEFENSE_COUNTER` = 1 (défaut) : une contre-tendance déjà validée par le moteur (rebond, zone testée ≥ 2 fois, flux, BTC, note) est admise en mode vigilant, à `SCALP_DEFENSE_COUNTER_SIZE_PCT` % de la taille normale (40). 0 = refusée comme avant.
+
+## v4.486 — Trades manuels comptés dans l'objectif du jour
+- `SCALP_GOAL_INCLUDE_MANUAL` = 1 (défaut) : les trades manuels clôturés (tickets libres), en paper comme en live, entrent dans le capital, l'objectif du jour et le mode défensif, avec leur propre mode (paper avec paper, live avec live). 0 = Scalp seul.
+- Le thermomètre affiche « dont N manuels +X $ » (aujourd'hui, hier, date ou tout). Les statistiques du Scalp (réussite, historique par actif du mode prudent) restent calculées sur les seuls trades Scalp.
+
+## v4.487 — Changer le type d'un ordre programmé
+- Dans « ORDRES PROGRAMMÉS » → Modifier : nouveau sélecteur **TYPE** (Ordre libre / Swing Support / Scalp). Le type enregistré peut être remplacé par un autre ; un ordre issu d'une opportunité du bot (Accumulation, etc.) peut devenir libre / Swing Support / Scalp (le contrôle de validité de l'opportunité est alors retiré). L'inverse (vers une opportunité du bot) n'est pas possible : il faudrait qu'elle soit confirmée.
+- Le type détermine l'historique (onglets LIVE / PAPER ou SCALP) et les statistiques du Scalp après l'ouverture. La colonne « Opportunité » affiche désormais « Scalp » pour un ordre Scalp.
+
+## v4.488 — Swing Support : interrupteurs à 0 et plafond de tests de zone
+- **Correction** : plusieurs interrupteurs Swing Support refusaient la valeur 0 à l'enregistrement (`SUPSW_RES_FILTER_ON`, `SUPSW_BTC_GATE_ON`, `SUPSW_RECENT_ON`, `SUPSW_TRAIL_ON`, `SUPSW_REENTRY_ON`, `SUPSW_RIDE_ON`, `SUPSW_BTC_H4_MODE` à 0 ou 1, `SUPSW_BTC24_MIN` négatif, `SUPSW_TRAIL_LOCK_PCT` à 0). Ils acceptent maintenant 0 (et 0/1/2 pour le mode H4).
+- **Nouveau** `SUPSW_MAX_TOUCHES` (0 = aucune limite, par défaut) : pas d'entrée si la zone de support a été testée plus de N fois. Motif de refus : « zone testee N fois (maximum M) ».
+- Essai paper proposé : `SUPSW_RES_FILTER_ON` = 0 (retire le refus « résistance Daily trop proche ») et `SUPSW_MAX_TOUCHES` = 7. À juger sur au moins 30 trades.
+
+## v4.489 — Mesure des pentes et des lignes inclinées (aucun effet sur les décisions)
+- Nouvelle fonction `mtf_analysis.slope_features` : sur les bougies 1 h, pente de la tendance (régression des 36 dernières clôtures) en multiples d'ATR par bougie (`pente_atr`) et en % du prix par heure (`pente_pct`), qualité de la droite (`pente_r2`, 1 = tendance régulière, 0 = bruit), ligne de **support inclinée** (deux derniers creux) et de **résistance inclinée** (deux derniers sommets) avec l'écart du prix à chaque ligne (`lig_sup_dist_pct`, `lig_res_dist_pct`), leurs pentes (`lig_sup_pente_pct`, `lig_res_pente_pct`) et la largeur du canal (`canal_pct`).
+- Enregistré pour **Swing Support** et **Tendance** (8 colonnes ajoutées à leurs journaux, migration automatique de la base, colonnes dans les exports CSV) et pour **Scalp** (dans les mesures de qualité de tendance de chaque trade ; 8 colonnes à la fin du CSV de l'historique).
+- Aucune règle n'en dépend. Après environ 100 trades par mode, comparaison des pentes (et du R²) entre trades gagnants et perdants pour décider d'une règle éventuelle.
+
+## v4.490 — Scalp : « ascenseur », pente 1 h, stop élargi, stop sur clôture 5 min (paper ET live)
+Toutes les règles ci-dessous s'appliquent de la même façon en paper et en live (chacune a son interrupteur, tous à 1 par défaut).
+- **Ascenseur** : efficacité 1 min sur 30 bougies (`SCALP_ASC_ER_MAX` = 0,25) ; en dessous, le prix « fait l'ascenseur » (monte et descend sans avancer). Enregistré aussi : amplitude des 3 dernières bougies 5 min en ATR.
+- **Pente** (`SCALP_SLOPE_FILTER_ON`) : trade refusé si la pente de la tendance 1 h va contre son sens, quand la tendance est régulière (régularité ≥ `SCALP_SLOPE_MIN_R2` = 0,4).
+- **Entrée en ascenseur** (`SCALP_ASC_ENTRY_ON`) : pas de cassure (on attend un repli) ; un rebond doit être près de la ligne inclinée de support (long) ou de résistance (short), à moins de `SCALP_ASC_NEAR_LINE_PCT` = 0,5 %.
+- **Stop élargi** (`SCALP_ASC_SL_ON`) : en ascenseur, stop = max(stop normal, `SCALP_ASC_SL_ATR` × ATR 5 min) plafonné à `SCALP_ASC_SL_MAX_PCT`; la taille est réduite pour garder la même perte en $.
+- **Stop sur clôture 5 min** (`SCALP_ASC_CLOSE_STOP_ON`) : le stop « mou » ne ferme que si la dernière bougie 5 min clôturée (après l'entrée) a clôturé au-delà ET que le prix y est encore, tant que la pente 1 h reste dans le sens du trade ; si la pente se retourne, il agit au prix (« STOP LOSS »). Un **stop de secours** à `SCALP_ASC_HARD_MULT` × le stop (2 par défaut) est posé comme SL du ticket, donc **natif sur Hyperliquid en live** : en cas de mèche violente, la perte maximale est ce stop de secours. Motif de sortie : « STOP SUR CLOTURE 5 min ». Dès que le seuil de rentabilité, le verrou ou le TP1 prennent le relais, le stop normal s'applique.
+- Le CSV de l'historique gagne `asc_er_1m`, `asc_range_atr`, `ascenseur`, `sl_mou_pct`, `sl_secours_pct`, `regles_asc`.
+- Swing Support et Tendance : pentes enregistrées (v4.489), règles pas encore appliquées.
+
+## v4.491 — Filtre de pente : fenêtre courte (12 h)
+- Le filtre de pente du Scalp comparait le sens du trade à la pente des 36 dernières bougies 1 h. Après un repli récent, cette pente restait positive alors que la situation était « BAISSE SAINE » et refusait les shorts (8 refus en une heure le 28/10). Le filtre utilise maintenant `SCALP_SLOPE_BARS` = 12 bougies 1 h (12 h). La pente sur 36 h reste enregistrée dans les colonnes `pente_*_1h`.
+- Nouvelles colonnes du CSV : `pente_filtre_atr`, `pente_filtre_r2`, `pente_filtre_bougies` (pente réellement utilisée par le filtre). Motif de refus : « pente N h contre le trade ».
+- `SCALP_SLOPE_BARS` = 36 rétablit l'ancien comportement ; `SCALP_SLOPE_FILTER_ON` = 0 désactive le filtre.
+
+## v4.492 — Ascenseur : seuil recalibré, ligne inclinée en mesure seule
+- Journal du 28/10 (12h35–14h10) : 5 cassures refusées avec une efficacité 1 min de 0,01 à 0,16 et 2 rebonds shorts refusés car le prix était à +1,40 % et +4,42 % de la ligne inclinée de résistance. Un prix aléatoire donne environ 0,15 sur 30 bougies : le seuil de 0,25 classait presque tout en « ascenseur ».
+- `SCALP_ASC_ER_MAX` : 0,25 → **0,08** (va-et-vient nettement plus marqués que le hasard).
+- `SCALP_ASC_NEAR_LINE_PCT` : 0,5 → **0** (0 = mesure seule : l'écart à la ligne inclinée est enregistré dans `regles_asc` mais ne refuse plus). Une valeur > 0 rétablit le refus.
+- Paper et live identiques. Aucun autre changement.

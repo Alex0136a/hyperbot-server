@@ -39,7 +39,7 @@ import queue
 # Incrementer a chaque modification importante
 # Visible dans le header du dashboard pour identifier
 # exactement quelle version tourne sans ambiguite
-BOT_VERSION = "4.415"
+BOT_VERSION = "4.492"
 BOT_BUILD   = "2026-10-14-a"  # incremente a chaque correctif — visible dans les logs
                                # pour confirmer sans ambiguite quelle version tourne
 # Historique :
@@ -269,6 +269,25 @@ CONFIG = {
     "FOREX_STALE_MIN": 90,                # ... apres N minutes
     "FOREX_STALE_PEAK_PCT": 0.15,         # ... si le pic de gain est reste sous N % du prix
     "MANUAL_DEFAULT_SWING": 1,            # v4.415 : tickets manuels crypto ouverts par defaut avec les reglages Swing Support (1/0)
+    # v4.421 — MODE SCALP CRYPTO (scalp_crypto.py) : paper par defaut, desactive tant que l utilisateur ne l active pas
+    "SCALP_ENABLED": 0, "SCALP_MODE": "paper",           # paper / live (le passage en live se fait par bouton, avec confirmation)
+    "SCALP_LEVERAGE": 3, "SCALP_NOTIONAL_USD": 60.0,     # 60 $ x 0,6 % - frais ~ 0,31 $ net par trade gagnant
+    "SCALP_SL_PCT": 0.65, "SCALP_ZONE_COOLDOWN_MIN": 60,
+    "SCALP_SHORT_BTC_BLOCK": 1, "SCALP_SHORT_BTC_MAX_PCT": 0.1,   # v4.438 pas de short si BTC monte
+    "SCALP_CORR_WINDOW_MIN": 120, "SCALP_CORR_HIGH": 0.6, "SCALP_BREADTH_MIN": 60,      # v4.442 correlation / regime du panier
+    "SCALP_CORR_DIR_ON": 0, "SCALP_CORR_RELSTR_ON": 0, "SCALP_CLUSTER_MAX": 0, "SCALP_CLUSTER_WINDOW_MIN": 30, "SCALP_CLUSTER_RETRACE_PCT": 0,
+    "SCALP_DAY_OFFSET_H": -4, "SCALP_COMPOUND_ON": 0, "SCALP_SLOTS": 0, "SCALP_BETA_SIZE_ON": 0, "SCALP_BETA_REF": 1.0, "SCALP_BETA_MIN_FACTOR": 0.4, "SCALP_BETA_CAP_PCT": 0, "SCALP_DEFENSE_DAY_PCT": 1.5, "SCALP_DEFENSE_LOSSES": 0, "SCALP_DEFENSE_MIN": 60, "SCALP_DEFENSE_SOFT": 1, "SCALP_ASC_ON": 1, "SCALP_ASC_ER_MAX": 0.08, "SCALP_SLOPE_FILTER_ON": 1, "SCALP_SLOPE_BARS": 12, "SCALP_SLOPE_MIN_R2": 0.4, "SCALP_ASC_ENTRY_ON": 1, "SCALP_ASC_NEAR_LINE_PCT": 0, "SCALP_ASC_SL_ON": 1, "SCALP_ASC_SL_ATR": 1.5, "SCALP_ASC_SL_MAX_PCT": 1.5, "SCALP_ASC_CLOSE_STOP_ON": 1, "SCALP_ASC_HARD_MULT": 2.0, "SCALP_GOAL_INCLUDE_MANUAL": 1, "SCALP_DEFENSE_COUNTER": 1, "SCALP_DEFENSE_COUNTER_SIZE_PCT": 40, "SCALP_DEFENSE_SIZE_PCT": 60, "SCALP_DEFENSE_ROOM_X": 1.5, "SCALP_DEFENSE_SL_ATR": 1.0, "SCALP_SLOTS_USE_PCT": 100, "SCALP_CAPITAL_USD": 100.0, "SCALP_COMPOUND_PCT": 100, "SCALP_COMPOUND_SINCE": 0, "SCALP_CAPITAL_FROM_HL": 0, "SCALP_CAPITAL_CAP_USD": 0,
+    "SCALP_GOAL_PCT": 0, "SCALP_GOAL_STOP_ALL": 0, "SCALP_SAFE_WINDOW": 20, "SCALP_SAFE_MIN_TRADES": 6, "SCALP_SAFE_MIN_WINRATE": 55, "SCALP_SAFE_REBOND_ONLY": 1, "SCALP_SAFE_MAX_SCORE": 90, "SCALP_SAFE_MIN_TOUCHES": 2, "SCALP_SAFE_MIN_ROOM_PCT": 0, "SCALP_CORR_SIZE_PCT": 100,
+    "SCALP_PEER_MIN": 0, "SCALP_PEER_CORR_ONLY": 1, "SCALP_PEER_WINDOW_MIN": 30, "SCALP_CORR_BASKET_EXIT_ON": 0, "SCALP_BASKET_EXIT_PCT": 70,
+    "SCALP_RUN_ENABLED": 1, "SCALP_RUN_TRAIL_PCT": 0.2, "SCALP_FLOW_ALL_ON": 0, "SCALP_FLOW_ALL_MIN": 0.52, "SCALP_FLOW_ALL_MIN_TRADES": 30, "SCALP_RETEST_ON": 0, "SCALP_RETEST_BARS": 6, "SCALP_RETEST_TOL_ATR": 0.3, "SCALP_RETEST_BOUNCE_ATR": 0.25, "SCALP_BE_ENABLED": 0, "SCALP_BE_ARM_PCT": 0.4, "SCALP_BE_LOCK_PCT": 0.1,     # v4.434 laisser courir apres l objectif
+    "SCALP_COUNTER_ENABLED": 1, "SCALP_COUNTER_MIN_SCORE": 65, "SCALP_COUNTER_FLOW_MIN": 0.58, "SCALP_COUNTER_MIN_TRADES": 30,   # v4.433 contre-tendance securisee "SCALP_TP_PCT": 0.6,            # % du PRIX ; TP fixe (pas de laisser courir)
+    "SCALP_TOP_N": 15,                                   # actifs : les N plus echanges (volume 24 h) parmi les actifs suivis
+    "SCALP_HOURS_UTC": "7-11,13-21",                     # tranches horaires UTC (vide = toujours)
+    "SCALP_MIN_SCORE": 0, "SCALP_SHORT_MIN_SCORE": 62,
+    "SCALP_TREND_MODE": 1, "SCALP_CONFIRM_BARS": 3, "SCALP_NOISE_ATR": 0.5,   # v4.429 : pas de contre-tendance ; entree seulement apres confirmation du mouvement "SCALP_MIN_ATR15_PCT": 0.0,  # v4.423 : filtres OPTIONNELS (0 = desactive) ; ces donnees comptent dans la NOTE, elles ne bloquent plus
+    "SCALP_MIN_ROOM_PCT": 0.0, "SCALP_BREAK_VOL_MULT": 1.5, "SCALP_MAX_CHASE_PCT": 0.4,
+    "SCALP_MAX_OPEN": 0, "SCALP_MAX_PER_DAY": 40, "SCALP_DAILY_LOSS_USD": 3.0,
+    "SCALP_PAUSE_AFTER_LOSSES": 3, "SCALP_PAUSE_MIN": 60, "SCALP_COOLDOWN_MIN": 30, "SCALP_MAX_HOLD_MIN": 90,
     "ASSET_BT_DAYS": 90,                  # v4.410 : profondeur (jours) de l historique rejoue pour la pre-programmation
     "FOREX_DSL_TRAIL_FRACTION": 0.40,     # distance du suiveur >= 40 % du gain maximal (jamais plus serre que la marge ATR)
     "FOREX_DSL_FALLBACK_TOL_PCT": 0.08,   # marge de repli si l ATR n est pas encore disponible
@@ -1475,7 +1494,13 @@ PROFILE_SWING = {
     "TRENDF_MAX_SPREAD_PCT": 0.05,
     "TRENDF_MAX_HOLD_DAYS": 30,
     "TRENDF_COOLDOWN_SEC": 14400,
-    "TRENDF_EXIT_H4_REVERSE": 1,          # 1 = sort aussi quand la tendance H4 se retourne franchement
+    "TRENDF_EXIT_H4_REVERSE": 1,          # 1 = sort aussi quand la tendance H4 se retourne franchement ; 2 = des que H4 n est plus dans le sens (neutre inclus)
+    "TRENDF_SCALP_UNIVERSE": 0,           # v4.480 : 1 = Tendance evalue aussi les cryptos du Scalp (suivies par le bot) en plus de TRENDF_SYMBOLS
+    "TRENDF_IGNORE_RESERVE": 0,           # v4.476 : 1 = Tendance peut trader les actifs reserves a Swing Support (BTC, ETH, HYPE, TAO, SUI) ; un actif deja ouvert par un autre mode reste exclu
+    "TRENDF_REQUIRE_H1": 0,               # v4.476 : 1 = entree seulement si la tendance H1 (EMA 50/200) est aussi dans le sens
+    "TRENDF_EXIT_H1": 0,                  # v4.476 : sortie sur H1 : 1 = H1 franchement retournee ; 2 = H1 n est plus dans le sens (neutre inclus) ; 0 = ignoree
+    "TRENDF_LOCK_ARM_PCT": 0.0,           # v4.476 : gain acquis : une fois le gain maximal >= N % du prix, on protege (0 = desactive)
+    "TRENDF_LOCK_GIVEBACK_PCT": 35.0,     # v4.476 : ... on sort si le gain retombe de N % de son maximum
     "SUPSW_ENABLED": 0,
     "SUPSW_SYMBOLS": ["BTC", "ETH", "HYPE", "TAO", "SUI"],
     "SUPSW_SL_PCT": 5.0,                  # stop catastrophe (% du prix)
@@ -1499,6 +1524,7 @@ PROFILE_SWING = {
     "SUPSW_RECENT_HOURS": 4,              # ... fenetre en heures
     "SUPSW_RECENT_ASSET_MIN_PCT": 1.5,    # ... refuse si l actif a perdu plus de N % sur la fenetre
     "SUPSW_RECENT_BTC_MIN_PCT": 0.5,      # ... refuse si BTC a perdu plus de N % sur la fenetre
+    "SUPSW_MAX_TOUCHES": 0,               # v4.488 : 0 = aucune limite ; sinon pas d entree si la zone a ete testee plus de N fois
     "SUPSW_RES_FILTER_ON": 1,             # v4.391 : 1 = pas d entree si une resistance Daily est trop proche au-dessus (retournement probable)
     "SUPSW_RES_MIN_PCT": 3.0,             # ... distance minimale (% du prix) entre le prix et le bas de la resistance Daily
     "SUPSW_RIDE_ON": 1,                   # v4.391 : 1 = on vise la resistance : objectif = resistance - tampon (au lieu de l objectif fixe)
@@ -1607,6 +1633,7 @@ PROFILE_SWING = {
     "SITUATION_MIN_ROOM_PCT": 1.0,         # contre-tendance : marge minimale avant le niveau 1h oppose
     "COUNTERTREND_TTP_MULT": 0.6,          # contre-tendance : trailing arme a 60 % et repli toleré a 60 %
     # v4.273 — TRADING MANUEL
+    "MANUAL_SCALP_OPP_TTL_SEC": 300,       # v4.454 : une ouverture Scalp reste proposee en manuel pendant 5 min
     "MANUAL_OPPORTUNITY_TTL_SEC": 120,     # une opportunite reste valable tant qu elle est revue dans ce delai
     "MANUAL_DEFAULT_NOTIONAL_USD": 15.0,   # taille proposee (notionnel) — minimum Hyperliquid 10 $
     "MANUAL_DEFAULT_LEVERAGE": 1,
@@ -11238,7 +11265,7 @@ class BotEngine:
             "btc_h4_mode": int(c.get("SUPSW_BTC_H4_MODE", 2)),
             "rec_on": bool(int(c.get("SUPSW_RECENT_ON", 1))), "rec_h": max(int(c.get("SUPSW_RECENT_HOURS", 4)), 1),
             "rec_asset": float(c.get("SUPSW_RECENT_ASSET_MIN_PCT", 1.5)), "rec_btc": float(c.get("SUPSW_RECENT_BTC_MIN_PCT", 0.5)),
-            "res_on": bool(int(c.get("SUPSW_RES_FILTER_ON", 1))), "res_min": float(c.get("SUPSW_RES_MIN_PCT", 3.0)),
+            "max_touches": int(float(c.get("SUPSW_MAX_TOUCHES", 0) or 0)), "res_on": bool(int(c.get("SUPSW_RES_FILTER_ON", 1))), "res_min": float(c.get("SUPSW_RES_MIN_PCT", 3.0)),
             "ride_on": bool(int(c.get("SUPSW_RIDE_ON", 1))), "res_buf": float(c.get("SUPSW_RES_BUFFER_PCT", 0.3)),
             "ride_max": float(c.get("SUPSW_RIDE_MAX_PCT", 6.0)), "ride_trail": max(float(c.get("SUPSW_RIDE_TRAIL_PCT", 1.0)), 0.1),
             "re_on": bool(int(c.get("SUPSW_REENTRY_ON", 1))), "re_h": float(c.get("SUPSW_REENTRY_HOURS", 12)),
@@ -11401,7 +11428,7 @@ class BotEngine:
                 "zone_low": zone.get("low"), "zone_high": zone.get("high"), "zone_touches": zone.get("touches"),
                 "held": setup.get("held") if setup else None, "pierce_pct": setup.get("pierce_pct") if setup else None,
                 "price": price, "entry_ref": ref, "sl": ref * (1 - K["sl_pct"] / 100), "tp": ref * (1 + K["tp_pct"] / 100),
-                "risk_pct": K["sl_pct"], "reward_pct": K["tp_pct"], "decision": decision, "prio": prio, "trade_uid": None})
+                "risk_pct": K["sl_pct"], "reward_pct": K["tp_pct"], "decision": decision, "prio": prio, "trade_uid": None, **mtf.slope_features(c1h)})
             seen[key] = (prio, eid)
             return eid, signal_t
         except Exception as e:
@@ -11493,6 +11520,8 @@ class BotEngine:
         elif K["res_on"] and ctx.get("res_dist_pct") is not None and ctx["res_dist_pct"] < K["res_min"]:
             blocker = (f"resistance Daily trop proche ({ctx['res_dist_pct']:.1f} % au-dessus, minimum {K['res_min']:g} %) "
                        f"— retournement probable")
+        elif K["max_touches"] > 0 and int(zone.get("touches") or 0) > K["max_touches"]:
+            blocker = f"zone testee {int(zone.get('touches') or 0)} fois (maximum {K['max_touches']})"
         else:
             blocker = self._supsw_reentry_blocker(ticker, c1h, price, now, K)
         if watch:                          # v4.378 : actif hors des 5 du mode -> alerte seulement, jamais d ouverture ni de journal
@@ -11869,10 +11898,24 @@ class BotEngine:
     # ───────────────────────── v4.365 — TENDANCE CONFIRMEE (module separe, PAPER) ─────────────────────────
     # Entree quand la tendance est CONFIRMEE (Daily ET H4 dans le meme sens + momentum 1 h + flux), longs et shorts ; on reste tant
     # qu elle tient : stop suiveur (multiple de l ATR H4), sortie quand la tendance cesse. Slot unique par actif (comme Hyperliquid).
+    def _trendf_symbols(self):
+        """v4.480 : actifs evalues par Tendance = TRENDF_SYMBOLS (+ cryptos de l univers du Scalp, suivies par le bot, si TRENDF_SCALP_UNIVERSE = 1)."""
+        c = self.cfg
+        syms = list(c.get("TRENDF_SYMBOLS", ["BTC", "ETH", "HYPE", "TAO", "SUI", "PAXG", "xyz:EUR", "xyz:JPY"]))
+        if int(c.get("TRENDF_SCALP_UNIVERSE", 0)):
+            try:
+                tracked = {ticker_from_slot_key(sk) for sk in self.states}
+                for t in self.manual.scalp.universe():
+                    if t in tracked and t not in syms:
+                        syms.append(t)
+            except Exception:
+                pass
+        return syms
+
     def _trendf_cfg(self):
         c = self.cfg
         return {
-            "syms": c.get("TRENDF_SYMBOLS", ["BTC", "ETH", "HYPE", "TAO", "SUI", "PAXG", "xyz:EUR", "xyz:JPY"]),
+            "syms": self._trendf_symbols(),
             "allow_short": bool(c.get("TRENDF_ALLOW_SHORT", 1)), "risk_pct": float(c.get("TRENDF_RISK_PCT", 1.0)),
             "max_notional": float(c.get("TRENDF_MAX_NOTIONAL_USD", 60.0)), "lev": max(int(c.get("TRENDF_LEVERAGE", 3)), 1),
             "max_trades": int(c.get("TRENDF_MAX_TRADES", 3)), "stop_atr": float(c.get("TRENDF_STOP_ATR", 3.0)),
@@ -11880,7 +11923,9 @@ class BotEngine:
             "entry_mode": int(c.get("TRENDF_ENTRY_MODE", 0)), "break_bars": max(int(c.get("TRENDF_BREAK_BARS", 12)), 3),
             "min_flow": float(c.get("TRENDF_MIN_FLOW", 0.2)), "max_ext": float(c.get("TRENDF_MAX_EXT_ATR", 0.0)),
             "max_spread": float(c.get("TRENDF_MAX_SPREAD_PCT", 0.05)), "hold_days": float(c.get("TRENDF_MAX_HOLD_DAYS", 30)),
-            "cooldown": int(c.get("TRENDF_COOLDOWN_SEC", 14400)), "h4_exit": bool(c.get("TRENDF_EXIT_H4_REVERSE", 1)),
+            "cooldown": int(c.get("TRENDF_COOLDOWN_SEC", 14400)), "h4_exit": int(c.get("TRENDF_EXIT_H4_REVERSE", 1)),
+            "ignore_reserve": bool(int(c.get("TRENDF_IGNORE_RESERVE", 0))), "req_h1": bool(int(c.get("TRENDF_REQUIRE_H1", 0))),
+            "h1_exit": int(c.get("TRENDF_EXIT_H1", 0)), "lock_arm": float(c.get("TRENDF_LOCK_ARM_PCT", 0.0)), "lock_give": float(c.get("TRENDF_LOCK_GIVEBACK_PCT", 35.0)),
             "slip": float(c.get("FOREX_SCALP_SLIPPAGE_PCT", 0.005)), "fee": float(c.get("FEE_ROUND_TRIP_PCT", 0.09)),
         }
 
@@ -11905,6 +11950,8 @@ class BotEngine:
                     try:
                         self._mtf_candles(tk, "1d", 230)
                         self._mtf_candles(tk, "4h", 260)
+                        if int(self.cfg.get("TRENDF_EXIT_H1", 0)):
+                            self._mtf_candles(tk, "1h", 230)
                     except Exception as e:
                         print(f"[TENDANCE] prechargement {tk} ignore : {type(e).__name__}: {e}")
 
@@ -11950,7 +11997,7 @@ class BotEngine:
                 "funding_ann": ctx.get("funding_ann"), "flow": flow, "atr_pct": (v["atr"] / price * 100) if price else None,
                 "ext_atr": ext, "hour_utc": datetime.utcfromtimestamp(now).hour, "price": price, "entry_ref": ref,
                 "sl": ref - sgn * sdist, "risk_pct": round(sdist / ref * 100, 3), "entry_mode": K["entry_mode"],
-                "decision": decision, "prio": prio, "trade_uid": None})
+                "decision": decision, "prio": prio, "trade_uid": None, **mtf.slope_features(c1h)})
             seen[key] = (prio, eid, signal_t)
             return eid, signal_t
         except Exception as e:
@@ -11965,7 +12012,7 @@ class BotEngine:
             return
         snap = {"ts": now, "blocker": None}
         state.trendf_snapshot = snap
-        if self._supsw_reserved(ticker):
+        if self._supsw_reserved(ticker) and not K["ignore_reserve"]:
             snap["blocker"] = "actif reserve a Swing Support"
             return
         occ = None
@@ -12012,6 +12059,16 @@ class BotEngine:
         if not ok:
             snap["blocker"] = f"tendance {side.upper()} confirmee (Daily {v['trend']}, H4 {tr4}) — attente : {why}"
             return
+        if K["req_h1"]:       # v4.476 : la tendance H1 (EMA 50/200 sur 230 bougies 1 h) doit aussi etre dans le sens
+            try:
+                c1h_long = self._mtf_candles(ticker, "1h", 230)
+                tr1 = mtf.trend(c1h_long)[0] if c1h_long and len(c1h_long) >= 200 else "inconnue"
+            except Exception:
+                tr1 = "inconnue"
+            snap["h1"] = tr1
+            if tr1 != trf.want_trend(side):
+                snap["blocker"] = f"tendance {side.upper()} confirmee (Daily {v['trend']}, H4 {tr4}) — attente : tendance H1 {tr1} (il faut {trf.want_trend(side)})"
+                return
         flow = None
         try:
             flow = self._compute_trade_flow_pressure(ticker, price)
@@ -12131,6 +12188,8 @@ class BotEngine:
             reason = "TENDANCE STOP SUIVEUR" if tf.get("moved") else "TENDANCE STOP INITIAL"
         elif time.time() - tf["opened_ts"] >= K["hold_days"] * 86400:
             reason = "TENDANCE DUREE MAX"
+        elif trf.gain_lock(tf.get("peak_pct", 0.0), gain_pct, K["lock_arm"], K["lock_give"]):
+            reason = f"TENDANCE GAIN PROTEGE (pic {tf.get('peak_pct', 0.0):.2f} % -> {gain_pct:.2f} %)"
         else:
             try:                                  # tendance jugee sur bougies CLOTUREES apres l entree (jamais sur le prix du moment)
                 c1d = self._mtf_candles(ticker, "1d", 230, cache_only=True)
@@ -12139,7 +12198,12 @@ class BotEngine:
                     d1_label = mtf.trend(c1d)[0]
                 if c4 and len(c4) >= 200 and c4[-1]["t"] / 1000 + 14400 > tf["opened_ts"]:
                     h4_label = mtf.trend(c4)[0]
-                ended, why = trf.trend_end(side, d1_label, h4_label, K["h4_exit"])
+                h1_label = None
+                if K["h1_exit"]:
+                    c1h = self._mtf_candles(ticker, "1h", 230, cache_only=True)
+                    if c1h and len(c1h) >= 200 and c1h[-1]["t"] / 1000 + 3600 > tf["opened_ts"]:
+                        h1_label = mtf.trend(c1h)[0]
+                ended, why = trf.trend_end(side, d1_label, h4_label, K["h4_exit"], h1_label, K["h1_exit"])
                 if ended:
                     reason = why
             except Exception as e:

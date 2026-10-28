@@ -50,6 +50,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 // ── API CLIENT ───────────────────────────────────────────────
 const API = window.location.origin;
+const UI_VERSION = "4.492";      // v4.464 : version de la PAGE (affichee dans la carte Scalp) pour verifier que index.html est bien a jour
 
 async function apiCall(path, method="GET", body=null, token=null) {
   const headers = { "Content-Type": "application/json" };
@@ -704,8 +705,35 @@ const MT = {
   td: {fontSize:12,color:"#e2e8f0",padding:"7px 8px",borderBottom:"1px solid #131d33",whiteSpace:"nowrap"},
 };
 const fmtP = v => v==null||isNaN(v) ? "—" : (Math.abs(v)>=1000 ? Number(v).toFixed(2) : Number(v).toPrecision(6));
+// v4.436 — PC : flèches ◀ ▶ au survol de toute zone défilable en largeur (tableaux, historique, onglets) + sélection du texte conservée.
+// Sur téléphone le défilement tactile reste inchangé ; ce code n'ajoute rien au DOM de React (boutons dans <body>).
+(function(){
+  if (typeof document === "undefined" || window.__hscrollArrows) return; window.__hscrollArrows = true;
+  const mk = (txt, side) => { const b = document.createElement("button"); b.textContent = txt; b.setAttribute("aria-label", side==="l"?"Défiler vers la gauche":"Défiler vers la droite");
+    b.style.cssText = "position:fixed;z-index:99999;display:none;width:34px;height:34px;border-radius:50%;border:1px solid #3b82f6;background:rgba(15,22,41,.92);color:#93c5fd;font-size:16px;line-height:1;cursor:pointer;padding:0;box-shadow:0 2px 8px rgba(0,0,0,.5)"; return b; };
+  let cur = null, L = null, R = null;
+  const scrollable = el => { for (let i = 0; el && el !== document.body && i < 14; i++, el = el.parentElement) { if (el.nodeType !== 1) continue; const ox = getComputedStyle(el).overflowX; if ((ox === "auto" || ox === "scroll") && el.scrollWidth > el.clientWidth + 4) return el; } return null; };
+  const place = () => { if (!cur || !document.body.contains(cur)) { hide(); return; } const r = cur.getBoundingClientRect();
+    const top = Math.max(r.top, 0), bot = Math.min(r.bottom, window.innerHeight); if (bot - top < 14) { hide(); return; }
+    const y = Math.round((top + bot) / 2 - 17);
+    L.style.cssText += `;display:${cur.scrollLeft > 2 ? "block" : "none"};left:${Math.round(Math.max(r.left, 0) + 6)}px;top:${y}px`;
+    R.style.cssText += `;display:${cur.scrollLeft + cur.clientWidth < cur.scrollWidth - 2 ? "block" : "none"};left:${Math.round(Math.min(r.right, window.innerWidth) - 40)}px;top:${y}px`; };
+  const hide = () => { cur = null; if (L) { L.style.display = "none"; R.style.display = "none"; } };
+  const init = () => { if (L) return; L = mk("◀", "l"); R = mk("▶", "r"); document.body.appendChild(L); document.body.appendChild(R);
+    const go = d => () => { if (cur) { cur.scrollBy({ left: d * Math.max(200, cur.clientWidth * 0.8), behavior: "smooth" }); setTimeout(place, 350); } };
+    L.onclick = go(-1); R.onclick = go(1); };
+  document.addEventListener("mousemove", e => { if (!window.matchMedia("(hover:hover)").matches) return; init();
+    if (e.target === L || e.target === R) return; const sc = scrollable(e.target); if (sc !== cur) { cur = sc; if (!sc) hide(); } if (cur) place(); }, { passive: true });
+  document.addEventListener("scroll", () => { if (cur) place(); }, true);
+  window.addEventListener("resize", () => { if (cur) place(); });
+})();
+
+const shp = v => v==null ? "—" : `${v>=0?"+":""}${Number(v).toFixed(2)}`;
 const fmtUsd = v => v==null||isNaN(v) ? "—" : `${v>=0?"+":""}${Number(v).toFixed(2)} $`;
 const fmtAgo = s => s<60?`${s}s`:s<3600?`${Math.floor(s/60)} min`:`${Math.floor(s/3600)} h ${Math.floor(s%3600/60)} min`;
+// v4.435 — heure d'ouverture + durée écoulée d'un trade ouvert (heure locale de l'appareil)
+const fmtDur = sec => { sec = Math.max(0, Math.floor(sec)); const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60); return d ? `${d} j ${h} h` : h ? `${h} h ${String(m).padStart(2,"0")} min` : `${m} min`; };
+const openedTxt = ts => ts ? `🕒 ouvert à ${new Date(ts*1000).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}${new Date(ts*1000).toDateString()!==new Date().toDateString()?" ("+new Date(ts*1000).toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit"})+")":""} · depuis ${fmtDur(Date.now()/1000-ts)}` : null;
 const fmtTime = ts => ts ? new Date(ts*1000).toLocaleString([], {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
 const dirBadge = d => <span style={{color:d==="long"?"#22c55e":"#ef4444",fontWeight:800}}>{d==="long"?"▲ LONG":"▼ SHORT"}</span>;
 
@@ -958,7 +986,7 @@ function PushPanel({ token, onPrepare }) {
         {P.opps ? <div style={{marginLeft:22,marginTop:4}}>
           <div style={{fontSize:10,color:"#64748b",marginBottom:4}}>Types annoncés :</div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {[["swing_support","Swing Support"],["accumulation","Accumulation"],["spot_accumulation","Spot-Accum"],["funding_contrarian","Funding"],["forex","Forex"]].map(([k,l])=>{
+            {[["swing_support","Swing Support"],["accumulation","Accumulation"],["spot_accumulation","Spot-Accum"],["scalp_crypto","Scalp"],["forex","Forex"]].map(([k,l])=>{
               const on = (P.opps_types||[]).includes(k);
               return <button key={k} style={{...MT.seg(on,"#22c55e"),fontSize:11}} onClick={()=>setPref("opps_types", on ? (P.opps_types||[]).filter(x=>x!==k) : [...(P.opps_types||[]), k])}>{l}</button>;
             })}
@@ -967,7 +995,7 @@ function PushPanel({ token, onPrepare }) {
             <b>Swing Support</b> : setup valide sur <b>tous les actifs crypto</b> (les 5 du mode, pris ou non par le bot, et les autres en alerte seulement). Note de qualité minimale : {num("opps_min_score",56,"/ 100")}
             <div>Repères : 40 = souple · 60 = normal · 80 = strict. Note = Daily 20, Weekly 15, BTC 15, H4 10, contacts de la zone 15, flux 15, funding 10 (non calibrée sur des résultats : à ajuster à l'usage).</div>
           </div>
-          <div style={{fontSize:10,color:"#64748b",marginTop:4}}>Une même opportunité n'est annoncée qu'une fois toutes les {num("opps_cooldown_min",56,"min")}. « confiance ≥ » ci-dessus concerne Accumulation, Spot-Accum, Funding et Forex.</div>
+          <div style={{fontSize:10,color:"#64748b",marginTop:4}}>Une même opportunité n'est annoncée qu'une fois toutes les {num("opps_cooldown_min",56,"min")}. « confiance ≥ » ci-dessus concerne Accumulation, Spot-Accum, Scalp (note) et Forex.</div>
         </div> : null}
       </div>
     </div>);
@@ -1009,7 +1037,7 @@ function ManualOpenCard({ t, token, onDone }) {
       <div style={{display:"flex",gap:14,flexWrap:"wrap",fontSize:10,color:"#94a3b8",marginTop:6}}>
         <span>Entrée {fmtP(t.entry_price)}</span><span>Prix {fmtP(t.current_price)}</span>
         <span style={{color:"#f87171"}}>SL {fmtP(t.sl_price)}</span>{t.tp1_price ? <span style={{color:"#34d399"}}>{t.tp1_done?"TP1 ✔ encaissé":`TP1 ${fmtP(t.tp1_price)} (${Math.round(t.tp1_close_pct||50)} %)`}</span> : null}{t.tp_price ? <span style={{color:"#34d399"}}>{t.tp1_price?"TP2":"TP"} {fmtP(t.tp_price)}{t.tp_run?(t.tp_run_armed?" · on laisse courir (armé)":" · laisser courir"):""}</span> : null}<span style={{color:"#fbbf24"}}>🏔️ pic {peakUsd!=null?`${fmtUsd(peakUsd)} `:""}(+{Number(_roe(peak,t.leverage)).toFixed(2)} %){peakPx!=null?` · prix ${fmtP(peakPx)}`:""}</span>
-        <span>{Number(t.notional_usd).toFixed(2)} $</span>{age!=null && <span>{age < 120 ? `${age} min` : `${Math.round(age/60)} h`}</span>}
+        <span style={{color:"#e2e8f0",fontWeight:700}}>Taille {Number(t.notional_usd).toFixed(2)} USDC{t.leverage>1?` (marge ${(Number(t.notional_usd)/t.leverage).toFixed(2)})`:""}</span>{t.opened_at && <span style={{color:"#fbbf24"}}>{openedTxt(t.opened_at)}</span>}
       </div>
       <div style={{display:"flex",gap:8,alignItems:"center",marginTop:8,flexWrap:"wrap"}}>
         <button style={{background:"#450a0a",border:"1px solid #ef4444",color:"#fca5a5",borderRadius:6,padding:"5px 12px",fontSize:11,cursor:"pointer",fontFamily:"inherit"}} onClick={close}>Fermer</button>
@@ -1118,9 +1146,9 @@ function AssetSummaryModal({ ticker, token, onClose, onPrepare }) {
               <div key={sc.id} style={{background:"#0a0e1a",border:`1px solid ${isBest?lc:"#334155"}`,borderLeft:`3px solid ${lc}`,borderRadius:8,padding:"8px 10px",marginBottom:6,opacity:isBest||sc.aligned?1:0.8}}>
                 <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",alignItems:"center"}}>
                   <div style={{fontSize:12,fontWeight:700,color:lc}}>{isBest && "⭐ "}{sc.label}{!sc.aligned && <span style={{marginLeft:6,fontSize:9,color:"#fbbf24",fontWeight:600}}>⚠ contre-tendance</span>}</div>
-                  <button onClick={()=>onPrepare(sc.side,{execution:sc.execution,trigger_price:sc.trigger,sl_pct:sc.sl_pct,tp_pct:sc.tp_pct,expiry_hours:72})} style={{background:isBest?lc:"#1e293b",border:`1px solid ${lc}`,color:isBest?"#0a0e1a":lc,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontWeight:700,fontSize:11}}>⏱ Pré-programmer</button>
+                  <button onClick={()=>onPrepare(sc.side,{execution:sc.entry_execution||sc.execution,confirm_pct:sc.confirm_pct||0.3,trigger_price:sc.trigger,sl_pct:sc.sl_pct,tp_pct:sc.tp_pct,expiry_hours:72})} style={{background:isBest?lc:"#1e293b",border:`1px solid ${lc}`,color:isBest?"#0a0e1a":lc,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontWeight:700,fontSize:11}}>⏱ Pré-programmer</button>
                 </div>
-                <div style={{fontSize:11,color:"#cbd5e1",marginTop:3}}>Attendre {sc.wait} ({sc.trigger_dist_pct>=0?"+":""}{sc.trigger_dist_pct.toFixed(2)} % du prix actuel) → entrée {sc.execution==="price_below"?"si prix ≤":"si prix ≥"} <b>{fp(sc.trigger)}</b></div>
+                <div style={{fontSize:11,color:"#cbd5e1",marginTop:3}}>Attendre {sc.wait} ({sc.trigger_dist_pct>=0?"+":""}{sc.trigger_dist_pct.toFixed(2)} % du prix actuel) → entrée {sc.entry_execution==="bounce_up"?"si prix ≤":sc.entry_execution==="bounce_down"?"si prix ≥":sc.execution==="price_below"?"si prix ≤":"si prix ≥"} <b>{fp(sc.trigger)}</b>{sc.entry_execution==="bounce_up" ? <span> <b style={{color:"#34d399"}}>puis REBOND de {sc.confirm_pct} %</b> avant d'ouvrir (pas pendant la chute)</span> : sc.entry_execution==="bounce_down" ? <span> <b style={{color:"#f87171"}}>puis RECUL de {sc.confirm_pct} %</b> avant d'ouvrir</span> : null}</div>
                 <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>SL <b style={{color:"#f87171"}}>{fp(sc.sl)}</b> (−{sc.sl_pct.toFixed(2)} %) · objectif <b style={{color:"#34d399"}}>{fp(sc.tp)}</b> (+{sc.tp_pct.toFixed(2)} %) · gain/risque <b style={{color:sc.rr>=1.5?"#34d399":sc.rr>=1?"#fbbf24":"#f87171"}}>{sc.rr.toFixed(2)}</b></div>
                 <div style={{fontSize:10,color:"#cbd5e1",marginTop:3}}>{histTxt(sc)}</div>
                 {!isBest && sc.reject && <div style={{fontSize:10,color:"#fbbf24",marginTop:2}}>Non retenue : {sc.reject}.</div>}
@@ -1149,6 +1177,214 @@ function AssetSummaryModal({ ticker, token, onClose, onPrepare }) {
   );
 }
 
+
+// v4.421 — Mode Scalp crypto : activation, paper / live, réglages, statistiques et journal des signaux
+function ScalpPanel({ token }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(false);
+  const [vals, setVals] = useState({});
+  const [hours, setHours] = useState("");
+  const [sub, setSub] = useState("reglages");
+  const [thSel, setThSel] = useState("today"), [thDate, setThDate] = useState(""), [thMode, setThMode] = useState("");
+  const load = useCallback(async () => {
+    try { const r = await apiCall("/api/scalp","GET",null,token); setD(r); setErr("");
+      setVals(v => Object.keys(v).length ? v : Object.fromEntries(Object.entries(r.config||{}).filter(([k])=>k!=="SCALP_HOURS_UTC"&&k!=="SCALP_ENABLED"&&k!=="SCALP_MODE")));
+      setHours(h => h===""&&r.config ? (r.config.SCALP_HOURS_UTC||"") : h);
+    } catch(e) { setErr(e.message); } }, [token]);
+  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [load]);
+  const send = async (body, okMsg) => { try { await apiCall("/api/scalp/config","POST",body,token); if (okMsg) alert(okMsg); load(); } catch(e) { alert(e.message); } };
+  if (!d) return <div style={MT.card}><div style={MT.title}>⚡ SCALP CRYPTO</div><div style={{color:"#94a3b8",fontSize:12}}>{err || "Chargement…"}</div></div>;
+  const live = d.mode === "live";
+  const S = live ? d.stats_live : d.stats_paper;
+  const _off = Number(d.config.SCALP_DAY_OFFSET_H ?? -4); const dayLbl = _off===0 ? "jour UTC" : `jour UTC${_off>0?"+":"−"}${Math.abs(_off)}`;
+  const dlTxt = (name, txt) => { const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob(["\ufeff"+txt],{type:"text/plain;charset=utf-8"})); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },500); };
+  const pr = (a) => a && a.n ? `${a.n} trades · ${a.win_rate.toFixed(0)} % gagnants · ${fmtUsd(a.pnl)} brut · ${fmtUsd(a.pnl_net)} net` : "aucun trade";
+  const LBL = {SCALP_LEVERAGE:"Levier",SCALP_NOTIONAL_USD:"Taille ($)",SCALP_SL_PCT:"Stop (% prix)",SCALP_TP_PCT:"Objectif (% prix)",SCALP_TOP_N:"Nb d'actifs (top volume)",
+    SCALP_MIN_SCORE:"Filtre note min LONG (0 = aucun)",SCALP_SHORT_MIN_SCORE:"Exigence SHORT : note min (0 = aucune)",SCALP_TREND_MODE:"Sans contre-tendance (1 = oui, 0 = non)",SCALP_CONFIRM_BARS:"Rebond : bougies 5 min pour confirmer (0 = entrer tout de suite)",SCALP_NOISE_ATR:"Bruit toléré à contre-sens (× ATR 5 min)",SCALP_MIN_ATR15_PCT:"Filtre volatilité 15 min min % (0 = aucun)",SCALP_MIN_ROOM_PCT:"Filtre place min avant zone % (0 = aucun)",
+    SCALP_BREAK_VOL_MULT:"Cassure : volume ×",SCALP_MAX_CHASE_PCT:"Cassure : ne pas poursuivre au-delà (%)",SCALP_MAX_OPEN:"Positions simultanées max (0 = illimité ; en live le capital limite)",
+    SCALP_DAY_OFFSET_H:"Début de la journée du Scalp : décalage avec UTC en heures (-4 = heure de Marigot, 0 = UTC)",SCALP_DEFENSE_DAY_PCT:"Mode défensif : si la journée est à -X % du capital ou moins, mêmes filtres stricts que l'objectif atteint (0 = désactivé)",SCALP_DEFENSE_LOSSES:"Mode défensif : après N pertes de suite (0 = désactivé)",SCALP_GOAL_INCLUDE_MANUAL:"Objectif du jour : compter aussi les trades manuels (tickets libres), en paper comme en live (1 = oui, 0 = Scalp seul)",SCALP_ASC_ON:"Ascenseur : activer l'analyse des va-et-vient dans la bougie (1 = oui, 0 = non), paper et live",SCALP_ASC_ER_MAX:"Ascenseur : efficacité 1 min (30 bougies) sous laquelle le prix « fait l'ascenseur » (un prix aléatoire donne environ 0,15 ; 0,08 = va-et-vient marqués)",SCALP_SLOPE_BARS:"Pente : nombre de bougies 1 h sur lesquelles la pente est calculée pour le filtre (12 = 12 h ; 36 = tendance plus lente)",SCALP_SLOPE_FILTER_ON:"Pente : refuser un trade dont le sens est contre la pente 1 h (1 = oui, 0 = non)",SCALP_SLOPE_MIN_R2:"Pente : régularité minimale de la tendance 1 h pour appliquer le filtre (0 à 1)",SCALP_ASC_ENTRY_ON:"Ascenseur : pas de cassure ; rebond seulement près de la ligne inclinée (1 = oui, 0 = non)",SCALP_ASC_NEAR_LINE_PCT:"Ascenseur : écart maximal du prix à la ligne inclinée de support / résistance (%, 0 = mesure seule)",SCALP_ASC_SL_ON:"Ascenseur : stop élargi au-dessus du bruit, taille réduite pour garder la même perte (1 = oui, 0 = non)",SCALP_ASC_SL_ATR:"Ascenseur : le stop vaut au moins X × ATR 5 min",SCALP_ASC_SL_MAX_PCT:"Ascenseur : stop maximal (% du prix)",SCALP_ASC_CLOSE_STOP_ON:"Stop sur clôture 5 min : le stop ne ferme que sur une clôture de bougie au-delà tant que la pente 1 h est dans le sens du trade ; stop de secours plus loin (1 = oui, 0 = non)",SCALP_ASC_HARD_MULT:"Stop sur clôture : stop de secours = X × le stop (posé sur Hyperliquid en live)",SCALP_DEFENSE_SOFT:"Mode défensif vigilant : ne bloque pas, vérifie l'amplitude, le bruit, la tendance et réduit la taille (1 = oui, 0 = filtres stricts comme l'objectif atteint)",SCALP_DEFENSE_COUNTER:"Mode vigilant : admettre la contre-tendance déjà sécurisée par le moteur (1 = oui, 0 = non)",SCALP_DEFENSE_COUNTER_SIZE_PCT:"Mode vigilant : taille d'une contre-tendance en % de la normale",SCALP_DEFENSE_SIZE_PCT:"Mode vigilant : taille des trades en % de la normale",SCALP_DEFENSE_ROOM_X:"Mode vigilant : amplitude disponible minimale, en multiples du stop (0 = aucune)",SCALP_DEFENSE_SL_ATR:"Mode vigilant : le stop doit dépasser X × ATR 5 min (0 = aucune exigence)",SCALP_DEFENSE_MIN:"Mode défensif (pertes de suite) : durée en minutes après la dernière perte",SCALP_BETA_SIZE_ON:"Bêta : réduire la taille des actifs plus volatils que BTC (1 = oui, 0 = non)",SCALP_BETA_REF:"Bêta : bêta de référence (au-dessus, taille = référence ÷ bêta)",SCALP_BETA_MIN_FACTOR:"Bêta : facteur minimal de taille (0,4 = jamais sous 40 %)",SCALP_BETA_CAP_PCT:"Bêta : plafond d'exposition équivalente BTC par sens, en % du capital (0 = aucun)",SCALP_SLOTS:"Emplacements : nombre de trades simultanés ; taille de chaque trade = capital du début de journée × levier ÷ emplacements (0 = désactivé)",SCALP_SLOTS_USE_PCT:"Emplacements : part du capital engagée en marge (100 = tout, 80 = 20 % de réserve)",SCALP_COMPOUND_ON:"Capital composé : taille = % du capital courant (1 = oui, 0 = non)",SCALP_CAPITAL_USD:"Capital de départ ($)",SCALP_COMPOUND_PCT:"Taille d'un trade (% du capital, notionnel)",SCALP_CAPITAL_FROM_HL:"Live : capital de départ = solde Hyperliquid lu chaque jour (1 = oui, 0 = non)",SCALP_CAPITAL_CAP_USD:"Live : plafond du capital utilisé ($, 0 = aucun)",SCALP_GOAL_PCT:"Objectif du jour (% du capital, 0 = aucun)",SCALP_GOAL_STOP_ALL:"Objectif atteint : arrêter toute entrée (1 = oui, 0 = mode prudent)",SCALP_SAFE_WINDOW:"Mode prudent : derniers trades pris en compte par actif",SCALP_SAFE_MIN_TRADES:"Mode prudent : trades minimum par actif",SCALP_SAFE_MIN_WINRATE:"Mode prudent : taux de réussite minimum (%)",SCALP_SAFE_REBOND_ONLY:"Mode prudent : rebonds seulement (1 = oui, 0 = non)",SCALP_SAFE_MIN_TOUCHES:"Mode prudent : support/résistance testé au moins X fois (0 = aucune exigence)",SCALP_SAFE_MIN_ROOM_PCT:"Mode prudent : place minimale avant la zone suivante (%, 0 = aucune)",SCALP_SAFE_MAX_SCORE:"Mode prudent : refuser les notes ≥ (0 = aucune limite)",SCALP_MAX_PER_DAY:"Trades max par jour",SCALP_DAILY_LOSS_USD:"Perte journalière max ($)",SCALP_PAUSE_AFTER_LOSSES:"Pause après X pertes de suite",
+    SCALP_PAUSE_MIN:"Durée de la pause (min)",SCALP_SHORT_BTC_BLOCK:"Pas de short si BTC monte (1 = oui, 0 = non)",SCALP_SHORT_BTC_MAX_PCT:"Short bloqué si BTC 1 h > (%)",SCALP_RUN_ENABLED:"Laisser courir après l'objectif (1 = oui, 0 = non)",SCALP_RUN_TRAIL_PCT:"Laisser courir : sortie si recul > (% prix)",SCALP_FLOW_ALL_ON:"Flux obligatoire pour TOUS les trades (1 = oui, 0 = non)",SCALP_FLOW_ALL_MIN:"Flux : part min d'achats (long) / ventes (short) agressifs (0,52 = 52 %)",SCALP_FLOW_ALL_MIN_TRADES:"Flux : nb min de transactions (sinon pas de blocage)",SCALP_RETEST_ON:"Cassure avec retest : attendre le retour sur le niveau puis le rebond (1 = oui, 0 = non)",SCALP_RETEST_BARS:"Retest : nb de bougies 5 min d'attente max",SCALP_RETEST_TOL_ATR:"Retest : proximité du niveau (× ATR 5 min)",SCALP_RETEST_BOUNCE_ATR:"Retest : rebond requis avant d'entrer (× ATR 5 min)",SCALP_BE_ENABLED:"Stop au seuil de rentabilité (1 = oui, 0 = non)",SCALP_BE_ARM_PCT:"Seuil : gain atteint avant de remonter le stop (%)",SCALP_BE_LOCK_PCT:"Stop remonté à entrée + (% prix, ≈ frais)",SCALP_COUNTER_ENABLED:"Contre-tendance sécurisée (1 = autorisée, 0 = bloquée)",SCALP_COUNTER_MIN_SCORE:"Contre-tendance : note min",SCALP_COUNTER_FLOW_MIN:"Contre-tendance : part min d'achats/ventes agressifs (0,58 = 58 %)",SCALP_COUNTER_MIN_TRADES:"Contre-tendance : nb min de transactions du flux",SCALP_ZONE_COOLDOWN_MIN:"Pause sur une zone après un stop (min, 0 = non)",SCALP_COOLDOWN_MIN:"Attente par actif (min)",SCALP_MAX_HOLD_MIN:"Durée max d'un trade (min ; sans effet une fois l'objectif atteint)"};
+  const CLBL = {SCALP_CORR_WINDOW_MIN:"Fenêtre de mesure de la corrélation (min, 30 à 275)",SCALP_CORR_HIGH:"Marché « corrélé » si corrélation moyenne ≥ (0,1 à 0,95)",
+    SCALP_BREADTH_MIN:"Largeur : part d'actifs requise dans le sens du trade (%)",
+    SCALP_CORR_DIR_ON:"Règle 1 · Sens du panier : trader seulement dans le sens de la majorité (1 = oui, 0 = non)",
+    SCALP_CORR_RELSTR_ON:"Règle 2 · Meilleur du groupe : long si plus fort que le panier, short si plus faible (1 = oui)",
+    SCALP_CLUSTER_MAX:"Règle 3 · Grappe : max d'ouvertures dans le même sens (0 = illimité)",SCALP_CLUSTER_WINDOW_MIN:"Grappe : fenêtre de temps (min)",SCALP_CLUSTER_RETRACE_PCT:"Grappe : débloquer après un recul de X % depuis le plus bas/haut de la fenêtre (0 = non)",
+    SCALP_CORR_SIZE_PCT:"Règle 4 · Taille de chaque trade en marché corrélé (% de la taille normale)",
+    SCALP_PEER_MIN:"Règle 5 · Confirmation par les pairs : nb d'autres actifs requis dans le même sens (0 = non)",SCALP_PEER_CORR_ONLY:"Pairs : seulement en marché corrélé (1 = oui, 0 = tous les marchés)",SCALP_PEER_WINDOW_MIN:"Pairs : fenêtre de temps (min)",
+    SCALP_CORR_BASKET_EXIT_ON:"Règle 6 · Sortie panier : fermer les trades en perte si le panier se retourne (1 = oui)",SCALP_BASKET_EXIT_PCT:"Sortie panier : part d'actifs contre (%)"};
+  const isC = k => k in CLBL;
+  const reg = d.regime || {};
+  const rgTxt = reg.n ? `${reg.label==="correle"?"CORRÉLÉ":reg.label==="disperse"?"DISPERSÉ":"inconnu"} · corrélation ${reg.corr!=null?reg.corr.toFixed(2):"—"} · ${Math.round((reg.up||0)*100)} % des actifs montent / ${Math.round((reg.down||0)*100)} % baissent (30 min) · panier ${reg.basket30>=0?"+":""}${reg.basket30} %` : "mesure en cours (nécessite le Scalp actif)";
+  const prC = (a) => a && a.n ? `${a.n} trades · ${a.win_rate.toFixed(0)} % gagnants · ${fmtUsd(a.pnl_net)} net` : "—";
+  return (
+    <div style={{...MT.card,borderColor:d.enabled?(live?"#ef4444":"#22c55e"):"#1e2d4a"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <div style={MT.title}>⚡ SCALP CRYPTO <span style={{fontWeight:400,color:"#475569",fontSize:10}}>[page v{UI_VERSION}]</span> <span style={{fontWeight:400,color:"#64748b"}}>— x{d.config.SCALP_LEVERAGE} · TP {d.config.SCALP_TP_PCT} % · SL {d.config.SCALP_SL_PCT} % · {d.config.SCALP_NOTIONAL_USD} $ · départ de support / résistance H1, rebond ou cassure confirmée (bougies 5 min)</span></div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button style={MT.seg(d.enabled,"#22c55e")} onClick={()=>send({enabled:!d.enabled})}>{d.enabled?"● ACTIF":"○ ARRÊTÉ"}</button>
+          <button style={MT.seg(!live,"#60a5fa")} onClick={()=>live && send({mode:"paper"})}>PAPER</button>
+          <button style={MT.seg(live,"#ef4444")} onClick={()=>{ if(live) return; if(!d.live_available){ alert("Connexion Hyperliquid indisponible."); return; }
+            if(window.confirm("Passer le Scalp en LIVE ?\n\nLes prochains signaux ouvriront de VRAIS ordres sur Hyperliquid ("+d.config.SCALP_NOTIONAL_USD+" $ par trade, x"+d.config.SCALP_LEVERAGE+").\nLes positions paper déjà ouvertes restent en paper.")) send({mode:"live",confirm_live:true}); }}>LIVE</button>
+        </div>
+      </div>
+      <div style={{fontSize:12,color:"#cbd5e1",margin:"6px 0"}}>
+        {d.enabled ? (d.window_open ? <span style={{color:"#22c55e"}}>● à l'écoute</span> : <span style={{color:"#fbbf24"}}>● en attente : {d.window_reason}</span>) : <span style={{color:"#94a3b8"}}>○ désactivé (rien ne s'ouvre)</span>}
+        {" · "}mode <b style={{color:live?"#ef4444":"#60a5fa"}}>{live?"LIVE":"PAPER"}</b> · positions {d.open}{d.max_open>0?`/${d.max_open}`:""} · actifs : {(d.universe||[]).join(", ")||"—"}
+      </div>
+      {(()=>{ const thM=thMode||d.mode; const k=(d.capital_modes&&d.capital_modes[thM])||d.capital;
+        if(!k) return <div style={{fontSize:11,color:"#fbbf24",margin:"4px 0"}}>🌡️ Thermomètre indisponible : le serveur n'envoie pas le capital du Scalp. Vérifiez que <b>scalp_crypto.py</b> (v4.460 ou plus récente) est bien déposé sur GitHub, puis redéployez.</div>;
+        const g0=Number(k.goal_pct)||0;
+        const _days=k.days||[]; const _ymd=t=>{ const o=new Date(Date.now()+(_off*3600*1000)-(t||0)*86400000); return o.toISOString().slice(0,10); };
+        let view={dp:Number(k.day_pct)||0, net:k.day_net, gross:k.day_gross, fees:k.day_fees, start:Number(k.day_start)||0, n:null, mn:Number(k.day_manual_n)||0, mnet:Number(k.day_manual_net)||0, lbl:`${dayLbl}`, g:g0};
+        const _pick=(key)=>{ const r=_days.find(x=>x.d===key); return r ? {dp:r.pct, net:r.net, gross:r.gross, fees:r.fees, start:r.start, n:r.n, mn:r.mn||0, mnet:r.mnet||0} : {dp:0, net:0, gross:0, fees:0, start:Number(k.now)||0, n:0, mn:0, mnet:0}; };
+        if(thSel==="yesterday") view={...view, ..._pick(_ymd(1)), lbl:`hier · ${_ymd(1)}`};
+        else if(thSel==="date" && thDate) view={...view, ..._pick(thDate), lbl:`${thDate}`};
+        else if(thSel==="all" && k.all) view={...view, dp:k.all.pct, net:k.all.net, gross:k.all.gross, fees:k.all.fees, start:k.all.start, n:k.all.n, mn:k.all.mn||0, mnet:k.all.mnet||0, lbl:`tout · ${k.all.active_days} jours de trading`, g:g0*Math.max(k.all.active_days,1)};
+        const g=view.g; const dp=view.dp;
+        const picker=<div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:6,fontSize:11}}>
+          {[["paper","PAPER"],["live","LIVE"]].map(([kk,ll])=><button key={kk} style={{...MT.seg(thM===kk,kk==="live"?"#ef4444":"#60a5fa"),flex:"none",padding:"3px 10px"}} onClick={()=>setThMode(kk===d.mode?"":kk)}>{ll}</button>)}
+          <span style={{color:"#475569"}}>|</span>
+          {[["today","Aujourd'hui"],["yesterday","Hier"],["all","Tout"]].map(([kk,ll])=><button key={kk} style={{...MT.seg(thSel===kk,"#0ea5e9"),flex:"none",padding:"3px 10px"}} onClick={()=>setThSel(kk)}>{ll}</button>)}
+          <input type="date" style={{...MT.input,width:"auto",padding:"2px 6px"}} value={thDate} onChange={e=>{ setThDate(e.target.value); setThSel(e.target.value?"date":"today"); }}/>
+        </div>;
+        if(g<=0) return <div style={{fontSize:11,color:"#64748b",margin:"4px 0"}}>🌡️ Objectif du jour désactivé (réglage « Objectif du jour »). {view.lbl} : {dp>=0?"+":""}{dp.toFixed(2)} % ({view.net>=0?"+":""}{view.net} $).</div>;
+        const minV = dp<0 ? Math.min(dp*1.1, -g*0.25) : 0, maxV = Math.max(g*1.25, dp*1.1), span = maxV-minV||1;
+        const pos = v => Math.max(0, Math.min(100, (v-minV)/span*100));
+        const reached = dp>=g, rest = g-dp, usd = Math.abs(rest)/100*(Number(view.start)||0);
+        const col = dp<0 ? "#ef4444" : reached ? "#22c55e" : "#fbbf24";
+        const l = Math.min(pos(0), pos(dp)), w = Math.abs(pos(dp)-pos(0));
+        return <div style={{margin:"8px 0",padding:"8px 10px",border:"1px solid #1e2d4a",borderRadius:8,background:"#0b1220"}}>
+          {picker}
+          <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6,fontSize:12,color:"#e2e8f0",marginBottom:6}}>
+            <span>🌡️ <b>Objectif NET de frais</b> ({thM==="live"?"LIVE":"PAPER"} · {view.lbl}{view.n!=null?` · ${view.n} trades`:""}) : <b style={{color:col}}>{dp>=0?"+":""}{dp.toFixed(2)} %</b> / {g} % <span style={{color:"#94a3b8"}}>({view.net>=0?"+":""}{view.net} $ net = brut {view.gross>=0?"+":""}{view.gross} $ − frais {view.fees} $)</span>{k.include_manual&&(view.mn>0)?<span style={{color:"#a78bfa"}}> · dont {view.mn} manuel{view.mn>1?"s":""} {view.mnet>=0?"+":""}{view.mnet} $</span>:null}</span>
+            <span style={{color:col,fontWeight:700}}>{reached ? `✔ atteint · surplus +${(dp-g).toFixed(2)} % (≈ +${usd.toFixed(2)} $)` : `reste ${rest.toFixed(2)} % (≈ ${usd.toFixed(2)} $)`}</span>
+          </div>
+          <div style={{position:"relative",height:16,borderRadius:8,background:"#1e293b",overflow:"hidden"}}>
+            <div style={{position:"absolute",left:`${l}%`,width:`${w}%`,top:0,bottom:0,background:col,borderRadius:8,transition:"all .4s"}}/>
+            {reached && <div style={{position:"absolute",left:`${pos(g)}%`,width:`${Math.max(pos(dp)-pos(g),0)}%`,top:0,bottom:0,background:"repeating-linear-gradient(45deg,#16a34a,#16a34a 4px,#4ade80 4px,#4ade80 8px)"}}/>}
+            <div style={{position:"absolute",left:`${pos(g)}%`,top:0,bottom:0,width:2,background:"#e2e8f0"}} title={`Objectif ${g} %`}/>
+            {minV<0 && <div style={{position:"absolute",left:`${pos(0)}%`,top:0,bottom:0,width:1,background:"#64748b"}}/>}
+          </div>
+          <div style={{position:"relative",height:14,fontSize:10,color:"#64748b",marginTop:2}}>
+            <span style={{position:"absolute",left:`${pos(0)}%`,transform:"translateX(-50%)"}}>0</span>
+            <span style={{position:"absolute",left:`${pos(g)}%`,transform:"translateX(-50%)",color:"#e2e8f0"}}>🎯 {g} %</span>
+          </div>
+          {thSel==="all" && <div style={{fontSize:10,color:"#64748b"}}>Tout : cumul depuis le départ (réglage « Capital »), objectif = {g0} % × {k.all?k.all.active_days:0} jours de trading.</div>}
+          {d.btc_exposure && thM===d.mode && (d.btc_exposure.n_long+d.btc_exposure.n_short)>0 && <div style={{fontSize:10,color:"#94a3b8"}}>📐 Exposition équivalente BTC (notionnel × bêta) : {d.btc_exposure.n_short>0 && <span>SHORT <b style={{color:"#f87171"}}>{d.btc_exposure.short} $</b> ({d.btc_exposure.n_short} pos., notionnel {d.btc_exposure.notional_short} $) </span>}{d.btc_exposure.n_long>0 && <span>LONG <b style={{color:"#34d399"}}>{d.btc_exposure.long} $</b> ({d.btc_exposure.n_long} pos., notionnel {d.btc_exposure.notional_long} $) </span>}· net <b>{d.btc_exposure.net>0?"+":""}{d.btc_exposure.net} $</b>{d.btc_exposure.unknown.length>0?` · bêta inconnu (compté 1) : ${d.btc_exposure.unknown.join(", ")}`:""}</div>}
+          {d.defense && thM===d.mode && <div style={{fontSize:10,color:"#fbbf24"}}>🛡 Mode défensif actif : {d.defense} — mêmes filtres stricts que l'objectif atteint (actifs sûrs, rebonds, zone testée, notes &lt; {d.config.SCALP_SAFE_MAX_SCORE||"—"}).</div>}
+          {reached && thSel==="today" && thM===d.mode && <div style={{fontSize:10,color:"#86efac"}}>Objectif atteint : {Number(d.config.SCALP_GOAL_STOP_ALL)?"plus d'entrée aujourd'hui.":"mode prudent actif (actifs sûrs, rebonds sur support/résistance testé ≥ "+(d.config.SCALP_SAFE_MIN_TOUCHES||0)+" fois, notes < "+(d.config.SCALP_SAFE_MAX_SCORE||"—")+")."}</div>}
+        </div>; })()}
+      <div style={{display:"flex",gap:18,flexWrap:"wrap",fontSize:12,color:"#e2e8f0"}}>
+        <div><span style={MT.label}>AUJOURD'HUI ({dayLbl}) · {live?"LIVE":"PAPER"}</span>{pr(S.today)}</div>
+        <div><span style={MT.label}>TOTAL · {live?"LIVE":"PAPER"}</span>{pr(S.total)}</div>
+        <div><span style={MT.label}>REBOND</span>{pr(S.by_kind.rebond)}</div>
+        <div><span style={MT.label}>CASSURE</span>{pr(S.by_kind.cassure)}</div>
+        <div><span style={MT.label}>AVEC TENDANCE</span>{S.by_trend?pr(S.by_trend.avec):"—"}</div>
+        <div><span style={MT.label}>CONTRE-TENDANCE</span>{S.by_trend?pr(S.by_trend.contre):"—"}</div>
+        <div><span style={MT.label}>PAPER (rappel)</span>{pr(d.stats_paper.total)}</div>
+      </div>
+      <div style={{fontSize:10,color:"#64748b",marginTop:6}}>Seuil de rentabilité : environ 58 % de trades gagnants avec TP 0,6 % / SL 0,65 % (frais inclus) ; plus le stop est serré, plus il tombe souvent (bruit). Reste en PAPER jusqu'à ce que ce taux soit confirmé sur plusieurs dizaines de trades.</div>
+      <button style={{...MT.btn("#334155","#e2e8f0"),marginTop:8}} onClick={()=>setOpen(!open)}>{open?"Masquer":"Réglages, résultats par heure et journal"}</button>
+      {open && <div style={{marginTop:10}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          {[["reglages","⚙️ Réglages"],["corr","🔗 Corrélation"],["res","📊 Résultats & journal"]].map(([id,l])=><button key={id} style={MT.seg(sub===id,"#60a5fa")} onClick={()=>setSub(id)}>{l}</button>)}
+        </div>
+        {sub==="reglages" && <div>
+          {d.capital && (()=>{ const k=d.capital; return <div style={{fontSize:12,color:"#cbd5e1",marginBottom:10,padding:"8px 10px",border:"1px solid #1e2d4a",borderRadius:8,background:"#0b1220"}}>
+            <b>Capital {k.mode==="live"?"LIVE":"PAPER"}</b> : départ {k.base} $ ({k.source}) → <b style={{color:k.now>=k.base?"#22c55e":"#ef4444"}}>{k.now} $</b>{Number(k.slots)>0?` · ${k.slots} emplacements : chaque trade = ${k.slot_notional} $ (marge ${(k.slot_notional/Math.max(Number(d.config.SCALP_LEVERAGE)||1,1)).toFixed(2)} $), fixé pour la journée${Number(d.config.SCALP_SLOTS_USE_PCT||100)<100?` · réserve ${100-Number(d.config.SCALP_SLOTS_USE_PCT)} %`:""}`:(k.compound?` · chaque trade = ${Number(d.config.SCALP_COMPOUND_PCT||100)} % du capital`:" · taille fixe (capital composé désactivé)")}
+            {Number(k.goal_pct)>0 && <div>Objectif du jour net de frais ({dayLbl}) : <b style={{color:k.goal_reached?"#22c55e":"#fbbf24"}}>{k.day_pct>=0?"+":""}{k.day_pct} %</b> / {k.goal_pct} % ({k.day_net>=0?"+":""}{k.day_net} $){k.goal_reached?" — atteint : "+(Number(d.config.SCALP_GOAL_STOP_ALL)?"plus d'entrée aujourd'hui":"mode prudent actif"):""}</div>}
+            {Number(k.goal_pct)>0 && <div style={{color:"#94a3b8"}}>Actifs « sûrs » ({(k.safe_assets||[]).length}) : {(k.safe_assets||[]).join(", ")||"aucun pour l'instant"}</div>}
+            <button style={{...MT.btn("#334155","#e2e8f0"),marginTop:6}} onClick={()=>{ if(window.confirm("Repartir du capital de départ à partir de maintenant ? Les trades déjà clôturés ne comptent plus dans le capital.")) send({reset_capital:true},"Le capital repart du capital de départ."); }}>↺ Repartir du capital de départ</button>
+          </div>; })()}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:10}}>
+            <div><span style={MT.label}>TRANCHES HORAIRES UTC (ex. 7-11,13-21 · vide = tout le temps)</span><input style={MT.input} value={hours} onChange={e=>setHours(e.target.value)}/></div>
+            {Object.keys(LBL).filter(k=>!isC(k)).map(k=><div key={k}><span style={MT.label}>{LBL[k]}</span><input style={MT.input} value={vals[k]??""} onChange={e=>setVals({...vals,[k]:e.target.value})}/></div>)}
+          </div>
+          <button style={{...MT.btn("#60a5fa"),marginTop:10}} onClick={()=>send({hours_utc:hours,values:vals},"Réglages enregistrés.")}>Enregistrer les réglages</button>
+        </div>}
+        {sub==="corr" && <div>
+          <div style={{fontSize:12,color:"#cbd5e1",marginBottom:6}}><b>Régime du panier ({(d.universe||[]).length} actifs)</b> : <span style={{color:reg.label==="correle"?"#fbbf24":"#34d399"}}>{rgTxt}</span></div>
+          <div style={{fontSize:11,color:"#94a3b8",marginBottom:8}}>Corrélé = les actifs bougent ensemble : le panier compte comme UN seul pari, et les règles ci-dessous (désactivées par défaut) s'appliquent. Dispersé = chaque actif fait son chemin : le Scalp trade comme avant. Le régime est enregistré sur chaque trade (visible dans l'historique) pour calibrer les seuils.</div>
+          {reg.ch30 && Object.keys(reg.ch30).length>0 && <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>{Object.entries(reg.ch30).sort((x,y)=>y[1]-x[1]).map(([t,v])=><div key={t} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"3px 7px",fontSize:11,color:v>0.05?"#22c55e":v<-0.05?"#ef4444":"#94a3b8"}}>{t} {v>=0?"+":""}{v.toFixed(2)} %</div>)}</div>}
+          {(d.peer_wait||[]).length>0 && <div style={{fontSize:11,color:"#fbbf24",marginBottom:8}}>En attente d'un pair : {(d.peer_wait||[]).map(w=>`${w.ticker} ${w.side.toUpperCase()} (${w.age_min} min)`).join(", ")}</div>}
+          <div style={{...MT.title}}>RÉSULTATS PAR RÉGIME À L'ENTRÉE ({live?"live":"paper"}, net de frais)</div>
+          <div style={{display:"flex",gap:18,flexWrap:"wrap",fontSize:12,color:"#e2e8f0",marginBottom:8}}>
+            {S.by_regime && [["correle","Corrélé"],["disperse","Dispersé"],["inconnu","Avant mesure"]].map(([k,l])=><div key={k}><span style={MT.label}>{l}</span>{prC(S.by_regime[k])}</div>)}
+          </div>
+          <div style={{...MT.title}}>PAR TAILLE DE GRAPPE (ouvertures dans le même sens avant celle-ci)</div>
+          <div style={{display:"flex",gap:18,flexWrap:"wrap",fontSize:12,color:"#e2e8f0",marginBottom:10}}>
+            {S.by_cluster && [["0","0"],["1","1"],["2","2"],["3","3 ou plus"]].map(([k,l])=><div key={k}><span style={MT.label}>{l}</span>{prC(S.by_cluster[k])}</div>)}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:10}}>
+            {Object.keys(CLBL).map(k=><div key={k}><span style={MT.label}>{CLBL[k]}</span><input style={MT.input} value={vals[k]??""} onChange={e=>setVals({...vals,[k]:e.target.value})}/></div>)}
+          </div>
+          <button style={{...MT.btn("#60a5fa"),marginTop:10}} onClick={()=>send({hours_utc:hours,values:vals},"Réglages de corrélation enregistrés.")}>Enregistrer</button>
+        </div>}
+        {sub==="res" && <div>
+        <div style={{...MT.title,marginTop:4}}>RÉSULTATS PAR HEURE — NET de frais (heure UTC, entre parenthèses l'heure {_off===0?"UTC":"locale"}, {live?"live":"paper"})</div>
+        {Object.keys(S.by_hour).length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Pas encore de trade clôturé.</div> :
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{Object.entries(S.by_hour).map(([h,a])=><div key={h} style={{background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:"4px 8px",fontSize:11,color:a.pnl>=0?"#22c55e":"#ef4444"}}>{h} h{_off!==0?` (${((Number(h)+_off)%24+24)%24} h)`:""} · {a.n} · {a.win_rate.toFixed(0)} % · {fmtUsd(a.pnl_net)}</div>)}</div>}
+        {Object.keys(S.by_hour).length>0 && <div style={{marginTop:6}}>{(()=>{ const txt=`RÉSULTATS PAR HEURE — NET de frais (heure UTC, ${live?"live":"paper"})\n`+Object.entries(S.by_hour).map(([h,a])=>`${h} h · ${a.n} · ${a.win_rate.toFixed(0)} % · net ${fmtUsd(a.pnl_net)} (brut ${fmtUsd(a.pnl)}, frais ${fmtUsd(a.fees)})`).join("\n"); return <><button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ try { navigator.clipboard.writeText(txt); } catch(e) {} }}>📋 Copier</button> <button style={{...MT.btn("#334155","#e2e8f0"),marginLeft:6}} onClick={()=>dlTxt(`scalp_par_heure_${live?"live":"paper"}.txt`,txt)}>⬇ Télécharger</button></>; })()}</div>}
+        <div style={{...MT.title,marginTop:14}}>JOURNAL DES SIGNAUX</div>
+        {(d.events||[]).length>0 && (()=>{ const txt="JOURNAL DES SIGNAUX\n"+d.events.map(e=>`${fmtTime(e.ts)} ${e.kind} ${e.ticker} — ${e.text}`).join("\n"); return <div style={{marginBottom:6}}><button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ try { navigator.clipboard.writeText(txt); } catch(e) {} }}>📋 Copier</button> <button style={{...MT.btn("#334155","#e2e8f0"),marginLeft:6}} onClick={()=>dlTxt("scalp_journal_signaux.txt",txt)}>⬇ Télécharger</button></div>; })()}
+        {(d.events||[]).length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucun signal pour l'instant.</div> :
+          <div style={{maxHeight:240,overflowY:"auto",fontSize:11,color:"#cbd5e1"}}>{d.events.map((e,i)=><div key={i} style={{padding:"3px 0",borderBottom:"1px solid #131d33"}}><span style={{color:"#64748b"}}>{fmtTime(e.ts)}</span> <b style={{color:e.kind==="entree"?"#22c55e":e.kind==="refus"?"#fbbf24":e.kind==="erreur"?"#ef4444":"#94a3b8"}}>{e.kind}</b> {e.ticker} — {e.text}</div>)}</div>}
+        </div>}
+        {d.error && <div style={{fontSize:11,color:"#fca5a5",marginTop:6}}>Dernière erreur technique : {d.error}</div>}
+      </div>}
+    </div>
+  );
+}
+
+function ScalpDiagBox({ token }) {
+  const [res, setRes] = useState(null), [busy, setBusy] = useState(false), [pick, setPick] = useState("");
+  const run = async () => { setBusy(true); try { setRes(await apiCall("/api/entry-diagnostics","GET",null,token)); } catch(e) { setRes(null); alert(e.message); } setBusy(false); };
+  const rows = ((res&&res.results)||[]).filter(r=>r.scalpc);
+  const txt = rows.filter(r=>!pick||String(r.ticker)===pick).map(r=>
+    `${r.ticker}${r.has_position?" [position ouverte]":""} (il y a ${r.snapshot_age_sec!=null?r.snapshot_age_sec.toFixed(0)+"s":"?"})\n  ⚡ SCALP CRYPTO : ${r.scalpc}${r.mtf?`\n  📊 TOP-DOWN : ${r.mtf}`:""}${r.situation?`\n  🧭 Situation : fond ${r.situation.fond} (1h) · court terme ${r.situation.court||"?"} (5 min) → ${r.situation.name.toUpperCase()}`:""}\n  📐 Niveaux : ${r.levels&&r.levels.trend_ema!=null?`${(r.levels.trend_ema_source||"EMA")} = ${Number(r.levels.trend_ema).toPrecision(6)} (prix ${r.levels.price!=null?(r.levels.price>r.levels.trend_ema?"au-dessus":"en dessous"):"?"})`:"EMA ?"} · support ${r.levels&&r.levels.support!=null?Number(r.levels.support).toPrecision(6):"?"} · résistance ${r.levels&&r.levels.resistance!=null?Number(r.levels.resistance).toPrecision(6):"?"}${r.levels&&(r.levels.support_1h||r.levels.resistance_1h)?` · structure 1h : support ${r.levels.support_1h!=null?Number(r.levels.support_1h).toPrecision(6):"?"} / résistance ${r.levels.resistance_1h!=null?Number(r.levels.resistance_1h).toPrecision(6):"?"}`:""}\n  📉 Qualité du marché : volatilité ${r.quality&&r.quality.vol_ratio!=null?r.quality.vol_ratio.toFixed(2)+"x":"?"} · activité ${r.quality&&r.quality.activity_ratio!=null?r.quality.activity_ratio.toFixed(2)+"x":"?"} son habitude · spread ${r.quality&&r.quality.spread_pct!=null?r.quality.spread_pct.toFixed(3)+" %":"?"}\n  📊 Flux transactions : ${r.trade_flow_pressure!=null?r.trade_flow_pressure.toFixed(2):"pas encore de donnees"}`).join("\n\n");
+  return <div style={MT.card}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:6}}>
+      <div style={MT.title}>🔍 DIAGNOSTIC SCALP <span style={{fontWeight:400,color:"#64748b"}}>— pourquoi le Scalp entre ou n'entre pas, actif par actif</span></div>
+      <button style={MT.btn("#fbbf24","#1c1917")} disabled={busy} onClick={run}>{busy?"Chargement…":"🔄 Diagnostiquer maintenant"}</button>
+    </div>
+    {!res ? <div style={{fontSize:11,color:"#94a3b8"}}>Instantané à la demande : dernier verdict du Scalp par actif (zone, note, tendance, grappe, mode prudent…), avec niveaux, flux et qualité du marché pour décider à la main.</div> : <>
+      {res.market_regime && <div style={{fontSize:11,color:"#cbd5e1",marginBottom:6}}>🧭 Régime : <b>{String(res.market_regime.regime||"?").toUpperCase()}</b> — {res.market_regime.detail||""}</div>}
+      <select style={{...MT.input,width:"auto",marginBottom:6}} value={pick} onChange={e=>setPick(e.target.value)}>
+        <option value="">Tous les actifs du Scalp ({rows.length})</option>{rows.map(r=><option key={r.ticker} value={r.ticker}>{r.ticker}</option>)}
+      </select>
+      <textarea readOnly value={txt||"Aucun actif du Scalp dans le diagnostic."} style={{width:"100%",minHeight:220,background:"#0b1220",color:"#e2e8f0",border:"1px solid #1e2d4a",borderRadius:6,padding:8,fontSize:11,fontFamily:"monospace",boxSizing:"border-box"}}/>
+      <button style={{...MT.btn("#334155","#e2e8f0"),marginTop:6}} onClick={()=>{ try { navigator.clipboard.writeText(txt); } catch(e) {} }}>📋 Copier</button>
+      <button style={{...MT.btn("#334155","#e2e8f0"),marginTop:6,marginLeft:6}} onClick={()=>{ setRes(null); setPick(""); }}>🙈 Masquer</button>
+    </>}
+  </div>;
+}
+
+function CorrBtcBox({ token }) {
+  const [res, setRes] = useState(null), [busy, setBusy] = useState(false);
+  const run = async (fresh) => { setBusy(true); try { setRes(await apiCall("/api/scalp/corr-btc"+(fresh?"?refresh=1":""),"GET",null,token)); } catch(e) { alert(e.message); } setBusy(false); };
+  const rows = (res&&res.rows)||[];
+  const f = v => v==null ? "—" : Number(v).toFixed(2);
+  const col = v => v==null ? "#64748b" : v<0.4 ? "#22c55e" : v<0.7 ? "#fbbf24" : "#ef4444";
+  const txt = "CORRÉLATION AVEC BTC (rendements 1 h) — actif · corr 7 j · corr 30 j · corr quand BTC baisse · bêta 30 j\n"+rows.map(r=>`${r.t} · ${f(r.corr7)} · ${f(r.corr30)} · ${f(r.corr_btc_down)} · ${f(r.beta30)}`).join("\n");
+  const dl = () => { const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob(["\ufeff"+txt],{type:"text/plain;charset=utf-8"})); a.download="correlation_btc.txt"; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },500); };
+  return <div style={MT.card}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:6}}>
+      <div style={MT.title}>📉 CORRÉLATION AVEC BTC <span style={{fontWeight:400,color:"#64748b"}}>— actif par actif, rendements 1 h</span></div>
+      <button style={MT.btn("#60a5fa")} disabled={busy} onClick={()=>run(!!res)}>{busy?"Calcul…":(res?"🔄 Recalculer":"Calculer")}</button>
+    </div>
+    {!res ? <div style={{fontSize:11,color:"#94a3b8"}}>Corrélation de chaque actif du Scalp avec BTC sur 7 et 30 jours, et quand BTC baisse (là où elle compte le plus), avec le bêta. Du moins corrélé au plus corrélé.</div> : <>
+      {res.error && <div style={{fontSize:11,color:"#fca5a5"}}>{res.error}</div>}
+      <div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",fontSize:12,color:"#e2e8f0",width:"100%"}}>
+        <thead><tr style={{color:"#64748b",textAlign:"left"}}><th style={{padding:"3px 8px"}}>Actif</th><th>Corr 7 j</th><th>Corr 30 j</th><th>Si BTC baisse</th><th>Bêta 30 j</th></tr></thead>
+        <tbody>{rows.map(r=><tr key={r.t} style={{borderTop:"1px solid #1e2d4a"}}><td style={{padding:"3px 8px",fontWeight:700}}>{r.t}</td>
+          <td style={{color:col(r.corr7)}}>{f(r.corr7)}</td><td style={{color:col(r.corr30)}}>{f(r.corr30)}</td><td style={{color:col(r.corr_btc_down)}}>{f(r.corr_btc_down)}</td><td>{f(r.beta30)}</td></tr>)}</tbody></table></div>
+      <div style={{fontSize:10,color:"#64748b",marginTop:4}}>Vert &lt; 0,4 · jaune 0,4–0,7 · rouge &gt; 0,7. « Si BTC baisse » : corrélation mesurée seulement sur les heures où BTC recule ; un actif peu corrélé en temps calme peut le devenir en baisse.{(res.errors||[]).length>0?` · illisibles : ${res.errors.join(", ")}`:""}</div>
+      <div style={{marginTop:6}}><button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ try { navigator.clipboard.writeText(txt); } catch(e) {} }}>📋 Copier</button> <button style={{...MT.btn("#334155","#e2e8f0"),marginLeft:6}} onClick={dl}>⬇ Télécharger</button> <button style={{...MT.btn("#334155","#e2e8f0"),marginLeft:6}} onClick={()=>setRes(null)}>🙈 Masquer</button></div>
+    </>}
+  </div>;
+}
+
 function ManualTradingTab({ token, prep, onPrepDone }) {
   const [st, setSt] = useState(null);
   const [err, setErr] = useState("");
@@ -1159,9 +1395,16 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
   const [editId, setEditId] = useState(null);
   const [edit, setEdit] = useState({});
   const [schedId, setSchedId] = useState(null);
+  const [levDiag, setLevDiag] = useState("");
   const [sched, setSched] = useState({});
   const [freeT, setFreeT] = useState("");          // v4.343 — ordre libre : actif
   const [freeDir, setFreeDir] = useState("long");  // v4.343 — ordre libre : sens
+  const [histAsset, setHistAsset] = useState("");     // v4.451 : filtre par actif
+  const [histView, setHistView] = useState("trades");     // v4.448 : sous-onglets de l historique (trades / par jour)
+  const [histFrom, setHistFrom] = useState(""), [histTo, setHistTo] = useState("");     // v4.447 — filtre par date (AAAA-MM-JJ, heure locale)
+  const [oppView, setOppView] = useState("liste");     // v4.454 : opportunites : liste / par mode
+  const [histTab, setHistTab] = useState("live");     // v4.425 — historique : onglet LIVE / PAPER
+  const [histSel, setHistSel] = useState({});            // v4.426 — lignes cochees pour suppression
 
   const load = useCallback(async () => {
     try { setSt(await apiCall("/api/manual/state","GET",null,token)); setErr(""); }
@@ -1175,7 +1418,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
       const p = await apiCall(`/api/manual/proposal?${q}`,"GET",null,token);
       setProp(p);
       setF(prev => ({
-        market, mode: prev?.mode || "paper", execution: prev?.execution || "now",
+        market, mode: (p.default_mode==="live" ? "live" : (prev?.mode || "paper")), execution: prev?.execution || "now", preset: p.strategy, preset0: p.strategy, be_arm_pct: p.be_arm_pct ?? "", be_lock_pct: p.be_lock_pct ?? "",
         trigger_price: prev?.trigger_price || "", trigger_time: prev?.trigger_time || "",
         expiry_hours: prev?.expiry_hours || 24, require_valid: prev?.require_valid ?? true,
         notional_usd: p.notional_usd, leverage: p.leverage,
@@ -1185,10 +1428,41 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
         tp1_on: false, tp1_pct: "", tp1_close_pct: 50, tp1_be: true,
         lock_on: !!p.free, lock_arm_pct: p.lock_arm_pct ?? p.sl_pct, lock_fraction_pct: Math.round((p.lock_fraction ?? 0.5)*100),
         trend_entry: prev?.trend_entry || "", trend_exit: prev?.trend_exit || "",
-        ...(preset ? {execution: preset.execution, trigger_price: String(Number(Number(preset.trigger_price).toPrecision(6))), sl_pct: Number(preset.sl_pct.toFixed(2)), tp_on: true, tp_pct: Number(preset.tp_pct.toFixed(2)), expiry_hours: preset.expiry_hours || 72} : {}),
+        ...(preset ? {execution: preset.execution, confirm_pct: preset.confirm_pct || 0.3, trigger_price: String(Number(Number(preset.trigger_price).toPrecision(6))), sl_pct: Number(preset.sl_pct.toFixed(2)), tp_on: true, tp_pct: Number(preset.tp_pct.toFixed(2)), expiry_hours: preset.expiry_hours || 72} : {}),
       }));
     } catch(e) { alert(e.message); setSel(null); setProp(null); setF(null); }
   };
+  // v4.455 — reglages par defaut d'un mode (Scalp, Swing Support, Libre, Accumulation...) applicables au ticket, a un ordre programme ou a une position
+  const PRESETS = [["scalp_crypto","⚡ Scalp"],["swing_support","🧱 Swing Support"],["libre","✋ Libre"],["accumulation","🎯 Accumulation"],["spot_accumulation","🌱 Spot-Accum"],["funding_contrarian","💰 Funding"],["forex","💱 Forex"]];
+  const getPreset = (key, ticker, direction, market) => apiCall(`/api/manual/preset?${new URLSearchParams({preset:key, ticker, direction, market: market||"perp"})}`,"GET",null,token);
+  const presetBar = (current, onPick) => (
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",margin:"6px 0 10px"}}>
+      <span style={{fontSize:11,color:"#94a3b8"}}>Réglages par défaut du mode :</span>
+      {PRESETS.map(([k,l])=><button key={k} style={{...MT.seg(current===k,"#c084fc"),flex:"none",padding:"4px 10px",fontSize:11}} onClick={()=>onPick(k)}>{l}</button>)}
+    </div>);
+  const applyPresetTicket = async (key) => { try {
+    const p = await getPreset(key, sel.ticker, sel.direction, f.market);
+    setF(prev => ({...prev, preset: key, notional_usd: p.notional_usd, leverage: prev.market==="spot" ? 1 : p.leverage, sl_pct: p.sl_pct, tp_on: !p.free, tp_pct: p.tp_pct,
+      ttp_on: !p.free && !p.no_ttp, ttp_arm_pct: p.ttp_arm_pct, ttp_trail_pct: p.ttp_trail_pct, tp_run: !!p.tp_run, tp_run_lock_pct: p.tp_run_lock_pct ?? 0.5, tp_run_trail_pct: p.tp_run_trail_pct ?? 0.5,
+      lock_on: !!p.free, lock_arm_pct: p.lock_arm_pct ?? p.sl_pct, lock_fraction_pct: Math.round((p.lock_fraction ?? 0.5)*100), be_arm_pct: p.be_arm_pct ?? "", be_lock_pct: p.be_lock_pct ?? "", tp1_on: false}));
+    setProp(prev => ({...prev, sl_basis: p.sl_basis, tp_basis: p.tp_basis}));
+  } catch(e) { alert(e.message); } };
+  const applyPresetSched = async (o, key) => { try {
+    const p = await getPreset(key, o.ticker, sched.direction || o.direction, o.market);
+    setSched(prev => ({...prev, preset: key, notional_usd: p.notional_usd, leverage: o.market==="spot" ? 1 : p.leverage, sl_pct: p.sl_pct, tp_pct: p.free ? "" : p.tp_pct,
+      tp_run: !!p.tp_run, tp_run_lock_pct: p.tp_run_lock_pct ?? 0.5, tp_run_trail_pct: p.tp_run_trail_pct ?? 0.5, tp1_pct: "",
+      ttp_off: !!(p.free || p.no_ttp), ttp_arm_pct: p.ttp_arm_pct ?? "", ttp_trail_pct: p.ttp_trail_pct ?? "",
+      lock_off: !p.free, lock_arm_pct: p.lock_arm_pct ?? "", lock_fraction_pct: Math.round((p.lock_fraction ?? 0.5)*100), be_arm_pct: p.be_arm_pct ?? "", be_lock_pct: p.be_lock_pct ?? ""}));
+  } catch(e) { alert(e.message); } };
+  const applyPresetEdit = async (pos, key) => { try {
+    const p = await getPreset(key, pos.ticker, pos.direction, pos.market);
+    const sg = pos.direction==="long" ? 1 : -1, en = Number(pos.entry_price);
+    const px = pct => Number((en * (1 + sg * pct / 100)).toPrecision(7));
+    setEdit(prev => ({...prev, preset: key, sl_price: px(-p.sl_pct), tp_price: p.free ? "" : px(p.tp_pct),
+      tp_run: !!p.tp_run, tp_run_lock_pct: p.tp_run_lock_pct ?? 0.5, tp_run_trail_pct: p.tp_run_trail_pct ?? 0.5,
+      ttp_off: !!(p.free || p.no_ttp), ttp_arm_pct: p.ttp_arm_pct ?? "", ttp_trail_pct: p.ttp_trail_pct ?? "",
+      lock_off: !p.free, lock_arm_pct: p.lock_arm_pct ?? "", lock_fraction_pct: Math.round((p.lock_fraction ?? 0.5)*100), be_arm_pct: p.be_arm_pct ?? "", be_lock_pct: p.be_lock_pct ?? ""}));
+  } catch(e) { alert(e.message); } };
   const choose = (opp0, preset) => { const opp = (opp0.strategy==="libre" && opp0.direction==="long" && !String(opp0.ticker).startsWith("xyz:")) ? {...opp0, strategy:"swing_support"} : opp0;   /* v4.415 : par defaut Swing Support */ setSel(opp); setF(null); loadProposal(opp, "perp", preset); setTimeout(() => { const el = document.getElementById("manual-ticket"); if (el) el.scrollIntoView({behavior:"smooth", block:"start"}); }, 700); };
   // v4.381 : prepare un ticket depuis une alerte. Opportunite encore valable -> ticket de son mode ; sinon ticket libre (Swing Support : ses propres niveaux).
   useEffect(() => {      // v4.406 : ticket prepare depuis la fenetre « resume de l'actif »
@@ -1201,8 +1475,8 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
     else { setErr(`Opportunité ${o.ticker} expirée : ticket libre préparé (stop, objectif et taille par défaut).`); choose({strategy:"libre", ticker:o.ticker, direction:o.direction}); }
   };
 
-  const oppStillValid = sel && ((sel.strategy==="libre" || sel.strategy==="swing_support") || (st && st.opportunities.some(o => o.strategy===sel.strategy && o.ticker===sel.ticker && o.direction===sel.direction)));
-  const refPrice = f && prop ? ((f.execution==="price_above"||f.execution==="price_below") && Number(f.trigger_price)>0 ? Number(f.trigger_price) : prop.price) : null;
+  const oppStillValid = sel && ((sel.strategy==="libre" || sel.strategy==="swing_support" || sel.strategy==="scalp_crypto") || (st && st.opportunities.some(o => o.strategy===sel.strategy && o.ticker===sel.ticker && o.direction===sel.direction)));
+  const refPrice = f && prop ? ((f.execution==="price_above"||f.execution==="price_below"||f.execution==="bounce_up"||f.execution==="bounce_down") && Number(f.trigger_price)>0 ? Number(f.trigger_price) : prop.price) : null;
   const isLong = sel?.direction === "long";
   const pxFromPct = (pct, side) => refPrice ? refPrice * (1 + (side==="sl" ? (isLong?-1:1) : (isLong?1:-1)) * pct/100) : null;
   const pctFromPx = (px, side) => refPrice ? Math.abs(px - refPrice) / refPrice * 100 : null;
@@ -1211,13 +1485,14 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
   const submit = async () => {
     if (!f || !sel) return;
     const body = {
-      strategy: sel.strategy, ticker: sel.ticker, direction: sel.direction, market: f.market, mode: f.mode,
+      strategy: (f.preset && f.preset!==f.preset0) ? (["scalp_crypto","swing_support","libre"].includes(f.preset) ? f.preset : "libre") : sel.strategy, ticker: sel.ticker, direction: sel.direction, market: f.market, mode: f.mode,
       execution: f.execution, notional_usd: Number(f.notional_usd), leverage: f.market==="spot" ? 1 : Number(f.leverage),
       sl_pct: Number(f.sl_pct), tp_pct: f.tp_on ? Number(f.tp_pct) : null,
       ttp_arm_pct: f.ttp_on ? Number(f.ttp_arm_pct) : null, ttp_trail_pct: f.ttp_on ? Number(f.ttp_trail_pct) : null,
       tp_run: !!(f.tp_on && f.tp_run), tp_run_lock_pct: Number(f.tp_run_lock_pct) || 0, tp_run_trail_pct: Number(f.tp_run_trail_pct) || 0.5,
       tp1_pct: (f.tp_on && f.tp1_on && Number(f.tp1_pct) > 0) ? Number(f.tp1_pct) : null, tp1_close_pct: Number(f.tp1_close_pct) || 50, tp1_be: !!f.tp1_be,
-      trigger_price: (f.execution==="price_above"||f.execution==="price_below") ? Number(f.trigger_price) : null,
+      be_arm_pct: Number(f.be_arm_pct) > 0 ? Number(f.be_arm_pct) : null, be_lock_pct: Number(f.be_lock_pct) > 0 ? Number(f.be_lock_pct) : null,
+      trigger_price: (f.execution==="price_above"||f.execution==="price_below"||f.execution==="bounce_up"||f.execution==="bounce_down") ? Number(f.trigger_price) : null, confirm_pct: (f.execution==="bounce_up"||f.execution==="bounce_down") ? (Number(f.confirm_pct)||0.3) : null,
       trigger_time: f.execution==="time" && f.trigger_time ? new Date(f.trigger_time).getTime()/1000 : null,
       expiry_hours: Number(f.expiry_hours) || 24, require_valid: !!f.require_valid, confirm_live: false,
       lock_arm_pct: f.lock_on ? Number(f.lock_arm_pct) : null, lock_fraction: f.lock_on ? Number(f.lock_fraction_pct)/100 : null,
@@ -1255,21 +1530,38 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
   const closePos = async (p) => {
     if (!window.confirm(`${p.mode==="live"?"⚠️ LIVE — ":""}Fermer maintenant ${p.direction.toUpperCase()} ${p.ticker} (PnL actuel ${fmtUsd(p.pnl)}) ?`)) return;
     try { await apiCall(`/api/manual/positions/${p.id}/close`,"POST",null,token); load(); } catch(e) { alert("Fermeture : " + e.message); } };
+  // v4.458 — ajouter a une position ouverte / la reduire (paper et live)
+  const resizePos = async (p, action) => {
+    const cur = Number(p.notional_usd||0).toFixed(2);
+    const raw = window.prompt(action==="add"
+      ? `Ajouter combien (taille en $, notionnel) à ${p.direction.toUpperCase()} ${p.ticker} ?\nTaille actuelle : ${cur} $ (levier x${p.leverage}, marge ajoutée = montant / ${p.leverage}).\nLe prix d'entrée devient la moyenne ; SL et objectif gardent leurs prix.`
+      : `Retirer combien de ${p.direction.toUpperCase()} ${p.ticker} ?\nTaille actuelle : ${cur} $. Entrez un montant en $ (ex. 30) ou un pourcentage (ex. 50%).\nLe gain ou la perte de la partie retirée est encaissé.`, action==="add" ? "" : "50%");
+    if (raw===null || String(raw).trim()==="") return;
+    const s = String(raw).trim().replace(",",".");
+    const isPct = s.endsWith("%"); const v = parseFloat(s);
+    if (!(v>0)) { alert("Montant invalide."); return; }
+    if (action==="add" && isPct) { alert("Pour ajouter, entrez un montant en $."); return; }
+    const txt = action==="add" ? `ajouter ${v.toFixed(2)} $ (taille → ${(Number(cur)+v).toFixed(2)} $)` : `retirer ${isPct? v+" %" : v.toFixed(2)+" $"} de la position`;
+    if (!window.confirm(`${p.mode==="live"?"⚠️ LIVE — ordre réel au marché sur Hyperliquid.\n":""}Confirmer : ${txt} sur ${p.direction.toUpperCase()} ${p.ticker} ?`)) return;
+    try { await apiCall(`/api/manual/positions/${p.id}/resize`,"POST",{action, notional_usd: isPct?null:v, pct: isPct?v:null, confirm_live: p.mode==="live"},token); load(); }
+    catch(e) { alert((action==="add"?"Ajout : ":"Réduction : ") + e.message); } };
   const toLocalInput = (ts) => { if(!ts) return ""; const d=new Date(ts*1000); const z=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`; };
   const openSchedEdit = (o) => { if(schedId===o.id){ setSchedId(null); return; } setSchedId(o.id); setSched({
-    execution:o.execution, trend_entry:o.trend_entry||"", trend_exit:o.trend_exit||"", require_valid:o.require_valid!==false, lock_arm_pct:o.lock_arm_pct||"", lock_fraction_pct:o.lock_fraction?Math.round(o.lock_fraction*100):"", lock_off:false, direction:o.direction, mode:o.mode, trigger_price:o.trigger_price||"", trigger_time:toLocalInput(o.trigger_time), notional_usd:o.notional_usd, leverage:o.leverage||1,
+    execution:o.execution, confirm_pct:o.confirm_pct||0.3, trend_entry:o.trend_entry||"", trend_exit:o.trend_exit||"", require_valid:o.require_valid!==false, lock_arm_pct:o.lock_arm_pct||"", lock_fraction_pct:o.lock_fraction?Math.round(o.lock_fraction*100):"", lock_off:false, direction:o.direction, mode:o.mode, stype:o.strategy_source, trigger_price:o.trigger_price||"", trigger_time:toLocalInput(o.trigger_time), notional_usd:o.notional_usd, leverage:o.leverage||1,
     sl_pct:o.sl_pct, tp_pct:o.tp_pct||"", tp1_pct:o.tp1_pct||"", tp1_close_pct:o.tp1_close_pct??50, tp1_be:o.tp1_be!==false, tp_run:!!o.tp_run, tp_run_lock_pct:o.tp_run_lock_pct??0.5, tp_run_trail_pct:o.tp_run_trail_pct??0.5,
     ttp_arm_pct:o.ttp_arm_pct||"", ttp_trail_pct:o.ttp_trail_pct||"", ttp_off:false, expiry_hours:"" }); };
-  const sRef = (o) => ((sched.execution==="price_above"||sched.execution==="price_below") && Number(sched.trigger_price)>0) ? Number(sched.trigger_price) : (Number(o.current_price)||null);
+  const sRef = (o) => ((sched.execution==="price_above"||sched.execution==="price_below"||sched.execution==="bounce_up"||sched.execution==="bounce_down") && Number(sched.trigger_price)>0) ? Number(sched.trigger_price) : (Number(o.current_price)||null);
   const sPx = (o, pct, side) => { const r=sRef(o); if(!r||!(Number(pct)>0)) return ""; const L=sched.direction==="long"; return Number((r*(1+(side==="sl"?(L?-1:1):(L?1:-1))*Number(pct)/100)).toPrecision(6)); };
   const sPct = (o, px) => { const r=sRef(o); return (r&&Number(px)>0) ? Number((Math.abs(Number(px)-r)/r*100).toFixed(3)) : ""; };
   const saveSched = async (o) => {
     const body = {};
     if (sched.direction!==o.direction) body.direction = sched.direction;
+    if (sched.stype && sched.stype!==o.strategy_source) body.strategy_source = sched.stype;
     if (sched.mode!==o.mode) { body.mode = sched.mode;
       if (sched.mode==="live") { if (!window.confirm(`⚠️ PASSER CET ORDRE EN LIVE ?\n\n${sched.direction.toUpperCase()} ${o.ticker} · ${sched.notional_usd} $ x${sched.leverage}\nL'ordre s'exécutera avec de l'argent réel au déclenchement.`)) return; body.confirm_live = true; } }
     body.execution = sched.execution;
-    if (sched.execution==="price_above"||sched.execution==="price_below") body.trigger_price = Number(sched.trigger_price);
+    if (sched.execution==="price_above"||sched.execution==="price_below"||sched.execution==="bounce_up"||sched.execution==="bounce_down") body.trigger_price = Number(sched.trigger_price);
+    if (sched.execution==="bounce_up"||sched.execution==="bounce_down") body.confirm_pct = Number(sched.confirm_pct)||0.3;
     if (sched.execution==="time" && sched.trigger_time) body.trigger_time = new Date(sched.trigger_time).getTime()/1000;
     body.trend_entry = sched.trend_entry || "";
     body.require_valid = !!sched.require_valid;
@@ -1277,6 +1569,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
     if (sched.lock_off) body.clear_lock = true; else { if (sched.lock_arm_pct) body.lock_arm_pct = Number(sched.lock_arm_pct); if (sched.lock_fraction_pct) body.lock_fraction = Number(sched.lock_fraction_pct)/100; }
     body.notional_usd = Number(sched.notional_usd); if (o.market!=="spot") body.leverage = Number(sched.leverage)||1;
     body.sl_pct = Number(sched.sl_pct);
+    if (sched.preset) { body.be_arm_pct = Number(sched.be_arm_pct) || 0; body.be_lock_pct = Number(sched.be_lock_pct) || 0.1; }
     if (sched.tp_pct==="" ) body.clear_tp = true; else body.tp_pct = Number(sched.tp_pct);
     body.tp_run = !!sched.tp_run && sched.tp_pct!==""; body.tp_run_lock_pct = Number(sched.tp_run_lock_pct)||0; body.tp_run_trail_pct = Number(sched.tp_run_trail_pct)||0.5;
     if (sched.tp1_pct==="" || sched.tp1_pct==null || sched.tp_pct==="") body.clear_tp1 = true; else { body.tp1_pct = Number(sched.tp1_pct); body.tp1_close_pct = Number(sched.tp1_close_pct) || 50; body.tp1_be = !!sched.tp1_be; }
@@ -1294,6 +1587,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
     if (edit.lock_off) body.clear_lock = true;
     else { if (edit.lock_arm_pct) body.lock_arm_pct = Number(edit.lock_arm_pct); if (edit.lock_fraction_pct) body.lock_fraction = Number(edit.lock_fraction_pct)/100; }
     if (edit.trend_exit === "") body.clear_trend_exit = true; else if (edit.trend_exit) body.trend_exit = edit.trend_exit;
+    if (edit.preset) { body.be_arm_pct = Number(edit.be_arm_pct) || 0; body.be_lock_pct = Number(edit.be_lock_pct) || 0.1; }
     try {
       const res = await apiCall(`/api/manual/positions/${p.id}`,"PUT",body,token);
       if (body.tp_run && !(res && res.tp_run)) alert("⚠️ « Laisser courir au TP » n'a pas été pris en compte : le serveur n'est pas à jour (déposer api.py et manual_trading.py de la v4.395, puis attendre le redéploiement) ou le trade n'a pas de TP.");
@@ -1302,6 +1596,17 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
 
   if (!st) return <div style={{padding:16,color:"#94a3b8"}}>{err || "Chargement..."}</div>;
 
+  const dayKey = ts => { const d=new Date(ts*1000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+  const slFinalPct = h => { const e=Number(h.entry_price), sp=Number(h.sl_price); if(!(e>0)||!(sp>0)) return null; return h.direction==="long" ? (sp-e)/e*100 : (e-sp)/e*100; };
+  const isScalpH = h => h.strategy_source==="scalp_crypto" || h.strategy_label==="Scalp" || !!h.scalp;
+  const inTab = (h,k) => (h.mode==="live"?"live":"paper")===k.split("_")[0] && (!k.endsWith("_scalp") || isScalpH(h));
+  const histIsLive = histTab.startsWith("live"), histLbl = (histIsLive?"LIVE":"PAPER")+(histTab.endsWith("_scalp")?" SCALP":"");
+  const histTabAll = st.history.filter(h=>inTab(h,histTab));
+  const histAssets = [...new Set(histTabAll.map(h=>h.ticker).filter(Boolean))].sort();
+  const histAssetOk = histAssets.includes(histAsset) ? histAsset : "";
+  const histTabRows = histAssetOk ? histTabAll.filter(h=>h.ticker===histAssetOk) : histTabAll;
+  const histRows = histTabRows.filter(h=>{ const ts=h.closed_at||h.opened_at||h.created_at; if(!ts) return !histFrom&&!histTo; const k=dayKey(ts); return (!histFrom||k>=histFrom)&&(!histTo||k<=histTo); });
+  const dayStats = (()=>{ const m={}; histTabRows.filter(h=>h.status==="closed"&&h.closed_at).forEach(h=>{ const k=dayKey(h.closed_at); const o=m[k]||(m[k]={n:0,w:0,g:0,net:0}); o.n++; if((h.pnl||0)>0) o.w++; o.g+=(h.pnl||0); o.net+=(h.pnl_net!=null?h.pnl_net:(h.pnl||0)); }); return Object.entries(m).sort((a,b)=>a[0]<b[0]?1:-1); })();
   const notional = f ? Number(f.notional_usd)||0 : 0;
   const lev = f ? (f.market==="spot" ? 1 : Number(f.leverage)||1) : 1;
   const feesEst = notional * 0.0009;
@@ -1311,6 +1616,12 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
       {err && <div style={{...MT.card,borderColor:"#7f1d1d",color:"#fca5a5"}}>⚠️ {err}</div>}
 
       <PushPanel token={token} onPrepare={prepareFromAlert}/>
+
+      <ScalpPanel token={token}/>
+
+      <ScalpDiagBox token={token}/>
+
+      <CorrBtcBox token={token}/>
 
       {/* ORDRE LIBRE — v4.343 */}
       <div style={MT.card}>
@@ -1333,7 +1644,23 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
       {/* OPPORTUNITES */}
       <div style={MT.card}>
         <div style={MT.title}>🎯 OPPORTUNITÉS DU BOT <span style={{fontWeight:400,color:"#64748b"}}>— valables tant que le bot les confirme (revues il y a moins de {st.opportunity_ttl_sec}s), dans le sens qu'il prévoit</span></div>
-        {st.opportunities.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucune opportunité valable pour le moment. Elles apparaissent dès qu'un mode du bot détecte une entrée (y compris quand il ne peut pas la prendre, faute de place).</div> : (
+        <div style={{display:"flex",gap:6,marginBottom:10}}>
+          {[["liste",`🎯 Toutes (${st.opportunities.length})`],["modes","🗂 Par mode"]].map(([k,l])=><button key={k} style={{...MT.seg(oppView===k,"#60a5fa"),flex:"none",padding:"6px 14px"}} onClick={()=>setOppView(k)}>{l}</button>)}
+        </div>
+        {oppView==="modes" && (()=>{ const ORDER=[["scalp_crypto","⚡ Scalp"],["swing_support","🧱 Swing Support"],["accumulation","🎯 Accumulation"],["spot_accumulation","🌱 Spot-Accum"],["forex","💱 Forex"],["funding_contrarian","💰 Funding"]];
+          const known=ORDER.map(x=>x[0]); const extra=[...new Set(st.opportunities.map(o=>o.strategy))].filter(s=>!known.includes(s)).map(s=>[s,s]);
+          return <div>{[...ORDER,...extra].map(([k,l])=>{ const rows=st.opportunities.filter(o=>o.strategy===k);
+            return <div key={k} style={{marginBottom:10,borderTop:"1px solid #1e2d4a",paddingTop:6}}>
+              <div style={{fontWeight:800,color:rows.length?"#e2e8f0":"#64748b",marginBottom:4}}>{l} <span style={{fontWeight:400,color:"#64748b"}}>· {rows.length} opportunité{rows.length>1?"s":""}{k==="scalp_crypto"?" · ouverture live manuelle, valable "+Math.round(((rows[0]&&rows[0].ttl_sec)||300)/60)+" min":""}</span></div>
+              {rows.length===0 ? <div style={{fontSize:11,color:"#475569"}}>Aucune pour le moment.</div> : rows.map(o=>(
+                <div key={o.strategy+o.ticker+o.direction} style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",padding:"3px 0",fontSize:12}}>
+                  <span data-tk={o.ticker} style={{fontWeight:800,minWidth:60,cursor:"pointer",textDecoration:"underline dotted"}}>{o.ticker}</span>{dirBadge(o.direction)}
+                  <span>{o.confidence!=null?`${Math.round(o.confidence)} %`:"—"}</span><span>{fmtP(o.current_price||o.price)}</span><span style={{color:"#94a3b8"}}>il y a {fmtAgo(o.age_sec)}</span>
+                  {k==="scalp_crypto" && <span style={{color:o.left_sec<60?"#fca5a5":"#fbbf24"}}>⏱ reste {Math.floor(o.left_sec/60)}:{String(o.left_sec%60).padStart(2,"0")}</span>}
+                  <button style={MT.btn("#60a5fa")} onClick={()=>choose(o)}>{k==="scalp_crypto"?"Ouvrir en live":"Préparer"}</button>
+                </div>))}
+            </div>; })}</div>; })()}
+        {oppView==="liste" && (st.opportunities.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucune opportunité valable pour le moment. Elles apparaissent dès qu'un mode du bot détecte une entrée (y compris quand il ne peut pas la prendre, faute de place).</div> : (
           <div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",width:"100%"}}>
             <thead><tr>{["Mode","Actif","Sens","Confiance","Prix","Depuis","Spot",""].map(h=><th key={h} style={MT.th}>{h}</th>)}</tr></thead>
             <tbody>{st.opportunities.map(o => {
@@ -1345,7 +1672,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
                 <td style={MT.td}>{o.spot_available?"✓":"—"}</td>
                 <td style={MT.td}><button style={MT.btn("#60a5fa")} onClick={()=>choose(o)}>Préparer</button></td>
               </tr>; })}</tbody>
-          </table></div>)}
+          </table></div>))}
       </div>
 
       {/* FORMULAIRE */}
@@ -1357,6 +1684,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
           </div>
           {!oppStillValid && <div style={{background:"#7f1d1d33",border:"1px solid #7f1d1d",borderRadius:7,padding:8,color:"#fca5a5",fontSize:12,marginBottom:10}}>⛔ Le bot ne confirme plus cette opportunité : l'ordre sera refusé.</div>}
           {prop.reasons?.length>0 && <div style={{fontSize:11,color:"#64748b",marginBottom:12}}>Raisons du bot : {prop.reasons.join(" · ")}</div>}
+          {presetBar(f.preset, applyPresetTicket)}
 
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(230px,1fr))",gap:14}}>
             <div>
@@ -1380,9 +1708,12 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
                 <option value="now">Maintenant (au marché)</option>
                 <option value="price_above">Programmée : si le prix monte à…</option>
                 <option value="price_below">Programmée : si le prix descend à…</option>
+                <option value="bounce_up">Programmée : descend à…, puis REBONDIT (ouvre à la remontée)</option>
+                <option value="bounce_down">Programmée : monte à…, puis RECULE (ouvre à la baisse)</option>
                 <option value="time">Programmée : à une heure donnée</option>
               </select>
-              {(f.execution==="price_above"||f.execution==="price_below") && <><span style={{...MT.label,marginTop:8}}>PRIX DE DÉCLENCHEMENT</span><input style={MT.input} type="number" step="any" value={f.trigger_price} onChange={e=>set("trigger_price",e.target.value)} placeholder={fmtP(prop.price)}/></>}
+              {(f.execution==="price_above"||f.execution==="price_below"||f.execution==="bounce_up"||f.execution==="bounce_down") && <><span style={{...MT.label,marginTop:8}}>{f.execution==="bounce_up"?"NIVEAU À ATTEINDRE (en descendant)":f.execution==="bounce_down"?"NIVEAU À ATTEINDRE (en montant)":"PRIX DE DÉCLENCHEMENT"}</span><input style={MT.input} type="number" step="any" value={f.trigger_price} onChange={e=>set("trigger_price",e.target.value)} placeholder={fmtP(prop.price)}/></>}
+              {(f.execution==="bounce_up"||f.execution==="bounce_down") && <><span style={{...MT.label,marginTop:8}}>{f.execution==="bounce_up"?"REBOND DE CONFIRMATION (%) depuis le point bas":"RECUL DE CONFIRMATION (%) depuis le point haut"}</span><input style={MT.input} type="number" step="0.05" min="0.05" max="10" value={f.confirm_pct??0.3} onChange={e=>set("confirm_pct",e.target.value)}/><div style={{fontSize:10,color:"#94a3b8",marginTop:3}}>{f.execution==="bounce_up"?"L'ordre ne part pas quand le niveau est touché : le bot suit le point bas, puis ouvre quand le prix a remonté de ce pourcentage (pas pendant la chute).":"L'ordre ne part pas quand le niveau est touché : le bot suit le point haut, puis ouvre quand le prix a reculé de ce pourcentage."}</div></>}
               {f.execution==="time" && <><span style={{...MT.label,marginTop:8}}>DATE ET HEURE</span><input style={MT.input} type="datetime-local" value={f.trigger_time} onChange={e=>set("trigger_time",e.target.value)}/></>}
               {f.execution!=="now" && <>
                 <span style={{...MT.label,marginTop:8}}>EXPIRATION (HEURES)</span><input style={MT.input} type="number" min="0.1" step="0.5" value={f.expiry_hours} onChange={e=>set("expiry_hours",e.target.value)}/>
@@ -1394,7 +1725,7 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
             <div>
               <span style={MT.label}>TAILLE — NOTIONNEL ($)</span>
               <input style={MT.input} type="number" min="1" step="1" value={f.notional_usd} onChange={e=>set("notional_usd",e.target.value)}/>
-              {f.market==="perp" && <><span style={{...MT.label,marginTop:8}}>LEVIER</span><input style={MT.input} type="number" min="1" max="20" step="1" value={f.leverage} onChange={e=>set("leverage",e.target.value)}/></>}
+              {f.market==="perp" && <><span style={{...MT.label,marginTop:8}}>LEVIER{prop&&prop.max_leverage ? <span style={{color:Number(f.leverage)>prop.max_leverage?"#f87171":"#64748b",fontWeight:400}}> · maximum Hyperliquid pour {sel?.ticker} : x{prop.max_leverage}{Number(f.leverage)>prop.max_leverage?" — dépassé, l'ordre sera refusé":""}</span> : null}</span><input style={MT.input} type="number" min="1" max={prop&&prop.max_leverage?prop.max_leverage:20} step="1" value={f.leverage} onChange={e=>set("leverage",e.target.value)}/></>}
               <div style={{fontSize:11,color:"#94a3b8",marginTop:6}}>Marge engagée : {(notional/lev).toFixed(2)} $ · frais estimés ≈ {feesEst.toFixed(3)} $</div>
               {f.mode==="live" && notional<10 && <div style={{fontSize:11,color:"#fca5a5",marginTop:4}}>Minimum Hyperliquid : 10 $ de notionnel.</div>}
             </div>
@@ -1482,22 +1813,25 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
             <tbody>{st.scheduled.map(o=><React.Fragment key={o.id}><tr>
               <td style={MT.td}>{o.id}</td><td data-tk={o.ticker} title="Résumé de l'actif" style={{...MT.td,fontWeight:800,cursor:"pointer",textDecoration:"underline dotted"}}>{o.ticker}</td><td style={MT.td}>{dirBadge(o.direction)}</td>
               <td style={MT.td}>{o.market.toUpperCase()}</td><td style={{...MT.td,color:o.mode==="live"?"#ef4444":"#22c55e"}}>{o.mode.toUpperCase()}</td>
-              <td style={MT.td}>{o.execution==="price_above"?`prix ≥ ${fmtP(o.trigger_price)}`:o.execution==="price_below"?`prix ≤ ${fmtP(o.trigger_price)}`:`à ${fmtTime(o.trigger_time)}`}</td>
+              <td style={MT.td}>{o.execution==="price_above"?`prix ≥ ${fmtP(o.trigger_price)}`:o.execution==="price_below"?`prix ≤ ${fmtP(o.trigger_price)}`:o.execution==="bounce_up"?`↘ ${fmtP(o.trigger_price)} puis rebond +${o.confirm_pct||0.3} %${o.bounce_ext?` · ARMÉ (bas ${fmtP(o.bounce_ext)})`:""}`:o.execution==="bounce_down"?`↗ ${fmtP(o.trigger_price)} puis recul −${o.confirm_pct||0.3} %${o.bounce_ext?` · ARMÉ (haut ${fmtP(o.bounce_ext)})`:""}`:`à ${fmtTime(o.trigger_time)}`}</td>
               <td style={MT.td}>{fmtP(o.current_price)}</td>
-              <td style={{...MT.td,color:o.opportunity_valid?"#22c55e":"#fbbf24"}}>{o.strategy_source==="libre"?"ordre libre":(o.strategy_source==="swing_support"?"Swing Support":(o.opportunity_valid?"valable":"non confirmée"))}</td>
+              <td style={{...MT.td,color:o.opportunity_valid?"#22c55e":"#fbbf24"}}>{o.strategy_source==="libre"?"ordre libre":(o.strategy_source==="swing_support"?"Swing Support":(o.strategy_source==="scalp_crypto"?"Scalp":(o.opportunity_valid?"valable":"non confirmée")))}</td>
               <td style={MT.td}>{fmtTime(o.expires_at)}</td>
               <td style={MT.td}><button style={MT.btn("#1e2d4a","#93c5fd")} onClick={()=>openSchedEdit(o)}>Modifier</button> <button style={MT.btn("#1e2d4a","#fca5a5")} onClick={()=>cancelOrder(o.id)}>Annuler</button></td>
             </tr>
             {schedId===o.id && <tr><td colSpan={10} style={{...MT.td,background:"#0b1222"}}>
+              <div>{presetBar(sched.preset, k=>applyPresetSched(o,k))}</div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",padding:"6px 0"}}>
                 <div><span style={MT.label}>SENS</span><select style={{...MT.input,width:100}} value={sched.direction} onChange={e=>setSched({...sched,direction:e.target.value})}><option value="long">LONG</option>{o.market!=="spot" && <option value="short">SHORT</option>}</select></div>
                 <div><span style={MT.label}>MODE</span><select style={{...MT.input,width:100}} value={sched.mode} onChange={e=>setSched({...sched,mode:e.target.value})}><option value="paper">PAPER</option><option value="live">🔴 LIVE</option></select></div>
-                {sched.direction!==o.direction && o.strategy_source!=="libre" && o.strategy_source!=="swing_support" && <div style={{fontSize:11,color:"#fbbf24",maxWidth:220}}>Sens inversé : l'ordre ne suit plus l'opportunité du bot, il devient un ordre libre.</div>}
-                <div><span style={MT.label}>DÉCLENCHEMENT</span><select style={{...MT.input,width:150}} value={sched.execution} onChange={e=>setSched({...sched,execution:e.target.value})}><option value="price_above">Prix ≥ (monte à)</option><option value="price_below">Prix ≤ (descend à)</option><option value="time">À une heure précise</option></select></div>
-                {(sched.execution==="price_above"||sched.execution==="price_below") && <div><span style={MT.label}>PRIX DE DÉCLENCHEMENT</span><input style={{...MT.input,width:130}} type="number" step="any" value={sched.trigger_price} onChange={e=>setSched({...sched,trigger_price:e.target.value})}/></div>}
+                <div><span style={MT.label}>TYPE</span><select style={{...MT.input,width:130}} value={sched.stype||o.strategy_source} onChange={e=>setSched({...sched,stype:e.target.value})}>{["libre","swing_support","scalp_crypto"].indexOf(o.strategy_source)<0 && <option value={o.strategy_source} disabled>{o.strategy_label||o.strategy_source} (actuel)</option>}<option value="libre">Ordre libre</option><option value="swing_support">Swing Support</option><option value="scalp_crypto">Scalp</option></select></div>
+                {sched.direction!==o.direction && o.strategy_source!=="libre" && o.strategy_source!=="swing_support" && o.strategy_source!=="scalp_crypto" && <div style={{fontSize:11,color:"#fbbf24",maxWidth:220}}>Sens inversé : l'ordre ne suit plus l'opportunité du bot, il devient un ordre libre.</div>}
+                <div><span style={MT.label}>DÉCLENCHEMENT</span><select style={{...MT.input,width:150}} value={sched.execution} onChange={e=>setSched({...sched,execution:e.target.value})}><option value="price_above">Prix ≥ (monte à)</option><option value="price_below">Prix ≤ (descend à)</option><option value="bounce_up">Descend à… puis REBONDIT</option><option value="bounce_down">Monte à… puis RECULE</option><option value="time">À une heure précise</option></select></div>
+                {(sched.execution==="price_above"||sched.execution==="price_below"||sched.execution==="bounce_up"||sched.execution==="bounce_down") && <div><span style={MT.label}>{sched.execution==="bounce_up"?"NIVEAU (en descendant)":sched.execution==="bounce_down"?"NIVEAU (en montant)":"PRIX DE DÉCLENCHEMENT"}</span><input style={{...MT.input,width:130}} type="number" step="any" value={sched.trigger_price} onChange={e=>setSched({...sched,trigger_price:e.target.value})}/></div>}
+                {(sched.execution==="bounce_up"||sched.execution==="bounce_down") && <div><span style={MT.label}>{sched.execution==="bounce_up"?"REBOND DE CONFIRMATION (%)":"RECUL DE CONFIRMATION (%)"}</span><input style={{...MT.input,width:90}} type="number" step="0.05" min="0.05" max="10" value={sched.confirm_pct} onChange={e=>setSched({...sched,confirm_pct:e.target.value})}/></div>}
                 {sched.execution==="time" && <div><span style={MT.label}>HEURE DE DÉCLENCHEMENT</span><input style={{...MT.input,width:190}} type="datetime-local" value={sched.trigger_time} onChange={e=>setSched({...sched,trigger_time:e.target.value})}/></div>}
                 <div><span style={MT.label}>TENDANCE H4 — CONDITION D'ENTRÉE</span><select style={{...MT.input,width:150}} value={sched.trend_entry} onChange={e=>setSched({...sched,trend_entry:e.target.value})}><option value="">Aucune</option><option value="haussiere">Haussière</option><option value="baissiere">Baissière</option><option value="neutre">Neutre</option></select></div>
-                {o.strategy_source!=="libre" && o.strategy_source!=="swing_support" && sched.direction===o.direction && <label style={{fontSize:11,color:"#94a3b8",display:"flex",gap:4,alignItems:"center"}}><input type="checkbox" checked={!!sched.require_valid} onChange={e=>setSched({...sched,require_valid:e.target.checked})}/>annuler si l'opportunité du bot n'est plus valable au déclenchement</label>}
+                {o.strategy_source!=="libre" && o.strategy_source!=="swing_support" && o.strategy_source!=="scalp_crypto" && sched.direction===o.direction && <label style={{fontSize:11,color:"#94a3b8",display:"flex",gap:4,alignItems:"center"}}><input type="checkbox" checked={!!sched.require_valid} onChange={e=>setSched({...sched,require_valid:e.target.checked})}/>annuler si l'opportunité du bot n'est plus valable au déclenchement</label>}
                 <div><span style={MT.label}>TAILLE ($)</span><input style={{...MT.input,width:90}} type="number" step="any" value={sched.notional_usd} onChange={e=>setSched({...sched,notional_usd:e.target.value})}/></div>
                 {o.market!=="spot" && <div><span style={MT.label}>LEVIER</span><input style={{...MT.input,width:70}} type="number" min="1" step="1" value={sched.leverage} onChange={e=>setSched({...sched,leverage:e.target.value})}/></div>}
                 <div><span style={MT.label}>SL (%)</span><input style={{...MT.input,width:80}} type="number" step="0.05" value={sched.sl_pct} onChange={e=>setSched({...sched,sl_pct:e.target.value})}/></div>
@@ -1529,13 +1863,17 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
       {/* POSITIONS MANUELLES */}
       <div style={MT.card}>
         <div style={MT.title}>📈 POSITIONS MANUELLES OUVERTES ({st.positions.length})
-          <button style={{...MT.btn("#a78bfa"),marginLeft:10,padding:"2px 8px",fontSize:10}} onClick={async()=>{ try { const r = await apiCall("/api/manual/leverage-check","GET",null,token); const L = (r.positions||[]).map(p=>`#${p.id} ${p.ticker} : suivi x${p.tracked_leverage} → x${p.tracked_leverage_after}\n  Hyperliquid : levier ${JSON.stringify(p.hl_leverage)} · marge utilisée ${p.marginUsed} · valeur ${p.positionValue} · effectif x${p.effective_leverage}${p.error?"\n  erreur : "+p.error:""}`); alert((L.join("\n")||r.note||"rien à vérifier") + `\nCompte : ${JSON.stringify(r.account)}` + (r.sync_error?"\nErreur sync : "+r.sync_error:"") + `\nAlignés : ${r.aligned}`); load && load(); } catch(e) { alert(e.message); } }}>🔍 Vérifier le levier réel</button></div>
+          <button style={{...MT.btn("#a78bfa"),marginLeft:10,padding:"2px 8px",fontSize:10}} onClick={async()=>{ try { const r = await apiCall("/api/manual/leverage-check","GET",null,token); setLevDiag(JSON.stringify(r,null,2)); load && load(); } catch(e) { setLevDiag("Erreur : "+e.message); } }}>🔍 Vérifier le levier réel</button>
+          {levDiag && <div style={{marginTop:8,fontWeight:400}}><div style={{fontSize:10,color:"#94a3b8"}}>Diagnostic (texte sélectionnable) <button style={{...MT.btn("#334155"),padding:"1px 6px",fontSize:9}} onClick={()=>{ try { navigator.clipboard.writeText(levDiag); } catch(_) {} }}>Copier</button> <button style={{...MT.btn("#334155"),padding:"1px 6px",fontSize:9}} onClick={()=>setLevDiag("")}>Fermer</button></div><pre style={{whiteSpace:"pre-wrap",wordBreak:"break-all",userSelect:"text",fontSize:10,color:"#cbd5e1",background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:8,maxHeight:260,overflow:"auto"}}>{levDiag}</pre></div>}</div>
         {st.positions.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucune position manuelle.</div> : st.positions.map(p=>(
           <div key={p.id} style={{borderBottom:"1px solid #131d33",padding:"10px 0"}}>
             <div style={{display:"flex",flexWrap:"wrap",gap:14,alignItems:"center",fontSize:12,color:"#e2e8f0"}}>
               <b>#{p.id} <span data-tk={p.ticker} title="Résumé de l'actif" style={{cursor:"pointer",textDecoration:"underline dotted"}}>{p.ticker}</span></b>{dirBadge(p.direction)}
-              <span>{p.market.toUpperCase()} · <span style={{color:p.mode==="live"?"#ef4444":"#22c55e"}}>{p.mode.toUpperCase()}</span> · x{p.leverage}{p.leverage_requested ? <span title={p.leverage_note} style={{color:"#fbbf24",marginLeft:4}}>⚠ demandé x{p.leverage_requested}</span> : null}</span>
+              <span>{p.market.toUpperCase()} · <span style={{color:p.mode==="live"?"#ef4444":"#22c55e"}}>{p.mode.toUpperCase()}</span> · x{p.leverage}</span>
+              <span style={{color:"#e2e8f0",fontWeight:700}} title="Taille de la position (valeur notionnelle) ; marge = taille / levier">Taille {Number(p.notional_usd).toFixed(2)} USDC{p.leverage>1?` (marge ${(Number(p.notional_usd)/p.leverage).toFixed(2)})`:""}</span>
+              {(p.leverage_requested || p.leverage_note) && <div title={p.leverage_note||""} style={{width:"100%",fontSize:10,color:"#fbbf24"}}>Levier disponible : x{p.leverage}</div>}
               <span>Entrée {fmtP(p.entry_price)} → {fmtP(p.current_price)}</span>
+              {p.status==="open" && p.opened_at && <span style={{color:"#fbbf24"}}>{openedTxt(p.opened_at)}</span>}
               <span style={{color:(p.pnl||0)>=0?"#22c55e":"#ef4444",fontWeight:800}}>{fmtUsd(p.pnl)} {p.move_pct!=null?`(${_roe(p.move_pct,p.leverage)>=0?"+":""}${Number(_roe(p.move_pct,p.leverage)).toFixed(2)} %)`:""}</span>
               <span style={{color:"#94a3b8"}}>SL {fmtP(p.sl_price)} · {p.tp1_price?`TP1 ${fmtP(p.tp1_price)} (${Math.round(p.tp1_close_pct||50)} %${p.tp1_be!==false?" · SL→seuil":""}) · `:""}{p.tp1_done?`TP1 ✔ encaissé ${fmtUsd(p.realized_pnl)} · `:""}{p.tp1_price?"TP2":"TP"} {p.tp_price?fmtP(p.tp_price):"—"}{p.tp_run?` (laisser courir : verrou +${p.tp_run_lock_pct}%, suiveur ${p.tp_run_trail_pct}%${p.tp_run_armed?" — ARMÉ":""})`:""} · TTP {p.ttp_arm_pct?`+${p.ttp_arm_pct}%/${p.ttp_trail_pct}%${p.armed?" (armé)":""}`:"—"} · pic +{(p.peak_pct||0).toFixed(2)} %
                 {p.lock_arm_pct ? ` · SL dynamique : ${Math.round(p.lock_fraction*100)}% du pic dès +${p.lock_arm_pct}%${p.lock_active?" (actif)":""}` : ""}
@@ -1544,10 +1882,12 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
               {p.error && <span style={{color:"#fca5a5"}}>⚠️ {p.error}</span>}
               <span style={{marginLeft:"auto",display:"flex",gap:6}}>
                 <button style={MT.btn("#1e2d4a","#93c5fd")} onClick={()=>{setEditId(editId===p.id?null:p.id);setEdit({sl_price:p.sl_price,tp_price:p.tp_price||"",tp_run:!!p.tp_run,tp_run_lock_pct:p.tp_run_lock_pct??0.5,tp_run_trail_pct:p.tp_run_trail_pct??0.5,tp1_price:p.tp1_price||"",tp1_close_pct:p.tp1_close_pct??50,tp1_be:p.tp1_be!==false,ttp_arm_pct:p.ttp_arm_pct||"",ttp_trail_pct:p.ttp_trail_pct||"",ttp_off:false,lock_arm_pct:p.lock_arm_pct||"",lock_fraction_pct:p.lock_fraction?Math.round(p.lock_fraction*100):"",lock_off:false,trend_exit:p.trend_exit||""});}}>Modifier</button>
+                {p.market==="perp"||p.mode!=="live" ? <><button style={MT.btn("#14532d","#bbf7d0")} title="Ajouter à la position" onClick={()=>resizePos(p,"add")}>＋ Taille</button><button style={MT.btn("#78350f","#fde68a")} title="Réduire la position (encaisse la partie retirée)" onClick={()=>resizePos(p,"reduce")}>－ Taille</button></> : null}
                 <button style={MT.btn("#ef4444","#fff")} onClick={()=>closePos(p)}>Fermer</button>
               </span>
             </div>
             {editId===p.id && <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:8,alignItems:"flex-end"}}>
+              <div style={{width:"100%"}}>{presetBar(edit.preset, k=>applyPresetEdit(p,k))}<div style={{fontSize:10,color:"#64748b",marginTop:-6}}>Remplit les champs ci-dessous (stop et objectif recalculés depuis le prix d'entrée) : rien n'est appliqué avant « Enregistrer ».</div></div>
               <div><span style={MT.label}>SL (prix)</span><input style={{...MT.input,width:120}} type="number" step="any" value={edit.sl_price} onChange={e=>setEdit({...edit,sl_price:e.target.value})}/></div>
               <div><span style={MT.label}>TP (prix, vide = aucun)</span><input style={{...MT.input,width:140}} type="number" step="any" value={edit.tp_price} onChange={e=>setEdit({...edit,tp_price:e.target.value})}/></div>
               <label style={{fontSize:11,color:"#94a3b8",display:"flex",gap:4,alignItems:"center"}}><input type="checkbox" checked={!!edit.tp_run} onChange={e=>{ const on=e.target.checked; setEdit(prev=>{ if(!on) return {...prev,tp_run:false}; const ref=Math.max(Number(p.current_price)||0,Number(p.entry_price)||0)||Number(p.entry_price); const refS=Math.min(Number(p.current_price)||Infinity,Number(p.entry_price)||Infinity); const dflt = p.direction==="long" ? ref*(1+RUN_DEF.tp_pct/100) : refS*(1-RUN_DEF.tp_pct/100); return {...prev, tp_run:true, tp_price:(prev.tp_price===""||prev.tp_price==null?Number(dflt.toPrecision(6)):prev.tp_price), tp_run_lock_pct:(prev.tp_run_lock_pct===""||prev.tp_run_lock_pct==null?RUN_DEF.lock:prev.tp_run_lock_pct), tp_run_trail_pct:(Number(prev.tp_run_trail_pct)>0?prev.tp_run_trail_pct:RUN_DEF.trail)}; }); }}/>laisser courir au TP</label>
@@ -1574,20 +1914,75 @@ function ManualTradingTab({ token, prep, onPrepDone }) {
 
       {/* HISTORIQUE */}
       <div style={MT.card}>
-        <div style={MT.title}>📜 HISTORIQUE MANUEL (50 derniers)</div>
-        {st.history.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucun historique.</div> : (
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:10}}>
+          <div style={{...MT.title,marginBottom:0}}>📜 HISTORIQUE MANUEL (300 derniers par mode)</div>
+          <div style={{display:"flex",gap:6}}>
+            {[["live","LIVE","#ef4444"],["live_scalp","LIVE SCALP","#f97316"],["paper","PAPER","#22c55e"],["paper_scalp","PAPER SCALP","#14b8a6"]].map(([k,l,c])=>{ const n=st.history.filter(h=>inTab(h,k)).length; return <button key={k} style={{...MT.seg(histTab===k,c),flex:"none",padding:"6px 14px"}} onClick={()=>setHistTab(k)}>{l} ({n})</button>; })}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+          {[["trades","📜 Trades"],["jours","📅 Par jour"]].map(([k,l])=><button key={k} style={{...MT.seg(histView===k,"#0ea5e9"),flex:"none",padding:"6px 14px"}} onClick={()=>setHistView(k)}>{l}</button>)}
+          <select style={{...MT.input,width:"auto",marginLeft:8}} value={histAssets.includes(histAsset)?histAsset:""} onChange={e=>setHistAsset(e.target.value)} title="Filtrer par actif">
+            <option value="">Tous les actifs</option>{histAssets.map(a=><option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        {histView==="trades" && <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8,fontSize:12,color:"#cbd5e1"}}>
+          <span>📅 Du</span><input type="date" style={{...MT.input,width:"auto"}} value={histFrom} onChange={e=>setHistFrom(e.target.value)}/>
+          <span>au</span><input type="date" style={{...MT.input,width:"auto"}} value={histTo} onChange={e=>setHistTo(e.target.value)}/>
+          <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ const k=dayKey(Date.now()/1000); setHistFrom(k); setHistTo(k); }}>Aujourd'hui</button>
+          <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ const k=dayKey(Date.now()/1000-86400); setHistFrom(k); setHistTo(k); }}>Hier</button>
+          <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>{ setHistFrom(""); setHistTo(""); }}>Tout</button>
+          <button style={MT.btn("#0ea5e9","#fff")} disabled={!histRows.length} onClick={()=>{
+            const iso=ts=>{ if(!ts) return ""; const d=new Date(ts*1000); const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; };
+            const q=v=>{ if(v===null||v===undefined) return ""; const s=String(v).replace(/"/g,'""'); return /[;"\n\r]/.test(s)?`"${s}"`:s; };
+            const num=v=>(v===null||v===undefined||v==="")?"":String(v).replace(".",",");
+            const head=["id","actif","sens","marche","mode","source","statut","ouverture","fermeture","entree","sortie","taille_usd","levier","pnl_brut","frais","funding","net","couts_reels","creux_pct","pic_gain_pct","motif","scalp_type","scalp_note","regime","flux_achats","flux_n","tend_h1","tend_15m","btc_1h_pct","er_btc_1h","er_btc_4h","er_actif_1h","ecart_moy_1h_pct","er_panier_2h","er_panier_4h","panier_2h_pct","sl_ticket_pct","sl_final_pct","atr15_pct","atr5_pct","sl_sur_atr15","sl_sur_atr5","pente_atr_1h","pente_pct_1h","pente_r2_1h","lig_sup_dist_pct","lig_sup_pente_pct","lig_res_dist_pct","lig_res_pente_pct","canal_pct","asc_er_1m","asc_range_atr","ascenseur","sl_mou_pct","sl_secours_pct","regles_asc","pente_filtre_atr","pente_filtre_r2","pente_filtre_bougies"];
+            const rows=histRows.map(h=>{ const rc=h.real_costs; return [h.id,h.ticker,h.direction,h.market,h.mode,h.strategy_label,h.status,iso(h.opened_at||h.created_at),iso(h.closed_at),num(h.entry_price),num(h.exit_price),num(h.notional_usd!=null?Number(h.notional_usd).toFixed(2):""),h.leverage??"",num(h.pnl!=null?Number(h.pnl).toFixed(4):""),rc?num(rc.fees):num(h.fees_est!=null?Number(h.fees_est).toFixed(4):""),rc?num(rc.funding):"",num(h.pnl_net!=null?Number(h.pnl_net).toFixed(4):""),rc?"oui":"estimes",num(h.trough_pct!=null?Number(h.trough_pct).toFixed(3):""),num(h.peak_pct!=null?Number(h.peak_pct).toFixed(3):""),h.reason||h.error||"",h.scalp?h.scalp.kind:"",h.scalp&&h.scalp.score!=null?Math.round(h.scalp.score):"",h.scalp&&h.scalp.regime?h.scalp.regime.label:"",...(()=>{ const x=(h.scalp&&h.scalp.ctx)||{}; return [num(x.flow_buy),x.flow_n??"",x.t1h||"",x.m15||"",num(x.btc1h)]; })(),...(()=>{ const q=(h.scalp&&h.scalp.tq)||{}; return [num(q.er_btc_1h),num(q.er_btc_4h),num(q.er_actif_1h),num(q.ecart_moy_1h_pct),num(q.basket_er_2h),num(q.basket_er_4h),num(q.basket_2h)]; })(),num(h.sl_pct!=null?Number(h.sl_pct).toFixed(3):""),num(slFinalPct(h)!=null?slFinalPct(h).toFixed(3):""),...(()=>{ const sc=h.scalp||{}, a15=Number(sc.atr15_pct), a5=Number(sc.atr5_pct), sl=Number(h.sl_pct); return [num(a15>0?a15.toFixed(3):""),num(a5>0?a5.toFixed(3):""),num(a15>0&&sl>0?(sl/a15).toFixed(2):""),num(a5>0&&sl>0?(sl/a5).toFixed(2):"")]; })(),...(()=>{ const tq=(h.scalp&&h.scalp.tq)||{}; return [num(tq.pente_atr),num(tq.pente_pct),num(tq.pente_r2),num(tq.lig_sup_dist_pct),num(tq.lig_sup_pente_pct),num(tq.lig_res_dist_pct),num(tq.lig_res_pente_pct),num(tq.canal_pct)]; })(),...(()=>{ const ac=(h.scalp&&h.scalp.asc)||{}; return [num(ac.er_1m),num(ac.range_atr),ac.ascenseur===true?"oui":(ac.ascenseur===false?"non":""),num(ac.sl_mou_pct),num(ac.sl_secours_pct),ac.regles||"",num(ac.pente_veto_atr),num(ac.pente_veto_r2),ac.pente_veto_bars??""]; })()].map(q).join(";"); });
+            const blob=new Blob(["\ufeff"+head.join(";")+"\n"+rows.join("\n")],{type:"text/csv;charset=utf-8"});
+            const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+            const tag=histFrom||histTo?`${histFrom||"debut"}_${histTo||"fin"}`:"tout";
+            a.download=`historique_${histTab}_${tag}.csv`; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },500);
+          }}>⬇ CSV</button>
+          {(histFrom||histTo) && <span style={{color:"#94a3b8"}}>{histRows.length} ligne(s) affichée(s)</span>}
+        </div>}
+        {histView==="jours" && (dayStats.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucun trade clôturé.</div> : <div style={{overflowX:"auto",marginBottom:10}}><table style={{borderCollapse:"collapse"}}>
+          <thead><tr>{["Jour","Trades","Gagnants","PnL brut","Net de frais"].map(h=><th key={h} style={MT.th}>{h}</th>)}</tr></thead>
+          <tbody>{dayStats.map(([k,o])=><tr key={k} style={{cursor:"pointer"}} title="Filtrer sur ce jour" onClick={()=>{ setHistFrom(k); setHistTo(k); setHistView("trades"); }}>
+            <td style={MT.td}>{k.slice(8)}/{k.slice(5,7)}</td><td style={MT.td}>{o.n}</td><td style={MT.td}>{o.w} ({Math.round(o.w/o.n*100)} %)</td>
+            <td style={{...MT.td,color:o.g>=0?"#22c55e":"#ef4444"}}>{fmtUsd(o.g)}</td><td style={{...MT.td,fontWeight:700,color:o.net>=0?"#22c55e":"#ef4444"}}>{fmtUsd(o.net)}</td></tr>)}</tbody>
+        </table><div style={{fontSize:10,color:"#64748b",marginTop:4}}>Jours en heure locale, d'après la date de fermeture. Cliquer sur un jour pour voir ses trades.</div></div>)}
+        {histView==="trades" && <div>
+        {(()=>{ const cl=histRows.filter(h=>h.status==="closed"); const w=cl.filter(h=>(h.pnl||0)>0).length; const pn=cl.reduce((s,h)=>s+(h.pnl||0),0); const pnn=cl.reduce((s,h)=>s+(h.pnl_net!=null?h.pnl_net:(h.pnl||0)),0);
+          return cl.length ? <div style={{fontSize:12,color:"#cbd5e1",marginBottom:8}}>{cl.length} trades clôturés · <b>{(w/cl.length*100).toFixed(0)} %</b> gagnants · PnL brut <b>{fmtUsd(pn)}</b> · <b style={{color:pnn>=0?"#22c55e":"#ef4444"}}>{fmtUsd(pnn)} net de frais</b></div> : null; })()}
+        {(()=>{ const sh=histRows.filter(h=>h.status==="closed"&&h.shadow); if(!sh.length) return null; const f=k=>sh.reduce((a,h)=>a+(h.notional_usd||0)*h.shadow[k]/100,0); const f1=k=>sh.reduce((a,h)=>a+h.shadow[k],0);
+          return <div style={{fontSize:11,color:"#c4b5fd",marginBottom:8}}>🧪 Stops fantômes Swing Support ({sh.length} trades, avant frais) : réel <b>{fmtUsd(f("actual_pct"))}</b> ({f1("actual_pct").toFixed(1)} %) · si stop 2 % <b>{fmtUsd(f("s2_pct"))}</b> ({f1("s2_pct").toFixed(1)} %) · si stop 3 % <b>{fmtUsd(f("s3_pct"))}</b> ({f1("s3_pct").toFixed(1)} %). Observation seule : les positions gardent leur stop réel.</div>; })()}
+        {histRows.length>0 && (()=>{ const ids=histRows.filter(h=>histSel[h.id]).map(h=>h.id); const all=ids.length===histRows.length;
+          return <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}}>
+            <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>setHistSel(all?{}:Object.fromEntries(histRows.map(h=>[h.id,true])))}>{all?"Tout désélectionner":"Tout sélectionner"}</button>
+            {histTab==="live" && <button style={MT.btn("#0ea5e9","#fff")} onClick={async()=>{ try { const r = await apiCall("/api/manual/history/import-hl?days=14","POST",{},token); load(); alert(r.imported?`${r.imported} trade(s) manquant(s) importé(s) depuis Hyperliquid.`:`Rien à importer : l'historique du bot correspond à Hyperliquid (${r.cycles} trades comparés sur 14 jours).`); } catch(e) { alert(e.message); } }}>🔄 Comparer à Hyperliquid</button>}
+            <button style={{...MT.btn("#ef4444","#fff"),opacity:ids.length?1:0.4}} disabled={!ids.length} onClick={async()=>{
+              if(!window.confirm(`Supprimer définitivement ${ids.length} élément(s) de l'historique ${histLbl} ?\n\nCette action est irréversible. Elle retire ces lignes de l'historique manuel (et des statistiques du Scalp). Les positions ouvertes ne sont pas touchées.`)) return;
+              try { const r = await apiCall("/api/manual/history/delete","POST",{ids},token); setHistSel({}); load(); alert(`${r.deleted} élément(s) supprimé(s).`); } catch(e) { alert(e.message); } }}>🗑 Supprimer la sélection ({ids.length})</button>
+          </div>; })()}
+        {histRows.length===0 ? <div style={{fontSize:12,color:"#64748b"}}>Aucun historique {histLbl}.</div> : (
           <div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",width:"100%"}}>
-            <thead><tr>{["#","Actif","Sens","Marché","Mode","Source","Ouverture","Fermeture","Entrée","Sortie","PnL","Statut / motif"].map(h=><th key={h} style={MT.th}>{h}</th>)}</tr></thead>
-            <tbody>{st.history.map(h=><tr key={h.id}>
+            <thead><tr><th style={MT.th}></th>{["#","Actif","Sens","Marché","Mode","Source","Ouverture","Fermeture","Entrée","Sortie","PnL","Statut / motif"].map(h=><th key={h} style={MT.th}>{h}</th>)}</tr></thead>
+            <tbody>{histRows.map(h=><tr key={h.id}>
+              <td style={MT.td}><input type="checkbox" checked={!!histSel[h.id]} onChange={e=>setHistSel({...histSel,[h.id]:e.target.checked})}/></td>
               <td style={MT.td}>{h.id}</td><td data-tk={h.ticker} title="Résumé de l'actif" style={{...MT.td,fontWeight:800,cursor:"pointer",textDecoration:"underline dotted"}}>{h.ticker}</td><td style={MT.td}>{dirBadge(h.direction)}</td>
               <td style={MT.td}>{(h.market||"").toUpperCase()}</td><td style={{...MT.td,color:h.mode==="live"?"#ef4444":"#22c55e"}}>{(h.mode||"").toUpperCase()}</td>
               <td style={MT.td}>{h.strategy_label}</td><td style={MT.td}>{fmtTime(h.opened_at||h.created_at)}</td><td style={MT.td}>{fmtTime(h.closed_at)}</td>
               <td style={MT.td}>{fmtP(h.entry_price)}</td><td style={MT.td}>{fmtP(h.exit_price)}</td>
-              <td style={{...MT.td,color:(h.pnl||0)>=0?"#22c55e":"#ef4444"}}>{h.pnl!=null?fmtUsd(h.pnl):"—"}</td>
+              <td style={{...MT.td,color:(h.pnl||0)>=0?"#22c55e":"#ef4444"}}>{h.pnl!=null?fmtUsd(h.pnl):"—"}{h.pnl_net!=null && h.status==="closed" ? <div style={{fontSize:10,color:"#94a3b8"}} title={h.real_costs?`frais réels ${h.real_costs.fees} $ · funding ${h.real_costs.funding} $`:"frais estimés (0,09 %)"}>net {fmtUsd(h.pnl_net)}{h.real_costs?` ✓ (frais ${Number(h.real_costs.fees).toFixed(3)} · funding ${Number(h.real_costs.funding)>=0?"+":""}${Number(h.real_costs.funding).toFixed(3)})`:" (est.)"}</div> : null}</td>
               <td style={{...MT.td,color:"#94a3b8"}}>{h.status==="closed"?h.reason:`${h.status==="cancelled"?"annulé":h.status==="expired"?"expiré":"échec"} — ${h.reason||h.error||""}`}
+                {h.shadow && <div style={{fontSize:10,color:"#a78bfa"}}>🧪 stop fantôme : réel {shp(h.shadow.actual_pct)} % · avec stop 2 % → {shp(h.shadow.s2_pct)} % · avec stop 3 % → {shp(h.shadow.s3_pct)} % · plus bas atteint {shp(h.shadow.trough_pct)} %</div>}
+                {h.status==="closed" && h.sl_pct!=null && <div style={{fontSize:10,color:"#94a3b8"}}>🛑 SL du ticket {Number(h.sl_pct).toFixed(2)} %{slFinalPct(h)!=null?` · SL à la sortie ${slFinalPct(h)>=0?"+":""}${slFinalPct(h).toFixed(2)} % du prix d'entrée${Math.abs(slFinalPct(h)+Number(h.sl_pct))>0.05?" (modifié depuis l'ouverture)":""}`:""}</div>}
+                {h.status==="closed" && h.peak_pct!=null && <div style={{fontSize:10,color:"#fbbf24"}}>🏔️ Pic {h.trough_pct!=null?`${Number(h.trough_pct).toFixed(2)} % à ${Number(h.peak_pct).toFixed(2)} %`:`jusqu'à +${Number(h.peak_pct).toFixed(2)} %`} <span style={{color:"#64748b"}}>(du plus bas au plus haut, mouvement du prix{h.trough_pct==null?" · plus bas non enregistré avant v4.457":""})</span></div>}
+                {h.scalp && <div style={{fontSize:10,color:"#93c5fd"}}>⚡ {h.scalp.kind}{h.scalp.counter?" · CONTRE-TENDANCE":""}{h.scalp.regime&&h.scalp.regime.label&&h.scalp.regime.label!=="inconnu"?` · ${h.scalp.regime.label==="correle"?"corrélé":"dispersé"} ${h.scalp.regime.corr!=null?Number(h.scalp.regime.corr).toFixed(2):""} · panier ${Math.round((((h.side||h.direction)==="long"?h.scalp.regime.up:h.scalp.regime.down)||0)*100)} % dans le sens · grappe ${h.scalp.regime.cluster??0}${h.scalp.regime.peers!=null?` · pairs ${h.scalp.regime.peers}`:""}`:""} · note {Math.round(h.scalp.score)} · pic de gain {(h.peak_pct||0).toFixed(2)} % (objectif {h.tp_pct} %){h.scalp.reasons&&h.scalp.reasons[0]?` · ${h.scalp.reasons[0]}`:""}</div>}
                 {h.status==="closed" && h.mode==="live" && <div style={{fontSize:10,color:h.exit_source==="hyperliquid"?"#86efac":"#fbbf24"}}>{h.entry_verified?"ouverture constatée sur Hyperliquid · ":""}sortie {h.exit_source==="hyperliquid"?"confirmée par Hyperliquid":"estimée par le bot (remplissage Hyperliquid introuvable)"}</div>}</td>
             </tr>)}</tbody>
           </table></div>)}
+        </div>}
       </div>
     </div>
   );
@@ -1647,6 +2042,9 @@ function App() {
   const [supSt, setSupSt] = useState(null);
   const [supStats, setSupStats] = useState(null);
   const [supErr, setSupErr] = useState(null);
+  const [supSyms, setSupSyms] = useState(null);     // v4.452 : actifs evalues par Swing Support {symbols, available}
+  const [supSymsEdit, setSupSymsEdit] = useState(null);
+  const loadSupSyms = async () => { try { const r = await apiCall("/api/supsw/symbols","GET",null,token); setSupSyms(r); setSupSymsEdit(r.symbols); } catch(e) { alert("Erreur : "+e.message); } };
   const loadSupSt = useCallback(async () => {
     try { setSupSt(await apiCall("/api/supsw/status","GET",null,token)); setSupErr(null); }
     catch(e) { setSupErr((e && e.message) ? e.message : String(e)); }
@@ -3383,6 +3781,7 @@ Confirmer ?`
                 style={{background:"#3d2e0522",border:"1px solid #fbbf24",borderRadius:6,padding:"7px 14px",color:"#fbbf24",fontSize:11,cursor:"pointer",fontWeight:700}}>
                 {entryDiagLoading?"Chargement...":"🔄 Diagnostiquer maintenant"}
               </button>
+              {entryDiag && <button onClick={()=>setEntryDiag(null)} style={{background:"#0f1629",border:"1px solid #334155",borderRadius:6,padding:"7px 14px",color:"#cbd5e1",fontSize:11,cursor:"pointer",fontWeight:700,marginLeft:6}}>🙈 Masquer</button>}
             </div>
             {!entryDiag ? (
               <div style={{fontSize:11,color:"#94a3b8"}}>Cliquez pour voir, pour CHAQUE actif, l'obstacle précis (s'il y en a un) qui bloque un LONG ou un SHORT en ce moment précis — capturé à chaque cycle côté bot, toujours à jour au moment du clic.</div>
@@ -3394,7 +3793,7 @@ Confirmer ?`
                 </label>
                 <div style={{fontSize:10,color:"#94a3b8",marginBottom:8}}>Instantané au moment du clic — "aucun obstacle" veut dire que le signal de base n'est simplement pas encore réuni (RSI/EMA/tendance), pas qu'un trade est imminent.</div>
                 <textarea readOnly value={(entryDiag.market_regime?`🧭 RÉGIME DE MARCHÉ : ${(entryDiag.market_regime.regime||"?").toUpperCase()} — ${entryDiag.market_regime.detail||""}${entryDiag.market_regime.filter_enabled?" (filtre legacy actif : sans effet sur le top-down)":" (aucun blocage global : chaque mode juge la tendance de son actif)"}\n\n`:"")+entryDiag.results.filter(r=>!watchOnly||WATCHLIST.includes(String(r.ticker).split("/")[0])).map(r=>
-                  `${r.ticker}${r.has_position?" [position ouverte]":""} (il y a ${r.snapshot_age_sec!=null?r.snapshot_age_sec.toFixed(0)+"s":"?"})\n  💱 FOREX LONG  : ${r.blocker_long||"aucun obstacle particulier"}\n  💱 FOREX SHORT : ${r.blocker_short||"aucun obstacle particulier"}${r.scalp?`\n  ⚡ SCALP : ${r.scalp}`:""}${r.fxswing?`\n  🌊 SWING FX : ${r.fxswing}`:""}${r.supsw?`\n  🧱 SWING SUPPORT : ${r.supsw}`:""}${r.trendf?`\n  📈 TENDANCE : ${r.trendf}`:""}\n  🎯 ACCUMULATION : ${r.blocker_accumulation||"aucun obstacle particulier"}\n  🌱 SPOT-ACCUM : ${r.blocker_spot_accum||"aucun obstacle particulier"}${r.mtf?`\n  📊 TOP-DOWN : ${r.mtf}`:""}${r.blocker_funding?`\n  💰 FUNDING : ${r.blocker_funding}`:""}${r.situation?`\n  🧭 Situation : fond ${r.situation.fond} (1h) · court terme ${r.situation.court||"?"} (5 min) → ${r.situation.name.toUpperCase()}`:""}\n  📐 Niveaux : ${r.levels&&r.levels.trend_ema!=null?`${(r.levels.trend_ema_source||"EMA")} = ${Number(r.levels.trend_ema).toPrecision(6)} (prix ${r.levels.price!=null?(r.levels.price>r.levels.trend_ema?"au-dessus":"en dessous"):"?"})`:"EMA ?"} · support ${r.levels&&r.levels.support!=null?Number(r.levels.support).toPrecision(6):"?"} · résistance ${r.levels&&r.levels.resistance!=null?Number(r.levels.resistance).toPrecision(6):"?"}${r.levels&&r.levels.sr_source?` (${r.levels.sr_source})`:""}${r.levels&&(r.levels.support_1h||r.levels.resistance_1h)?` · structure 1h : support ${r.levels.support_1h!=null?Number(r.levels.support_1h).toPrecision(6):"?"} / résistance ${r.levels.resistance_1h!=null?Number(r.levels.resistance_1h).toPrecision(6):"?"}`:""}\n  📉 Qualité du marché : volatilité ${r.quality&&r.quality.vol_ratio!=null?r.quality.vol_ratio.toFixed(2)+"x":"?"} · activité ${r.quality&&r.quality.activity_ratio!=null?r.quality.activity_ratio.toFixed(2)+"x":"?"} son habitude · spread ${r.quality&&r.quality.spread_pct!=null?r.quality.spread_pct.toFixed(3)+" %":"?"}\n  📊 Flux transactions : ${r.trade_flow_pressure!=null?r.trade_flow_pressure.toFixed(2):"pas encore de donnees"}${r.trend_persistence_confirmed?" · pression soutenue CONFIRMEE":""}`
+                  `${r.ticker}${r.has_position?" [position ouverte]":""} (il y a ${r.snapshot_age_sec!=null?r.snapshot_age_sec.toFixed(0)+"s":"?"})\n  💱 FOREX LONG  : ${r.blocker_long||"aucun obstacle particulier"}\n  💱 FOREX SHORT : ${r.blocker_short||"aucun obstacle particulier"}${r.scalpc?`\n  ⚡ SCALP CRYPTO : ${r.scalpc}`:""}${r.scalp?`\n  ⚡ SCALP FOREX : ${r.scalp}`:""}${r.fxswing?`\n  🌊 SWING FX : ${r.fxswing}`:""}${r.supsw?`\n  🧱 SWING SUPPORT : ${r.supsw}`:""}${r.trendf?`\n  📈 TENDANCE : ${r.trendf}`:""}\n  🎯 ACCUMULATION : ${r.blocker_accumulation||"aucun obstacle particulier"}\n  🌱 SPOT-ACCUM : ${r.blocker_spot_accum||"aucun obstacle particulier"}${r.mtf?`\n  📊 TOP-DOWN : ${r.mtf}`:""}${r.blocker_funding?`\n  💰 FUNDING : ${r.blocker_funding}`:""}${r.situation?`\n  🧭 Situation : fond ${r.situation.fond} (1h) · court terme ${r.situation.court||"?"} (5 min) → ${r.situation.name.toUpperCase()}`:""}\n  📐 Niveaux : ${r.levels&&r.levels.trend_ema!=null?`${(r.levels.trend_ema_source||"EMA")} = ${Number(r.levels.trend_ema).toPrecision(6)} (prix ${r.levels.price!=null?(r.levels.price>r.levels.trend_ema?"au-dessus":"en dessous"):"?"})`:"EMA ?"} · support ${r.levels&&r.levels.support!=null?Number(r.levels.support).toPrecision(6):"?"} · résistance ${r.levels&&r.levels.resistance!=null?Number(r.levels.resistance).toPrecision(6):"?"}${r.levels&&r.levels.sr_source?` (${r.levels.sr_source})`:""}${r.levels&&(r.levels.support_1h||r.levels.resistance_1h)?` · structure 1h : support ${r.levels.support_1h!=null?Number(r.levels.support_1h).toPrecision(6):"?"} / résistance ${r.levels.resistance_1h!=null?Number(r.levels.resistance_1h).toPrecision(6):"?"}`:""}\n  📉 Qualité du marché : volatilité ${r.quality&&r.quality.vol_ratio!=null?r.quality.vol_ratio.toFixed(2)+"x":"?"} · activité ${r.quality&&r.quality.activity_ratio!=null?r.quality.activity_ratio.toFixed(2)+"x":"?"} son habitude · spread ${r.quality&&r.quality.spread_pct!=null?r.quality.spread_pct.toFixed(3)+" %":"?"}\n  📊 Flux transactions : ${r.trade_flow_pressure!=null?r.trade_flow_pressure.toFixed(2):"pas encore de donnees"}${r.trend_persistence_confirmed?" · pression soutenue CONFIRMEE":""}`
                 ).join("\n\n")}
                   style={{width:"100%",height:320,background:"#0a0e1a",border:"1px solid #1e2d4a",borderRadius:6,padding:10,color:"#e2e8f0",fontFamily:"monospace",fontSize:11,resize:"vertical"}}
                   onClick={e=>e.target.select()}
@@ -4221,6 +4620,7 @@ Confirmer ?`
                         <span style={{color:a.open?"#86efac":(a.evaluated?"#cbd5e1":"#64748b")}}>{a.open?"tendance ouverte":(a.evaluated?(a.blocker||"entrée évaluée"):"pas encore évalué")}</span>
                       </div>))}
                     <div style={{color:"#64748b",marginTop:4}}>Réglages : risque {P.settings.TRENDF_RISK_PCT} % du capital · notionnel max {P.settings.TRENDF_MAX_NOTIONAL_USD} $ · levier {P.settings.TRENDF_LEVERAGE} · {P.settings.TRENDF_MAX_TRADES} positions au plus · stop {P.settings.TRENDF_STOP_ATR} x ATR H4 ({P.settings.TRENDF_MIN_STOP_PCT}-{P.settings.TRENDF_MAX_STOP_PCT} %) · entrée {P.settings.TRENDF_ENTRY_MODE===1?`sur cassure des ${P.settings.TRENDF_BREAK_BARS} dernières heures`:"dès la tendance confirmée"} · flux min {P.settings.TRENDF_MIN_FLOW} · shorts {P.settings.TRENDF_ALLOW_SHORT?"autorisés":"interdits"} · sortie H4 {P.settings.TRENDF_EXIT_H4_REVERSE?"oui":"non"} · durée max {P.settings.TRENDF_MAX_HOLD_DAYS} j (réglages avancés).</div>
+                    <div style={{color:"#64748b",marginTop:2}}>Entrée : Daily + H4{Number(P.settings.TRENDF_REQUIRE_H1)?" + H1":""} alignés · actifs Swing Support {Number(P.settings.TRENDF_IGNORE_RESERVE)?"autorisés":"exclus"} · Sortie : Daily perdue · H4 {({0:"ignorée",1:"retournée",2:"plus dans le sens"})[Number(P.settings.TRENDF_EXIT_H4_REVERSE)]} · H1 {({0:"ignorée",1:"retournée",2:"plus dans le sens"})[Number(P.settings.TRENDF_EXIT_H1||0)]} · gain acquis {Number(P.settings.TRENDF_LOCK_ARM_PCT)>0?`protégé dès ${P.settings.TRENDF_LOCK_ARM_PCT} % (sortie si ${P.settings.TRENDF_LOCK_GIVEBACK_PCT} % du pic rendu)`:"non protégé"}</div>
                     {P.perf.n>0 && <div style={{marginTop:4}}><b>{P.perf.n}</b> trade(s) fermé(s), {P.perf.win_rate}% gagnants, <b style={{color:P.perf.net>=0?"#86efac":"#fca5a5"}}>{sg(P.perf.net)} USDC net</b> (brut {sg(P.perf.gross)} − frais {f(P.perf.fees)}){P.perf.n<30 && <span style={{color:"#fbbf24"}}> · moins de 30 trades : à ne pas interpréter.</span>}</div>}
                     {P.open.map((o,i)=>(
                       <div key={i} style={{background:"#07140d",border:"1px solid #14532d",borderRadius:8,padding:8,marginTop:5,display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
@@ -4356,6 +4756,22 @@ Confirmer ?`
                       <div style={{color:"#94a3b8",marginTop:4}}>Crypto (BTC, ETH, HYPE, TAO, SUI). Un LONG près d'un support Daily en tendance haussière, avec un <b>stop large</b> (simple filet) et un <b>objectif proche</b>. La vraie protection est la <b>sortie anticipée</b> quand le support casse. Chaque signal (pris ou non) est journalisé avec le contexte BTC / Weekly / funding / flux, puis mesuré à 24 h et 72 h ; chaque sortie anticipée est suivie 1 h, 4 h et 24 h pour savoir si elle était <b>trop tôt</b>.</div>
                       {!P ? (supErr ? <div style={{color:"#fca5a5",marginTop:6}}>Suivi du Swing Support indisponible : <b>{supErr}</b>. Si « Not Found », le serveur n'est pas à jour (api.py, db.py, bot_engine.py, swing_support.py).</div> : <div style={{color:"#94a3b8",marginTop:6}}>Chargement…</div>) : (
                         <div style={{marginTop:6}}>
+                          <div style={{margin:"6px 0"}}>
+                            {!supSyms ? <button style={MT.btn("#334155","#e2e8f0")} onClick={loadSupSyms}>⚙️ Choisir les actifs surveillés ({(P.assets||[]).length})</button> : (
+                              <div style={{background:"#0f172a",border:"1px solid #1e2d4a",borderRadius:8,padding:8}}>
+                                <div style={{marginBottom:6,color:"#cbd5e1"}}>Actifs évalués par Swing Support ({(supSymsEdit||[]).length}/{supSyms.available.length}) :</div>
+                                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                                  {supSyms.available.map(s=>{ const on=(supSymsEdit||[]).includes(s); return <button key={s} style={{...MT.seg(on,"#c084fc"),flex:"none",padding:"3px 9px",fontSize:11}} onClick={()=>setSupSymsEdit(on?supSymsEdit.filter(x=>x!==s):[...supSymsEdit,s])}>{s}</button>; })}
+                                </div>
+                                <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
+                                  <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>setSupSymsEdit(supSyms.available)}>Tous</button>
+                                  <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>setSupSymsEdit(["BTC","ETH","HYPE","TAO","SUI"].filter(s=>supSyms.available.includes(s)))}>Par défaut (5)</button>
+                                  <button style={MT.btn("#0ea5e9","#fff")} onClick={async()=>{ try{ await apiCall("/api/supsw/symbols","PUT",{symbols:supSymsEdit},token); setSupSyms(null); await loadSupSt(); alert("Actifs enregistrés. Ils sont évalués au prochain cycle."); }catch(e){ alert("Erreur : "+e.message); } }}>Enregistrer</button>
+                                  <button style={MT.btn("#334155","#e2e8f0")} onClick={()=>setSupSyms(null)}>Annuler</button>
+                                </div>
+                                <div style={{color:"#64748b",marginTop:6,fontSize:10}}>Ces actifs sont aussi retirés de Tendance / Accumulation tant que « Actifs réservés » est à 1. L'entrée automatique de Swing Support s'applique à tous les actifs cochés.</div>
+                              </div>)}
+                          </div>
                           {P.enabled && (P.assets||[]).map(a=>(
                             <div key={a.asset} style={{display:"flex",gap:8,flexWrap:"wrap",padding:"2px 0",borderTop:"1px solid #1e2d4a"}}>
                               <b style={{color:"#e2e8f0",minWidth:60}}>{a.asset}</b>

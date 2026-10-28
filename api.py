@@ -1075,6 +1075,7 @@ ADVANCED_SETTINGS = {
     "SUPSW_RECENT_HOURS":       {"label": "Swing Support · DERNIÈRES HEURES — fenêtre examinée en heures", "default": 4},
     "SUPSW_RECENT_ASSET_MIN_PCT": {"label": "Swing Support · DERNIÈRES HEURES — refus si l'actif a perdu plus de N % sur la fenêtre", "default": 1.5},
     "SUPSW_RECENT_BTC_MIN_PCT": {"label": "Swing Support · DERNIÈRES HEURES — refus si BTC a perdu plus de N % sur la fenêtre", "default": 0.5},
+    "SUPSW_MAX_TOUCHES":        {"label": "Swing Support · ZONE — pas d'entrée si la zone de support a été testée plus de N fois (0 = aucune limite ; les zones très testées ont perdu davantage)", "default": 0},
     "SUPSW_RES_FILTER_ON":      {"label": "Swing Support · RÉSISTANCE — 1 = pas d'entrée si une résistance Daily est trop proche au-dessus du prix (retournement probable)", "default": 1},
     "SUPSW_RES_MIN_PCT":        {"label": "Swing Support · RÉSISTANCE — distance minimale en % du prix entre le prix et le bas de la résistance Daily pour accepter l'entrée", "default": 3.0},
     "SUPSW_RIDE_ON":            {"label": "Swing Support · VISER LA RÉSISTANCE — 1 = l'objectif est la résistance Daily moins un tampon (au lieu de l'objectif fixe) ; le gain est verrouillé dès l'objectif fixe", "default": 1},
@@ -1115,7 +1116,13 @@ ADVANCED_SETTINGS = {
     "TRENDF_MAX_SPREAD_PCT":    {"label": "Tendance - spread maximal (%)", "default": 0.05},
     "TRENDF_MAX_HOLD_DAYS":     {"label": "Tendance - duree maximale d une position (jours)", "default": 30},
     "TRENDF_COOLDOWN_SEC":      {"label": "Tendance - pause sur un actif apres une sortie (secondes)", "default": 14400},
-    "TRENDF_EXIT_H4_REVERSE":   {"label": "Tendance - sortir aussi quand la tendance H4 se retourne (1 = oui ; 0 = seulement Daily perdue / stop)", "default": 1},
+    "TRENDF_EXIT_H4_REVERSE":   {"label": "Tendance - sortie sur H4 : 1 = H4 franchement retournee ; 2 = des que H4 n est plus dans le sens (neutre inclus) ; 0 = ignoree (seulement Daily perdue / stop)", "default": 1},
+    "TRENDF_SCALP_UNIVERSE":    {"label": "Tendance - 1 = évalue aussi les cryptos de l'univers du Scalp (suivies par le bot), en plus de la liste habituelle", "default": 0},
+    "TRENDF_IGNORE_RESERVE":    {"label": "Tendance - 1 = peut aussi trader les actifs reserves a Swing Support (BTC, ETH, HYPE, TAO, SUI) ; un actif deja ouvert par un autre mode reste exclu", "default": 0},
+    "TRENDF_REQUIRE_H1":        {"label": "Tendance - 1 = entree seulement si la tendance H1 (EMA 50/200) est aussi dans le sens (en plus de Daily et H4)", "default": 0},
+    "TRENDF_EXIT_H1":           {"label": "Tendance - sortie sur H1 : 1 = H1 franchement retournee ; 2 = des que H1 n est plus dans le sens (neutre inclus) ; 0 = ignoree", "default": 0},
+    "TRENDF_LOCK_ARM_PCT":      {"label": "Tendance - gain acquis : une fois le gain maximal atteint N % du prix, on le protege (0 = desactive)", "default": 0.0},
+    "TRENDF_LOCK_GIVEBACK_PCT": {"label": "Tendance - gain acquis : on sort si le gain retombe de N % de son maximum (ex. 35)", "default": 35.0},
     # v4.353 — scalp Forex (sous-mode du Forex, PAPER uniquement)
     "FOREX_SCALP_ENABLED":         {"label": "Scalp Forex - active (1) ou eteint (0). PAPER uniquement ; le mode Forex n est pas modifie", "default": 0},
     "FOREX_SCALP_NOTIONAL_USD":    {"label": "Scalp Forex - notionnel par trade ($, paper)", "default": 30.0},
@@ -1351,7 +1358,7 @@ def get_advanced_config(email: str = Depends(require_user)):
 # (periodes, cycles, compteurs, heures) sont desormais convertis en int et
 # bornes ; None n est accepte que pour les reglages "herite" (defaut None).
 _RSI_FLOAT_THRESHOLDS = {"RSI_OVERSOLD", "RSI_OVERBOUGHT", "RSI_EXTREME_LOW", "RSI_EXTREME_HIGH"}
-_ZERO_ALLOWED_INT_KEYS = {"FUNDING_EXCLUDE_WEAK_COINS","FUNDING_STALE_ENABLED","FOREX_STALE_ENABLED","MANUAL_DEFAULT_SWING","FOREX_SCALP_STALE_ENABLED","FOREX_SCALP_EARLYFAIL_ENABLED","FXSWING_ENABLED","SUPSW_LEVER_SCALE","SUPSW_RESERVE_ASSETS","TRENDF_ENABLED","TRENDF_ALLOW_SHORT","TRENDF_ENTRY_MODE","TRENDF_EXIT_H4_REVERSE","TRENDF_COOLDOWN_SEC","SUPSW_ENABLED","SUPSW_EXIT_REQUIRE_H4_END","SUPSW_EXIT_LEVEL","FEES_IN_STATS","FOREX_SCALP_ENABLED", "FOREX_SCALP_REQUIRE_1M", "FOREX_SCALP_COOLDOWN_SEC","MTF_USE_H4_LOWER", "MTF_SIGNAL_MAX_AGE_SEC", "MTF_DOUBLE_PATTERN_ENABLED", "MTF_TREND_PATH_ENABLED", "MTF_REQUIRE_FLOW_CONFIRM", "MTF_REQUIRE_REAL_TARGET_ZONE", "MTF_REQUIRE_H1_STRUCTURE", "SPOT_ACCUM_TREND_MODE", "ACCUMULATION_TREND_MODE",
+_ZERO_ALLOWED_INT_KEYS = {"SUPSW_TRAIL_ON","SUPSW_REENTRY_ON","SUPSW_BTC_GATE_ON","SUPSW_RECENT_ON","SUPSW_RES_FILTER_ON","SUPSW_RIDE_ON","SUPSW_BTC_H4_MODE","SUPSW_MAX_TOUCHES","FUNDING_EXCLUDE_WEAK_COINS","FUNDING_STALE_ENABLED","FOREX_STALE_ENABLED","MANUAL_DEFAULT_SWING","FOREX_SCALP_STALE_ENABLED","FOREX_SCALP_EARLYFAIL_ENABLED","FXSWING_ENABLED","SUPSW_LEVER_SCALE","SUPSW_RESERVE_ASSETS","TRENDF_ENABLED","TRENDF_ALLOW_SHORT","TRENDF_ENTRY_MODE","TRENDF_EXIT_H4_REVERSE","TRENDF_SCALP_UNIVERSE","TRENDF_IGNORE_RESERVE","TRENDF_REQUIRE_H1","TRENDF_EXIT_H1","TRENDF_COOLDOWN_SEC","SUPSW_ENABLED","SUPSW_EXIT_REQUIRE_H4_END","SUPSW_EXIT_LEVEL","FEES_IN_STATS","FOREX_SCALP_ENABLED", "FOREX_SCALP_REQUIRE_1M", "FOREX_SCALP_COOLDOWN_SEC","MTF_USE_H4_LOWER", "MTF_SIGNAL_MAX_AGE_SEC", "MTF_DOUBLE_PATTERN_ENABLED", "MTF_TREND_PATH_ENABLED", "MTF_REQUIRE_FLOW_CONFIRM", "MTF_REQUIRE_REAL_TARGET_ZONE", "MTF_REQUIRE_H1_STRUCTURE", "SPOT_ACCUM_TREND_MODE", "ACCUMULATION_TREND_MODE",
                           "CRYPTO_OFFPEAK_HOUR_START_UTC", "CRYPTO_OFFPEAK_HOUR_END_UTC",
                           "CPI_BLACKOUT_BEFORE_MIN", "CPI_BLACKOUT_AFTER_MIN",
                           "ACCUMULATION_LOSS_COOLDOWN_SEC", "SPOT_ACCUM_LOSS_COOLDOWN_SEC", "FUNDING_LOSS_COOLDOWN_SEC",
@@ -1438,12 +1445,20 @@ def _coerce_advanced_value(key: str, value):
     if key == "SUPSW_MIN_SL_PCT" and not 0.3 <= value <= 10:
         return False, "entre 0,3 et 10 %"
     if key in ("SUPSW_TP_LEV1", "SUPSW_TP_LEV2", "SUPSW_TP_LEV3",
-               "SUPSW_TRAIL_ON", "SUPSW_TRAIL_LOCK_PCT", "SUPSW_TRAIL_PCT", "SUPSW_REENTRY_ON", "SUPSW_REENTRY_HOURS", "SUPSW_REENTRY_TOL_PCT",
-               "SUPSW_BTC_GATE_ON", "SUPSW_BTC24_MIN", "SUPSW_BTC_H4_MODE", "SUPSW_RECENT_ON", "SUPSW_RECENT_HOURS", "SUPSW_RECENT_ASSET_MIN_PCT", "SUPSW_RECENT_BTC_MIN_PCT",
-               "SUPSW_RES_FILTER_ON", "SUPSW_RES_MIN_PCT", "SUPSW_RIDE_ON", "SUPSW_RES_BUFFER_PCT", "SUPSW_RIDE_MAX_PCT", "SUPSW_RIDE_TRAIL_PCT") and not 0.3 <= value <= 15:
+               "SUPSW_TRAIL_PCT", "SUPSW_REENTRY_HOURS", "SUPSW_REENTRY_TOL_PCT",
+               "SUPSW_RECENT_HOURS", "SUPSW_RECENT_ASSET_MIN_PCT", "SUPSW_RECENT_BTC_MIN_PCT",
+               "SUPSW_RES_MIN_PCT", "SUPSW_RES_BUFFER_PCT", "SUPSW_RIDE_MAX_PCT", "SUPSW_RIDE_TRAIL_PCT") and not 0.3 <= value <= 15:
         return False, "entre 0,3 et 15 %"
-    if key in ("SUPSW_ENABLED", "SUPSW_EXIT_REQUIRE_H4_END", "SUPSW_EXIT_LEVEL") and value not in (0, 1):
+    if key in ("SUPSW_ENABLED", "SUPSW_EXIT_REQUIRE_H4_END", "SUPSW_EXIT_LEVEL", "SUPSW_TRAIL_ON", "SUPSW_REENTRY_ON", "SUPSW_BTC_GATE_ON", "SUPSW_RECENT_ON", "SUPSW_RES_FILTER_ON", "SUPSW_RIDE_ON") and value not in (0, 1):
         return False, "1 (oui) ou 0 (non)"
+    if key == "SUPSW_BTC24_MIN" and not -20 <= value <= 20:
+        return False, "entre -20 et 20 %"
+    if key == "SUPSW_BTC_H4_MODE" and value not in (0, 1, 2):
+        return False, "0, 1 ou 2"
+    if key == "SUPSW_TRAIL_LOCK_PCT" and not 0 <= value <= 15:
+        return False, "entre 0 et 15 %"
+    if key == "SUPSW_MAX_TOUCHES" and not 0 <= value <= 50:
+        return False, "entre 0 (aucune limite) et 50"
     if key == "SUPSW_SL_PCT" and not 0.5 <= value <= 15:
         return False, "entre 0,5 et 15 %"
     if key == "SUPSW_TP_PCT" and not 0.3 <= value <= 15:
@@ -1464,8 +1479,14 @@ def _coerce_advanced_value(key: str, value):
         return False, "entre 0 et 3"
     if key == "SUPSW_EXIT_FLOW" and not -1 <= value <= 1:
         return False, "entre -1 et 1"
-    if key in ("TRENDF_ENABLED", "TRENDF_ALLOW_SHORT", "TRENDF_ENTRY_MODE", "TRENDF_EXIT_H4_REVERSE") and value not in (0, 1):
+    if key in ("TRENDF_ENABLED", "TRENDF_ALLOW_SHORT", "TRENDF_ENTRY_MODE", "TRENDF_SCALP_UNIVERSE", "TRENDF_IGNORE_RESERVE", "TRENDF_REQUIRE_H1") and value not in (0, 1):
         return False, "1 (oui) ou 0 (non)"
+    if key in ("TRENDF_EXIT_H4_REVERSE", "TRENDF_EXIT_H1") and value not in (0, 1, 2):
+        return False, "0 (ignoree), 1 (franchement retournee) ou 2 (n est plus dans le sens)"
+    if key == "TRENDF_LOCK_ARM_PCT" and not 0 <= value <= 50:
+        return False, "entre 0 et 50 % (0 = desactive)"
+    if key == "TRENDF_LOCK_GIVEBACK_PCT" and not 5 <= value <= 100:
+        return False, "entre 5 et 100 %"
     if key == "TRENDF_RISK_PCT" and not 0.05 <= value <= 3:
         return False, "entre 0,05 et 3 % du capital"
     if key == "TRENDF_MAX_NOTIONAL_USD" and not 5 <= value <= 300:
@@ -2639,6 +2660,7 @@ def get_entry_diagnostics_all(email: str = Depends(require_user)):
             "blocker_long": blocker_long,
             "blocker_short": blocker_short,
             "scalp": _scalp_diag_line(ticker, state),   # v4.353
+            "scalpc": (lambda: bot.manual.scalp.diag_line(ticker))() if ticker and not str(ticker).startswith("xyz:") else None,   # v4.470 : Scalp crypto
             "fxswing": _fxswing_diag_line(ticker, state),   # v4.361
             "supsw": _supsw_diag_line(ticker, state),       # v4.362
             "trendf": _trendf_diag_line(ticker, state),     # v4.365
@@ -2753,6 +2775,7 @@ class ManualOrderBody(BaseModel):
     ttp_trail_pct: Optional[float] = None
     trigger_price: Optional[float] = None
     trigger_time: Optional[float] = None
+    confirm_pct: Optional[float] = None      # v4.419 : rebond / repli confirme (% depuis le point bas / haut)
     expiry_hours: Optional[float] = None
     require_valid: bool = True
     confirm_live: bool = False
@@ -2767,6 +2790,8 @@ class ManualOrderBody(BaseModel):
     tp1_pct: Optional[float] = None       # v4.404 : TP1 (cloture partielle), le TP devient le TP2
     tp1_close_pct: Optional[float] = None
     tp1_be: Optional[bool] = None
+    be_arm_pct: Optional[float] = None      # v4.445/454 : stop au seuil de rentabilite (tickets Scalp)
+    be_lock_pct: Optional[float] = None
 
 
 class ManualModifyBody(BaseModel):
@@ -2791,13 +2816,17 @@ class ManualModifyBody(BaseModel):
     leverage: Optional[int] = None
     trigger_price: Optional[float] = None
     trigger_time: Optional[float] = None
+    confirm_pct: Optional[float] = None      # v4.419 : rebond / repli confirme
     expiry_hours: Optional[float] = None
+    strategy_source: Optional[str] = None    # v4.487 : ordre programme, changer le type (libre / swing_support / scalp_crypto)
     direction: Optional[str] = None          # v4.401 : ordre programme, changer le sens ("long"/"short")
     mode: Optional[str] = None               # v4.401 : ordre programme, "paper"/"live"
     confirm_live: bool = False
     execution: Optional[str] = None          # v4.402 : critere d'entree d'un ordre programme
     trend_entry: Optional[str] = None        # "" = aucune condition de tendance
     require_valid: Optional[bool] = None
+    be_arm_pct: Optional[float] = None       # v4.455 : stop au seuil de rentabilite (0 = aucun)
+    be_lock_pct: Optional[float] = None
     tp1_price: Optional[float] = None        # v4.404 : position ouverte
     tp1_pct: Optional[float] = None          # v4.404 : ordre programme
     clear_tp1: bool = False
@@ -2817,6 +2846,115 @@ def manual_state(email: str = Depends(require_user)):
     return bot.manual.snapshot()
 
 
+# ── v4.421 — Mode Scalp crypto ──────────────────────────────────────────────
+_SCALP_NUM = {   # cle : (min, max, entier ?)
+    "SCALP_LEVERAGE": (1, 10, True), "SCALP_NOTIONAL_USD": (10, 5000, False), "SCALP_SL_PCT": (0.2, 10, False),
+    "SCALP_TP_PCT": (0.1, 10, False), "SCALP_TOP_N": (3, 40, True), "SCALP_MIN_SCORE": (0, 100, False), "SCALP_SHORT_MIN_SCORE": (0, 100, False), "SCALP_TREND_MODE": (0, 1, True), "SCALP_CONFIRM_BARS": (0, 12, True), "SCALP_NOISE_ATR": (0, 5, False),
+    "SCALP_MIN_ATR15_PCT": (0, 2, False), "SCALP_MIN_ROOM_PCT": (0, 10, False), "SCALP_BREAK_VOL_MULT": (1, 10, False),
+    "SCALP_MAX_CHASE_PCT": (0.05, 3, False), "SCALP_MAX_OPEN": (0, 100, True), "SCALP_MAX_PER_DAY": (0, 500, True),
+    "SCALP_DAILY_LOSS_USD": (0, 10000, False), "SCALP_PAUSE_AFTER_LOSSES": (0, 20, True), "SCALP_PAUSE_MIN": (1, 1440, True),
+    "SCALP_COOLDOWN_MIN": (0, 1440, True), "SCALP_ZONE_COOLDOWN_MIN": (0, 1440, True), "SCALP_SHORT_BTC_BLOCK": (0, 1, True), "SCALP_SHORT_BTC_MAX_PCT": (-2, 3, False), "SCALP_RUN_ENABLED": (0, 1, True), "SCALP_CORR_WINDOW_MIN": (30, 275, True), "SCALP_CORR_HIGH": (0.1, 0.95, False), "SCALP_BREADTH_MIN": (50, 95, True),
+    "SCALP_CORR_DIR_ON": (0, 1, True), "SCALP_CORR_RELSTR_ON": (0, 1, True), "SCALP_CLUSTER_MAX": (0, 20, True), "SCALP_CLUSTER_WINDOW_MIN": (5, 240, True), "SCALP_CLUSTER_RETRACE_PCT": (0, 3, False),
+    "SCALP_DAY_OFFSET_H": (-12, 14, True), "SCALP_COMPOUND_ON": (0, 1, True), "SCALP_SLOTS": (0, 20, True), "SCALP_BETA_SIZE_ON": (0, 1, True), "SCALP_BETA_REF": (0.3, 3, False), "SCALP_BETA_MIN_FACTOR": (0.1, 1, False), "SCALP_BETA_CAP_PCT": (0, 1000, False), "SCALP_DEFENSE_LOSSES": (0, 20, True), "SCALP_DEFENSE_MIN": (5, 720, True), "SCALP_DEFENSE_SOFT": (0, 1, True), "SCALP_ASC_ON": (0, 1, True), "SCALP_ASC_ER_MAX": (0.05, 0.9, False), "SCALP_SLOPE_FILTER_ON": (0, 1, True), "SCALP_SLOPE_BARS": (6, 60, True), "SCALP_SLOPE_MIN_R2": (0, 1, False), "SCALP_ASC_ENTRY_ON": (0, 1, True), "SCALP_ASC_NEAR_LINE_PCT": (0, 3, False), "SCALP_ASC_SL_ON": (0, 1, True), "SCALP_ASC_SL_ATR": (0.5, 5, False), "SCALP_ASC_SL_MAX_PCT": (0.3, 5, False), "SCALP_ASC_CLOSE_STOP_ON": (0, 1, True), "SCALP_ASC_HARD_MULT": (1, 5, False), "SCALP_GOAL_INCLUDE_MANUAL": (0, 1, True), "SCALP_DEFENSE_COUNTER": (0, 1, True), "SCALP_DEFENSE_COUNTER_SIZE_PCT": (10, 100, False), "SCALP_DEFENSE_SIZE_PCT": (10, 100, False), "SCALP_DEFENSE_ROOM_X": (0, 10, False), "SCALP_DEFENSE_SL_ATR": (0, 10, False), "SCALP_DEFENSE_DAY_PCT": (0, 50, False), "SCALP_SLOTS_USE_PCT": (5, 100, False), "SCALP_CAPITAL_USD": (10, 100000, False), "SCALP_COMPOUND_PCT": (10, 300, False), "SCALP_CAPITAL_FROM_HL": (0, 1, True), "SCALP_CAPITAL_CAP_USD": (0, 1000000, False),
+    "SCALP_GOAL_PCT": (0, 50, False), "SCALP_GOAL_STOP_ALL": (0, 1, True), "SCALP_SAFE_WINDOW": (5, 100, True), "SCALP_SAFE_MIN_TRADES": (3, 100, True),
+    "SCALP_SAFE_MIN_WINRATE": (30, 100, False), "SCALP_SAFE_REBOND_ONLY": (0, 1, True), "SCALP_SAFE_MAX_SCORE": (0, 100, False), "SCALP_SAFE_MIN_TOUCHES": (0, 10, True), "SCALP_SAFE_MIN_ROOM_PCT": (0, 10, False),
+    "SCALP_CORR_SIZE_PCT": (10, 100, True), "SCALP_PEER_MIN": (0, 5, True), "SCALP_PEER_WINDOW_MIN": (5, 120, True), "SCALP_CORR_BASKET_EXIT_ON": (0, 1, True),
+    "SCALP_BASKET_EXIT_PCT": (50, 100, True), "SCALP_RUN_TRAIL_PCT": (0.05, 5, False), "SCALP_BE_ENABLED": (0, 1, True), "SCALP_FLOW_ALL_ON": (0, 1, True), "SCALP_FLOW_ALL_MIN": (0.5, 0.9, False), "SCALP_FLOW_ALL_MIN_TRADES": (5, 500, True), "SCALP_RETEST_ON": (0, 1, True), "SCALP_RETEST_BARS": (1, 24, True), "SCALP_RETEST_TOL_ATR": (0.05, 2, False), "SCALP_RETEST_BOUNCE_ATR": (0.05, 2, False), "SCALP_PEER_CORR_ONLY": (0, 1, True), "SCALP_BE_ARM_PCT": (0.1, 5, False), "SCALP_BE_LOCK_PCT": (0, 1, False), "SCALP_COUNTER_ENABLED": (0, 1, True), "SCALP_COUNTER_MIN_SCORE": (0, 100, False),
+    "SCALP_COUNTER_FLOW_MIN": (0.5, 0.95, False), "SCALP_COUNTER_MIN_TRADES": (5, 1000, True), "SCALP_MAX_HOLD_MIN": (0, 1440, True),
+}
+
+
+class ScalpConfigBody(BaseModel):
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None            # "paper" / "live"
+    confirm_live: bool = False
+    hours_utc: Optional[str] = None
+    values: Optional[dict] = None
+    reset_capital: bool = False           # v4.460 : le capital compose repart du capital de depart, a partir de maintenant
+
+
+@app.get("/api/scalp")
+def scalp_status(email: str = Depends(require_user)):
+    out = bot.manual.scalp.snapshot()
+    out["config"] = {k: cfg.get(k) for k in list(_SCALP_NUM) + ["SCALP_HOURS_UTC", "SCALP_ENABLED", "SCALP_MODE"]}
+    out["live_available"] = bot.exchange is not None
+    return out
+
+
+@app.get("/api/scalp/corr-btc")
+def scalp_corr_btc(refresh: int = 0, email: str = Depends(require_user)):
+    """v4.478 : correlation de chaque actif du Scalp avec BTC (rendements 1 h)."""
+    return bot.manual.scalp.corr_btc(force=bool(refresh))
+
+
+@app.post("/api/scalp/config")
+def scalp_config(body: ScalpConfigBody, email: str = Depends(require_user)):
+    import scalp_crypto as _sc
+    if body.mode is not None:
+        if body.mode not in ("paper", "live"):
+            raise HTTPException(400, "Mode invalide (paper ou live).")
+        if body.mode == "live":
+            if not body.confirm_live:
+                raise HTTPException(400, "Confirmation LIVE requise.")
+            if bot.exchange is None:
+                raise HTTPException(400, "Connexion Hyperliquid indisponible : le live est impossible pour le moment.")
+        _apply_and_persist("SCALP_MODE", body.mode)
+        bot.manual.scalp._stats_cache = (0, None, None)
+        bot.manual.scalp.paused_until = 0
+    if body.enabled is not None:
+        _apply_and_persist("SCALP_ENABLED", 1 if body.enabled else 0)
+    if body.hours_utc is not None:
+        txt = body.hours_utc.strip()
+        if txt and not _sc.parse_hours(txt):
+            raise HTTPException(400, "Tranches horaires invalides (exemple : 7-11,13-21, heures UTC).")
+        _apply_and_persist("SCALP_HOURS_UTC", txt)
+    for k, v in (body.values or {}).items():
+        if k not in _SCALP_NUM:
+            raise HTTPException(400, f"Reglage inconnu : {k}")
+        lo, hi, as_int = _SCALP_NUM[k]
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{k} : nombre attendu.")
+        if not lo <= x <= hi:
+            raise HTTPException(400, f"{k} : entre {lo} et {hi}.")
+        _apply_and_persist(k, int(round(x)) if as_int else x)
+    if body.reset_capital:
+        _apply_and_persist("SCALP_COMPOUND_SINCE", time.time())
+    bot.manual.scalp._rows_cache = (0, None, None)
+    bot.manual.scalp._rec_cache = (0, None, None)
+    bot.manual.scalp._uni_ts = 0
+    return scalp_status(email)
+
+
+class ManualHistDeleteBody(BaseModel):
+    ids: List[int]
+
+
+@app.post("/api/manual/history/delete")
+def manual_history_delete(body: ManualHistDeleteBody, email: str = Depends(require_user)):
+    """v4.426 — supprime de l historique du Trading manuel les elements termines selectionnes (jamais une position ouverte)."""
+    if not body.ids:
+        raise HTTPException(400, "Aucun element selectionne.")
+    if len(body.ids) > 1000:
+        raise HTTPException(400, "Trop d elements a la fois (1000 au maximum).")
+    n = db.manual_delete_finished(body.ids)
+    try:
+        bot.manual.scalp._stats_cache = (0, None, None)      # les statistiques du Scalp sont recalculees depuis cet historique
+    except Exception:
+        pass
+    return {"deleted": n}
+
+
+@app.post("/api/manual/history/import-hl")
+def manual_history_import_hl(days: int = 10, email: str = Depends(require_user)):
+    """v4.443 — compare l historique Live du bot aux remplissages Hyperliquid et ajoute les trades manquants."""
+    try:
+        return bot.manual.import_missing_from_hl(max(1, min(int(days), 30)))
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/manual/leverage-check")
 def manual_leverage_check(email: str = Depends(require_user)):
     """v4.414 — diagnostic du levier reel (ce que renvoie Hyperliquid) + alignement immediat du suivi."""
@@ -2826,7 +2964,20 @@ def manual_leverage_check(email: str = Depends(require_user)):
 @app.get("/api/manual/proposal")
 def manual_proposal(strategy: str, ticker: str, direction: str, market: str = "perp",
                     email: str = Depends(require_user)):
-    return _manual_call(bot.manual.propose, strategy, _norm_ticker(ticker), direction, market)
+    t = _norm_ticker(ticker)
+    p = _manual_call(bot.manual.propose, strategy, t, direction, market)
+    try:       # v4.417 : levier maximal Hyperliquid de l actif, affiche sur le ticket
+        if isinstance(p, dict) and market != "spot":
+            p["max_leverage"] = bot.manual._asset_max_leverage(t)
+    except Exception:
+        pass
+    return p
+
+
+@app.get("/api/manual/preset")
+def manual_preset(preset: str, ticker: str, direction: str, market: str = "perp", email: str = Depends(require_user)):
+    """v4.455 — reglages par defaut d un mode, applicables a un ticket / ordre programme / position."""
+    return _manual_call(bot.manual.preset, preset, _norm_ticker(ticker), direction, market)
 
 
 @app.post("/api/manual/orders")
@@ -2856,7 +3007,7 @@ def manual_modify(item_id: int, body: ManualModifyBody, email: str = Depends(req
         changes["tp_price"] = body.tp_price
     if not body.clear_tp and body.tp_pct:
         changes["tp_pct"] = body.tp_pct
-    for _k in ("sl_pct", "notional_usd", "leverage", "trigger_price", "trigger_time", "expiry_hours", "direction", "mode"):
+    for _k in ("sl_pct", "notional_usd", "leverage", "trigger_price", "trigger_time", "confirm_pct", "expiry_hours", "direction", "mode", "be_arm_pct", "be_lock_pct"):
         if getattr(body, _k) is not None:
             changes[_k] = getattr(body, _k)
     if body.clear_ttp:
@@ -2888,6 +3039,8 @@ def manual_modify(item_id: int, body: ManualModifyBody, email: str = Depends(req
         changes["tp1_close_pct"] = body.tp1_close_pct
     if body.tp1_be is not None:
         changes["tp1_be"] = body.tp1_be
+    if body.strategy_source:
+        changes["strategy_source"] = body.strategy_source
     if body.execution:
         changes["execution"] = body.execution
     if body.trend_entry is not None:
@@ -2923,6 +3076,19 @@ def asset_summary_ep(ticker: str, email: str = Depends(require_user)):
         return bot.manual.asset_summary(t)
     except Exception as e:
         return {"ok": False, "why": f"{type(e).__name__}: {e}"}
+
+
+class ManualResizeBody(BaseModel):
+    action: str                         # "add" ou "reduce"
+    notional_usd: Optional[float] = None
+    pct: Optional[float] = None         # reduce : pourcentage de la position
+    confirm_live: bool = False
+
+
+@app.post("/api/manual/positions/{item_id}/resize")
+def manual_resize(item_id: int, body: ManualResizeBody, email: str = Depends(require_user)):
+    """v4.458 — ajoute a une position ouverte ou la reduit (paper et live)."""
+    return _manual_call(bot.manual.resize, item_id, body.action, body.notional_usd, body.pct, body.confirm_live)
 
 
 @app.post("/api/manual/positions/{item_id}/close")
@@ -3816,7 +3982,7 @@ def _supsw_diag_line(ticker, state):
 def _trendf_diag_line(ticker, state):
     """Ligne du diagnostic par actif pour le module Tendance (None si non concerne)."""
     try:
-        if not cfg.get("TRENDF_ENABLED", 0) or ticker not in cfg.get("TRENDF_SYMBOLS", ["BTC", "ETH", "HYPE", "TAO", "SUI", "PAXG", "xyz:EUR", "xyz:JPY"]):
+        if not cfg.get("TRENDF_ENABLED", 0) or ticker not in bot._trendf_symbols():
             return None
         sn = getattr(state, "trendf_snapshot", None)
         if not sn:
@@ -4128,6 +4294,36 @@ def _supsw_stats(events, fee, sl_pct, tp_pct):
             "exits": exits, "real": real, "breakeven_tp_rate": breakeven}
 
 
+class SupSymbolsBody(BaseModel):
+    symbols: List[str]
+
+
+def _supsw_available_symbols():
+    fx = set(cfg.get("FOREX_SYMBOLS", []))
+    return sorted({be.ticker_from_slot_key(s) for s in cfg.get("SYMBOLS", [])
+                   if be.ticker_from_slot_key(s) not in fx and ":" not in be.ticker_from_slot_key(s)})
+
+
+@app.get("/api/supsw/symbols")
+def supsw_symbols_get(email: str = Depends(require_user)):
+    """v4.452 — actifs evalues par Swing Support (liste modifiable) + actifs disponibles."""
+    return {"symbols": list(cfg.get("SUPSW_SYMBOLS", ["BTC", "ETH", "HYPE", "TAO", "SUI"])), "available": _supsw_available_symbols()}
+
+
+@app.put("/api/supsw/symbols")
+def supsw_symbols_put(body: SupSymbolsBody, email: str = Depends(require_user)):
+    avail = set(_supsw_available_symbols())
+    syms = []
+    for s in body.symbols:
+        s = str(s).strip()
+        if s in avail and s not in syms:
+            syms.append(s)
+    if not syms:
+        raise HTTPException(400, "Choisissez au moins un actif.")
+    _apply_and_persist("SUPSW_SYMBOLS", syms)
+    return {"ok": True, "symbols": syms}
+
+
 @app.get("/api/supsw/status")
 def supsw_status(email: str = Depends(require_user)):
     open_pos, assets = [], []
@@ -4209,7 +4405,7 @@ def supsw_export(days: int = Query(60, ge=1, le=120), email: str = Depends(requi
             "zone_low", "zone_high", "zone_touches", "held", "pierce_pct", "price", "entry_ref", "sl", "tp", "inval", "risk_pct", "reward_pct", "decision",
             "trade_uid", "evaluated", "outcome", "hit_h", "mfe24", "mae24", "mfe72", "mae72", "fin24", "fin72", "exit_ts", "exit_price",
             "exit_reason", "early_exit", "pnl_pct", "hold_h", "flow_exit", "h4_intact_exit", "d1_trend_exit", "post_eval", "fin1h", "fin4h", "fin24h",
-            "after_outcome", "after_hit_h", "after_mfe", "after_mae", "too_early", "alerts_max", "alerts_exit", "alerts_json", "btc_chg24", "btc_h4", "h4_trend", "peak_pct", "trail_armed", "res_low", "res_dist_pct", "chg_recent", "btc_chg_recent"]
+            "after_outcome", "after_hit_h", "after_mfe", "after_mae", "too_early", "alerts_max", "alerts_exit", "alerts_json", "btc_chg24", "btc_h4", "h4_trend", "peak_pct", "trail_armed", "res_low", "res_dist_pct", "chg_recent", "btc_chg_recent", "pente_atr", "pente_pct", "pente_r2", "lig_sup_dist_pct", "lig_sup_pente_pct", "lig_res_dist_pct", "lig_res_pente_pct", "canal_pct"]
     w.writerow(["cloture du signal (UTC)"] + cols)
     for e in ev:
         row = [datetime.fromtimestamp(e["signal_t"] / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")]
@@ -4227,7 +4423,8 @@ def supsw_export(days: int = Query(60, ge=1, le=120), email: str = Depends(requi
 # ───────────────── v4.365 — TENDANCE CONFIRMEE (paper) : suivi, statistiques, export ─────────────────
 _TRENDF_KEYS = ("TRENDF_ALLOW_SHORT", "TRENDF_RISK_PCT", "TRENDF_MAX_NOTIONAL_USD", "TRENDF_LEVERAGE", "TRENDF_MAX_TRADES", "TRENDF_STOP_ATR",
                 "TRENDF_MIN_STOP_PCT", "TRENDF_MAX_STOP_PCT", "TRENDF_ENTRY_MODE", "TRENDF_BREAK_BARS", "TRENDF_MIN_FLOW", "TRENDF_MAX_EXT_ATR",
-                "TRENDF_MAX_SPREAD_PCT", "TRENDF_MAX_HOLD_DAYS", "TRENDF_COOLDOWN_SEC", "TRENDF_EXIT_H4_REVERSE")
+                "TRENDF_MAX_SPREAD_PCT", "TRENDF_MAX_HOLD_DAYS", "TRENDF_COOLDOWN_SEC", "TRENDF_EXIT_H4_REVERSE",
+                "TRENDF_SCALP_UNIVERSE", "TRENDF_IGNORE_RESERVE", "TRENDF_REQUIRE_H1", "TRENDF_EXIT_H1", "TRENDF_LOCK_ARM_PCT", "TRENDF_LOCK_GIVEBACK_PCT")
 
 
 def _trendf_est(e, fee):
@@ -4307,7 +4504,7 @@ def trend_status(email: str = Depends(require_user)):
                              "moved": bool(tf.get("moved")), "d1": tf.get("d1"), "h4": tf.get("h4"), "ctx": tf.get("ctx"),
                              "flow_entry": tf.get("flow_entry"), "ext_atr": tf.get("ext_atr"),
                              "age_h": round((time.time() - tf.get("opened_ts", time.time())) / 3600, 1)})
-    syms = cfg.get("TRENDF_SYMBOLS", ["BTC", "ETH", "HYPE", "TAO", "SUI", "PAXG", "xyz:EUR", "xyz:JPY"])
+    syms = bot._trendf_symbols()
     for sk, st in list(bot.states.items()):
         tk = be.ticker_from_slot_key(sk)
         if tk in syms:
@@ -4354,7 +4551,7 @@ def trend_export(days: int = Query(60, ge=1, le=120), email: str = Depends(requi
     cols = ["asset", "side", "d1_trend", "h4_trend", "weekly_trend", "btc_trend", "funding_ann", "flow", "atr_pct", "ext_atr", "hour_utc", "price",
             "entry_ref", "sl", "risk_pct", "entry_mode", "decision", "trade_uid", "evaluated", "outcome", "hit_h", "mfe24", "mae24", "mfe72",
             "mae72", "fin24", "fin72", "exit_ts", "exit_price", "exit_reason", "pnl_pct", "hold_h", "peak_pct", "d1_trend_exit", "h4_trend_exit",
-            "post_eval", "fin1h", "fin4h", "fin24h", "after_mfe", "after_mae"]
+            "post_eval", "fin1h", "fin4h", "fin24h", "after_mfe", "after_mae", "pente_atr", "pente_pct", "pente_r2", "lig_sup_dist_pct", "lig_sup_pente_pct", "lig_res_dist_pct", "lig_res_pente_pct", "canal_pct"]
     w.writerow(["cloture du signal (UTC)"] + cols)
     for e in ev:
         row = [datetime.fromtimestamp(e["signal_t"] / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")]
@@ -5275,7 +5472,8 @@ _HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.htm
 @app.get("/", response_class=HTMLResponse)
 def index():
     with open(_HTML_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+        # v4.464 : jamais de copie en cache de la page (sinon une ancienne interface peut rester affichee apres un deploiement)
+        return HTMLResponse(content=f.read(), headers={"Cache-Control": "no-store, max-age=0"})
 
 
 # ── v4.372 — application installable sur smartphone (PWA) : icones generees en code, aucun fichier a deposer en plus ──
