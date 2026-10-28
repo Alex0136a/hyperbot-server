@@ -183,7 +183,15 @@ def evaluate(c5, c15, c1h, btc_chg, K, flow=None):
     # v4.438 : SHORT interdit tant que BTC monte (variation 1 h > seuil). Appliquer avant le filtre de tendance.
     if K.get("short_btc_block", 1) and btc_chg is not None and btc_chg > K.get("short_btc_max", 0.1):
         n0 = len(cands)
-        cands = [c for c in cands if c["side"] != "short"]
+        soft = float(K.get("short_btc_soft_max", 0) or 0)      # v4.497 : shorts "prudents" tant que BTC monte moderement (rebond sur resistance testee, taille reduite, flux vendeur exige dans _take)
+        keep = []
+        for c_ in cands:
+            if c_["side"] != "short":
+                keep.append(c_)
+            elif soft > K.get("short_btc_max", 0.1) and btc_chg <= soft and c_["kind"] == "rebond" and c_["touches"] >= 2:
+                c_["prudent_btc"] = round(btc_chg, 3)
+                keep.append(c_)
+        cands = keep
         if not cands:
             return None, f"short refuse : BTC en hausse ({btc_chg:+.2f} % / 1 h > {K.get('short_btc_max', 0.1):+.2f} %)" if n0 else "aucun signal"
     if K.get("trend_mode", 1):
@@ -347,7 +355,7 @@ class ScalpEngine:
                 "min_score": float(c.get("SCALP_MIN_SCORE", 0)),
                 "min_score_short": float(c.get("SCALP_SHORT_MIN_SCORE", 62)),
                 "trend_mode": int(c.get("SCALP_TREND_MODE", 1)),
-                "short_btc_block": int(c.get("SCALP_SHORT_BTC_BLOCK", 1)), "short_btc_max": float(c.get("SCALP_SHORT_BTC_MAX_PCT", 0.1)),
+                "short_btc_block": int(c.get("SCALP_SHORT_BTC_BLOCK", 1)), "short_btc_max": float(c.get("SCALP_SHORT_BTC_MAX_PCT", 0.1)), "short_btc_soft_max": float(c.get("SCALP_SHORT_BTC_SOFT_MAX_PCT", 0.4)),
                 "counter_enabled": int(c.get("SCALP_COUNTER_ENABLED", 1)), "counter_min_score": float(c.get("SCALP_COUNTER_MIN_SCORE", 65)),
                 "counter_flow": float(c.get("SCALP_COUNTER_FLOW_MIN", 0.58)), "counter_min_trades": int(c.get("SCALP_COUNTER_MIN_TRADES", 30)),
                 "flow_all_on": int(c.get("SCALP_FLOW_ALL_ON", 0)), "flow_all_min": float(c.get("SCALP_FLOW_ALL_MIN", 0.52)),
@@ -1429,6 +1437,27 @@ class ScalpEngine:
         if why_goal:
             self._ev("refus", t, f"{sig['kind']} {sig['side']} refusé : {why_goal}")
             return
+        prud = sig.get("prudent_btc")
+        if prud is not None:      # v4.497 : short pris alors que BTC monte -> flux vendeur exige
+            fb_ = (sig.get("ctx") or {}).get("flow_buy")
+            fmin = float(c.get("SCALP_SHORT_BTC_SOFT_FLOW", 55) or 0) / 100.0
+            if fb_ is None or (1.0 - fb_) < fmin:
+                self._ev("refus", t, f"rebond short refusé : BTC en hausse ({prud:+.2f} % / 1 h), flux vendeur insuffisant ({'inconnu' if fb_ is None else f'{(1.0 - fb_) * 100:.0f} %'} de ventes agressives, il en faut ≥ {fmin * 100:.0f} %)")
+                return
+        if not int(c.get("SCALP_BREAKOUT_ON", 1)) and sig.get("kind") == "cassure":      # v4.493 : cassures coupees (paper et live)
+            self._ev("refus", t, "cassure " + sig["side"] + " refusée : cassures désactivées (SCALP_BREAKOUT_ON = 0)")
+            return
+        if int(c.get("SCALP_ASSET_BLOCK_ON", 0)):          # v4.493 : actif en mauvaise passe (sur ses derniers trades) mis de cote
+            rec = self._asset_record(mode).get(t)
+            mn, wr = int(float(c.get("SCALP_ASSET_BLOCK_MIN_TRADES", 15))), float(c.get("SCALP_ASSET_BLOCK_WINRATE", 42))
+            if rec and rec[0] >= mn and rec[1] < wr and rec[2] < 0:
+                hrs = float(c.get("SCALP_ASSET_BLOCK_HOURS", 24) or 0)      # v4.495 : un actif ecarte ne trade plus donc sa serie ne bouge plus : essai apres N heures
+                last = next((float(d.get("closed_at") or 0) for d in self._closed_rows(mode) if d.get("ticker") == t), 0)
+                if hrs > 0 and last and time.time() - last >= hrs * 3600:
+                    rec = None
+            if rec and rec[0] >= mn and rec[1] < wr and rec[2] < 0:
+                self._ev("refus", t, f"{sig['kind']} {sig['side']} refusé : {t} en mauvaise passe ({rec[1]:.0f} % de réussite, {rec[2]:+.2f} $ sur ses {rec[0]} derniers trades ; seuil {wr:g} %)")
+                return
         asc = None
         if int(c.get("SCALP_ASC_ON", 1)):          # v4.490 : ascenseur + pente (paper et live)
             why_asc, asc = self._asc_eval(t, sig)
@@ -1465,6 +1494,8 @@ class ScalpEngine:
         sp = float(c.get("SCALP_CORR_SIZE_PCT", 100))
         if reg.get("label") == "correle" and 0 < sp < 100:      # v4.442 : marche correle = un seul pari ; on reduit la taille de chaque ligne
             notional = max(notional * sp / 100.0, 10.5 if mode == "live" else 1.0)
+        if sig.get("prudent_btc") is not None:      # v4.497 : taille reduite pour un short a contre-courant de BTC
+            notional = max(notional * max(0.1, min(1.0, float(c.get("SCALP_SHORT_BTC_SOFT_SIZE_PCT", 50) or 50) / 100.0)), 10.5 if mode == "live" else 1.0)
         notional, why_beta = self.beta_adjust(t, sig["side"], notional, mode)      # v4.479 : options beta (taille, plafond d exposition)
         if why_beta:
             self._ev("refus", t, f"{sig['kind']} {sig['side']} refusé : {why_beta}")
@@ -1482,7 +1513,7 @@ class ScalpEngine:
                 notional = max(notional * sl_soft / new_sl, 10.5 if mode == "live" else 1.0)
                 asc["rules"].append(f"stop élargi {sl_soft:g} % → {new_sl:.2f} % (bruit ATR 5 min {a5p:.2f} %), taille réduite")
                 sl_soft = new_sl
-        if int(c.get("SCALP_ASC_CLOSE_STOP_ON", 1)):
+        if int(c.get("SCALP_ASC_CLOSE_STOP_ON", 1)) and (bool(asc and asc.get("asc")) or not int(c.get("SCALP_ASC_CLOSE_STOP_ASC_ONLY", 1))):      # v4.496 : stop sur cloture seulement en ascenseur
             sl_hard = min(sl_soft * float(c.get("SCALP_ASC_HARD_MULT", 2.0)), 50.0)
             if asc is not None:
                 asc["rules"].append(f"stop sur clôture 5 min (secours {sl_hard:.2f} %)")
@@ -1510,11 +1541,14 @@ class ScalpEngine:
                 if it is not None:
                     it["scalp"] = {"kind": sig["kind"], "score": sig["score"], "level": sig["level"], "room": round(sig["room"], 2),
                                    "reasons": sig["reasons"], "volume_ratio": round(sig["volume_ratio"], 2),
-                                   "atr15_pct": round(sig["atr15_pct"], 3), "atr5_pct": (round(sig["atr5"] / sig["price"] * 100, 3) if sig.get("atr5") and sig.get("price") else None), "counter": bool(sig.get("counter")),
+                                   "atr15_pct": round(sig["atr15_pct"], 3), "atr5_pct": (round(sig["atr5"] / sig["price"] * 100, 3) if sig.get("atr5") and sig.get("price") else None), "counter": bool(sig.get("counter")), "prudent_btc": sig.get("prudent_btc"),
                                    "regime": {"label": reg.get("label", "inconnu"), "corr": reg.get("corr"), "up": reg.get("up"), "down": reg.get("down"),
                                               "basket30": reg.get("basket30"), "rel30": (round(reg["ch30"].get(t, 0) - reg["basket30"], 3) if reg.get("ch30") and reg.get("basket30") is not None else None),
                                               "cluster": cluster_before, "peers": sig.get("peers")},
-                                   "ctx": sig.get("ctx"), "retest": bool(sig.get("retest")), "tq": self._trend_quality(t, reg)}
+                                   "ctx": sig.get("ctx"), "retest": bool(sig.get("retest")), "tq": self._trend_quality(t, reg),
+                                   "touches": sig.get("touches"),      # v4.493 : mesures de la zone horizontale (aucun effet sur les decisions)
+                                   "zone_width_pct": (round((sig["zone"][1] - sig["zone"][0]) / sig["price"] * 100, 3) if sig.get("zone") and sig.get("price") else None),
+                                   "dist_level_pct": (round((sig["price"] / sig["level"] - 1) * 100, 3) if sig.get("level") and sig.get("price") else None)}
                     if asc is not None:
                         it["scalp"]["asc"] = {"er_1m": asc.get("er_1m"), "range_atr": asc.get("range_atr"), "ascenseur": asc.get("asc"),
                                               "pente_veto_atr": asc.get("pente_veto_atr"), "pente_veto_r2": asc.get("pente_veto_r2"), "pente_veto_bars": asc.get("pente_veto_bars"),

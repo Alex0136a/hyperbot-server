@@ -1496,3 +1496,31 @@ Toutes les règles ci-dessous s'appliquent de la même façon en paper et en liv
 - `SCALP_ASC_ER_MAX` : 0,25 → **0,08** (va-et-vient nettement plus marqués que le hasard).
 - `SCALP_ASC_NEAR_LINE_PCT` : 0,5 → **0** (0 = mesure seule : l'écart à la ligne inclinée est enregistré dans `regles_asc` mais ne refuse plus). Une valeur > 0 rétablit le refus.
 - Paper et live identiques. Aucun autre changement.
+
+## v4.493 — Scalp : audit, interrupteur cassures, actifs en mauvaise passe, mesures de la zone
+- Audit (401 trades paper, 19→28/10) : brut +9,41 $, frais 26,70 $, net −17,29 $. Sorties « durée maximale » : 91 trades, −21,8 $ (62 avaient atteint +0,2 % au plus haut). Cassures : 84 trades, −10,6 $ net. Note ≥ 80 : 172 trades, −14,3 $.
+- `SCALP_BREAKOUT_ON` (1 par défaut = inchangé) : 0 = seuls les rebonds sont pris (paper et live).
+- `SCALP_ASSET_BLOCK_ON` (0 par défaut) : met de côté un actif si, sur ses `SCALP_SAFE_WINDOW` derniers trades (20), au moins `SCALP_ASSET_BLOCK_MIN_TRADES` (15) sont fermés, la réussite est sous `SCALP_ASSET_BLOCK_WINRATE` (42 %) et le net est négatif. L'actif revient tout seul quand sa série s'améliore.
+- Sortie anticipée sur la durée : pas de nouveau code, le stop au seuil de rentabilité existe déjà (`SCALP_BE_ENABLED` = 1, `SCALP_BE_ARM_PCT` = 0,25, `SCALP_BE_LOCK_PCT` = 0,1).
+- Mesures seules (aucun effet sur les décisions), ajoutées au CSV de l'historique : `room_pct`, `zone_touches`, `zone_largeur_pct`, `dist_niveau_pct`, `volume_ratio`.
+- Recherche d'un filtre sur la base existante (apprentissage 19→22/10, test 23→28/10) : aucun seuil sur les mesures enregistrées (flux, BTC, tendances H1/15 min, efficacités, note) ne tient sur les deux périodes. Les lignes obliques et les zones n'étaient pas enregistrées avant la v4.489.
+
+## v4.494 — Scalp : trois règles de l'audit activées par défaut (paper et live)
+- `SCALP_BE_ENABLED` = 1, `SCALP_BE_ARM_PCT` = 0,25 (`SCALP_BE_LOCK_PCT` = 0,1 inchangé) : stop au seuil de rentabilité dès +0,25 % de gain maximal.
+- `SCALP_ASSET_BLOCK_ON` = 1 : actif mis de côté quand sa série récente est mauvaise (réussite < 42 %, net négatif, 15 trades minimum sur 20).
+- `SCALP_BREAKOUT_ON` = 0 : seuls les rebonds sont pris.
+- Les réglages déjà enregistrés par l'utilisateur gardent la priorité sur ces défauts.
+
+## v4.495 — Actifs en mauvaise passe : essai après 24 h
+- Correction de la v4.493 : un actif écarté ne trade plus, donc sa série récente ne change plus et il restait écarté indéfiniment. `SCALP_ASSET_BLOCK_HOURS` (24 par défaut, 0 = jamais d'essai) autorise un trade d'essai quand le dernier trade de l'actif date de plus de N heures ; si l'essai est perdant, l'actif est de nouveau écarté.
+
+## v4.496 — Stop sur clôture 5 min : seulement en ascenseur
+- Le stop sur clôture 5 min (v4.490) s'appliquait à tous les trades Scalp : stop de secours à 2 × le stop normal (1 % au lieu de 0,5 %). Cas TAO #553 (28/10 17:21) : trade jamais positif (pic de gain 0,02 %), baisse de −1,04 % en 9 minutes, sortie au stop de secours (−1,00 %, −0,87 $ net) au lieu de −0,5 %.
+- Nouveau réglage `SCALP_ASC_CLOSE_STOP_ASC_ONLY` = 1 (défaut) : le stop sur clôture ne s'applique qu'aux trades pris en ascenseur ; les autres gardent le stop classique `SCALP_SL_PCT`. 0 rétablit le comportement v4.490–v4.495.
+- Paper et live identiques. Les trades déjà ouverts ne changent pas.
+
+## v4.497 — Shorts prudents quand BTC monte modérément (paper et live)
+- Constat (journal du 28/10, 12h35–14h10) : 10 shorts refusés par « BTC en hausse > +0,10 % / 1 h », alors que ce sont les moments où se présentent les rebonds sur résistance.
+- `SCALP_SHORT_BTC_SOFT_MAX_PCT` = 0,4 (0 = désactivé) : entre +0,10 % et +0,40 %, un short est admis seulement s'il s'agit d'un rebond sur une résistance testée au moins 2 fois. Le blocage normal reste total au-dessus de +0,40 %.
+- Prudence : taille réduite à `SCALP_SHORT_BTC_SOFT_SIZE_PCT` = 50 % ; flux vendeur d'au moins `SCALP_SHORT_BTC_SOFT_FLOW` = 55 % de ventes agressives ; les autres filtres (tendance, objectif, ascenseur, actif en mauvaise passe) s'appliquent comme d'habitude.
+- Le CSV de l'historique gagne `short_prudent_btc` (variation de BTC au moment de l'entrée) pour comparer ces shorts aux autres.
